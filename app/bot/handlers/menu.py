@@ -195,6 +195,17 @@ async def nav_del_seller(cb: CallbackQuery):
 
 
 @router.callback_query(kb.SellerCB.filter(F.action == "del"))
+async def del_seller_ask(cb: CallbackQuery, callback_data: kb.SellerCB):
+    if await _deny_if_not_owner(cb):
+        return
+    async with Session() as s:
+        sl = await repo.get_seller(s, callback_data.sid)
+    name = sl.name if sl and sl.name else callback_data.sid
+    await _edit(cb, f"Точно удалить «{esc(name)}»?", kb.seller_delete_confirm(callback_data.sid))
+    await cb.answer()
+
+
+@router.callback_query(kb.SellerCB.filter(F.action == "delc"))
 async def del_seller_do(cb: CallbackQuery, callback_data: kb.SellerCB):
     if await _deny_if_not_owner(cb):
         return
@@ -252,6 +263,21 @@ async def nav_del_user(cb: CallbackQuery):
 
 
 @router.callback_query(kb.UserCB.filter(F.action == "del"))
+async def del_user_ask(cb: CallbackQuery, callback_data: kb.UserCB):
+    if await _deny_if_not_owner(cb):
+        return
+    if callback_data.uid == settings.owner_id:
+        await cb.answer("Нельзя забрать доступ у владельца", show_alert=True)
+        return
+    await _edit(
+        cb,
+        f"Точно забрать доступ у {callback_data.uid}?",
+        kb.user_delete_confirm(callback_data.uid),
+    )
+    await cb.answer()
+
+
+@router.callback_query(kb.UserCB.filter(F.action == "delc"))
 async def del_user_do(cb: CallbackQuery, callback_data: kb.UserCB):
     if await _deny_if_not_owner(cb):
         return

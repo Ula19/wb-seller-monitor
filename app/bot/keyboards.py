@@ -108,6 +108,22 @@ def sellers_delete_list(sellers):
     return b.as_markup()
 
 
+def seller_delete_confirm(sid: int):
+    b = InlineKeyboardBuilder()
+    _btn(b, "✅", "Да, удалить", SellerCB(action="delc", sid=sid), style="danger", icon="delete")
+    _btn(b, "✖️", "Отмена", Nav(to="del_seller"), icon="cancel")
+    b.adjust(1)
+    return b.as_markup()
+
+
+def user_delete_confirm(uid: int):
+    b = InlineKeyboardBuilder()
+    _btn(b, "✅", "Да, забрать", UserCB(action="delc", uid=uid), style="danger", icon="delete")
+    _btn(b, "✖️", "Отмена", Nav(to="del_user"), icon="cancel")
+    b.adjust(1)
+    return b.as_markup()
+
+
 def sellers_check_list(sellers):
     b = InlineKeyboardBuilder()
     for sl in sellers:
