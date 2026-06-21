@@ -12,7 +12,7 @@ import random
 from curl_cffi.requests import AsyncSession
 
 from app.config import settings
-from app.wb.parser import NormProduct, _price, basket_host, normalize, photo_url
+from app.wb.parser import NormProduct, _price, normalize
 
 log = logging.getLogger(__name__)
 
@@ -52,8 +52,6 @@ class WBClient:
         )
         self._lock = asyncio.Lock()
         self._last = 0.0
-        # кэш vol -> найденный basket-хост (границы плывут)
-        self._basket_cache: dict[int, int] = {}
 
     async def close(self) -> None:
         await self._session.close()
@@ -167,21 +165,6 @@ class WBClient:
                 return r.json()
             except Exception:
                 return None
-        return None
-
-    async def download_photo(self, nm_id: int, pics: int = 1) -> bytes | None:
-        """Скачивает первое фото. При 404 перебирает соседние basket-хосты."""
-        if pics < 1:
-            return None
-        vol = nm_id // 100000
-        primary = self._basket_cache.get(vol, basket_host(nm_id))
-        # перебираем хосты по близости к догадке (границы диапазонов плывут)
-        candidates = sorted(range(1, 31), key=lambda h: (abs(h - primary), h))
-        for h in candidates[:14]:
-            r = await self._get(photo_url(nm_id, host=h))
-            if r and r.status_code == 200 and r.content:
-                self._basket_cache[vol] = h
-                return r.content
         return None
 
 

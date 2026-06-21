@@ -1,9 +1,8 @@
-"""Форматирование сообщений Telegram, Excel и конвертация фото."""
+"""Форматирование сообщений Telegram и Excel."""
 
 import io
 
 from openpyxl import Workbook
-from PIL import Image
 
 from app.emoji import esc, tge
 
@@ -12,17 +11,6 @@ def fmt_price(price: int | None) -> str:
     if price is None:
         return "—"
     return f"{price:,}".replace(",", " ") + " ₽"
-
-
-def webp_to_jpeg(data: bytes) -> bytes | None:
-    """WB отдаёт webp; Telegram стабильнее принимает jpeg."""
-    try:
-        img = Image.open(io.BytesIO(data)).convert("RGB")
-        out = io.BytesIO()
-        img.save(out, format="JPEG", quality=85)
-        return out.getvalue()
-    except Exception:
-        return None
 
 
 def fmt_stock(stock) -> str:

@@ -76,18 +76,9 @@ async def sync_seller(seller: models.Seller, *, silent_seed: bool = False):
 
 async def broadcast_new_item(bot, user_ids, seller, p) -> None:
     caption = reporting.new_item_caption(seller.name or str(seller.supplier_id), p)
-    photo = None
-    raw = await wb_client.download_photo(p.nm_id, p.pics)
-    if raw:
-        jpg = reporting.webp_to_jpeg(raw)
-        if jpg:
-            photo = BufferedInputFile(jpg, filename=f"{p.nm_id}.jpg")
     for uid in user_ids:
         try:
-            if photo:
-                await bot.send_photo(uid, photo, caption=caption, parse_mode="HTML")
-            else:
-                await bot.send_message(uid, caption, parse_mode="HTML")
+            await bot.send_message(uid, caption, parse_mode="HTML")
         except Exception as e:
             log.warning("уведомление (новинка) не доставлено %s: %s", uid, e)
 
