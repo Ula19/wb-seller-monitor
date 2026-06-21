@@ -116,6 +116,15 @@ async def deactivate_missing(s, supplier_id: int, seen_ids: set[int]) -> None:
     )
 
 
+async def count_active_products(s, supplier_id: int) -> int:
+    return await s.scalar(
+        select(func.count()).select_from(models.Product).where(
+            models.Product.supplier_id == supplier_id,
+            models.Product.is_active.is_(True),
+        )
+    ) or 0
+
+
 async def get_active_products(s, supplier_id: int) -> list[models.Product]:
     res = await s.execute(
         select(models.Product)

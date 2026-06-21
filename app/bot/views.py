@@ -25,10 +25,15 @@ async def view_sellers(uid: int):
 async def view_list_sellers():
     async with Session() as s:
         sellers = await repo.list_sellers(s)
+        counts = {
+            sl.supplier_id: await repo.count_active_products(s, sl.supplier_id)
+            for sl in sellers
+        }
     if not sellers:
         return "Список магазинов пуст.", kb.back_kb("sellers")
     text = f"{tge('shop')} Отслеживаемые магазины:\n\n" + "\n".join(
-        f"• {esc(sl.name or '—')} (ID {sl.supplier_id})" for sl in sellers
+        f"• {esc(sl.name or '—')} (ID {sl.supplier_id}) — {counts[sl.supplier_id]} тов."
+        for sl in sellers
     )
     return text, kb.back_kb("sellers")
 

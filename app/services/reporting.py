@@ -4,6 +4,7 @@ import io
 
 from openpyxl import Workbook
 
+from app.config import settings
 from app.emoji import esc, tge
 
 
@@ -11,6 +12,17 @@ def fmt_price(price: int | None) -> str:
     if price is None:
         return "—"
     return f"{price:,}".replace(",", " ") + " ₽"
+
+
+def our_price(price: int | None) -> int | None:
+    """Наша цена = цена ВБ минус our_discount_pct."""
+    if price is None:
+        return None
+    return round(price * (1 - settings.our_discount_pct / 100))
+
+
+def fmt_our(price: int | None) -> str:
+    return fmt_price(our_price(price))
 
 
 def fmt_stock(stock) -> str:
@@ -25,7 +37,8 @@ def hourly_report_text(seller_name: str, products) -> str:
         lines += [
             f"{i}. {esc(p.name)}",
             f"Артикул: {p.nm_id}",
-            f"Цена: {fmt_price(p.price)}",
+            f"Цена ВБ: {fmt_price(p.price)}",
+            f"Наша цена: {fmt_our(p.price)}",
             f"Остаток: {fmt_stock(p.stock)}",
             f"Ссылка: {p.url}",
             "",
@@ -59,7 +72,7 @@ def change_caption(seller_name: str, p, events) -> str:
                 lines.append(f"{tge('stock')} Снова в наличии (остаток {new})")
             else:
                 lines.append(f"{tge('stock')} Закончился (был остаток {old})")
-    lines += ["", "Ссылка:", p.url]
+    lines += [f"Наша цена: {fmt_our(p.price)}", "", "Ссылка:", p.url]
     return "\n".join(lines)
 
 
@@ -69,7 +82,8 @@ def new_item_caption(seller_name: str, p) -> str:
         f"Магазин: {esc(seller_name)}\n\n"
         f"Название: {esc(p.name)}\n\n"
         f"Артикул: {p.nm_id}\n\n"
-        f"Цена: {fmt_price(p.price)}\n\n"
+        f"Цена ВБ: {fmt_price(p.price)}\n"
+        f"Наша цена: {fmt_our(p.price)}\n\n"
         f"Ссылка:\n{p.url}"
     )
 
@@ -79,7 +93,7 @@ def build_excel(seller_name: str, products) -> bytes:
     ws = wb.active
     ws.title = "Товары"
     ws.append(
-        ["Магазин", "Название", "Артикул", "Цена", "Остаток", "Ссылка", "Дата обнаружения"]
+        ["Магазин", "Название", "Артикул", "Цена ВБ", "Наша цена", "Остаток", "Ссылка", "Дата обнаружения"]
     )
     for p in products:
         fs = getattr(p, "first_seen_at", None)
@@ -89,6 +103,7 @@ def build_excel(seller_name: str, products) -> bytes:
                 p.name,
                 p.nm_id,
                 p.price,
+                our_price(p.price),
                 p.stock,
                 p.url,
                 fs.strftime("%Y-%m-%d %H:%M") if fs else "",
