@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     # параметры запросов к WB
     wb_dest: int = -1257786
     wb_spp: int = 30
+    # кука авторизованного аккаунта WB (для кошелёк-цены). Протухает за дни — обновлять.
+    wb_cookie: str = ""
 
     # расписание
     monitor_interval_minutes: int = 10

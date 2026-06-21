@@ -23,10 +23,24 @@ CATALOG_URL = "https://catalog.wb.ru/sellers/v4/catalog"
 SUPPLIER_INFO_URL = "https://static-basket-01.wbbasket.ru/vol0/data/supplier-by-id/{}.json"
 
 
+def _parse_cookie(raw: str) -> dict[str, str]:
+    """Строку 'k=v; k2=v2' из браузера превращаем в словарь для curl_cffi."""
+    out = {}
+    for part in raw.split(";"):
+        part = part.strip()
+        if "=" in part:
+            k, v = part.split("=", 1)
+            out[k.strip()] = v.strip()
+    return out
+
+
 class WBClient:
     def __init__(self) -> None:
+        cookies = _parse_cookie(settings.wb_cookie) if settings.wb_cookie else None
+        if cookies:
+            log.info("WB-клиент: использую куку аккаунта (%d полей)", len(cookies))
         self._session = AsyncSession(
-            headers=HEADERS, impersonate=IMPERSONATE, timeout=20
+            headers=HEADERS, cookies=cookies, impersonate=IMPERSONATE, timeout=20
         )
         self._lock = asyncio.Lock()
         self._last = 0.0
