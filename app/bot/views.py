@@ -59,24 +59,6 @@ async def view_stats():
     return text, kb.back_kb("main")
 
 
-async def run_checknow(bot, user_id: int) -> bool:
-    """Внеочередная синхронизация всех магазинов + отчёт запросившему."""
-    async with Session() as s:
-        sellers = await repo.list_sellers(s)
-    if not sellers:
-        return False
-    for seller in sellers:
-        try:
-            await sync_and_notify(bot, seller)
-        except Exception:
-            pass
-    async with Session() as s:
-        data = [(sl, await repo.get_active_products(s, sl.supplier_id)) for sl in sellers]
-    for seller, products in data:
-        await send_report_to(bot, [user_id], seller, products)
-    return True
-
-
 async def run_checknow_one(bot, user_id: int, supplier_id: int) -> bool:
     """Внеочередная проверка одного магазина + отчёт запросившему."""
     async with Session() as s:

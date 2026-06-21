@@ -57,7 +57,6 @@ def _btn(b: InlineKeyboardBuilder, emoji: str, label: str, cb, *, style=None, ic
 def main_menu(is_owner: bool):
     b = InlineKeyboardBuilder()
     _btn(b, "🏪", "Магазины", Nav(to="sellers"), style="primary", icon="shop")
-    _btn(b, "🔄", "Проверить сейчас", Nav(to="checknow"), style="success", icon="refresh")
     if is_owner:
         _btn(b, "👥", "Пользователи", Nav(to="users"), style="primary", icon="users")
         _btn(b, "📊", "Статистика", Nav(to="stats"), style="primary", icon="stats")

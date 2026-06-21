@@ -25,7 +25,7 @@ async def help_cmd(m: Message):
     text, markup = await views.view_main(m.from_user.id)
     await m.answer(
         f"{tge('info')} Управление — через кнопки ниже.\n"
-        "Команды тоже работают: /menu, /listsellers, /checknow"
+        "Команды тоже работают: /menu, /listsellers"
         " (для админа: /addseller, /removeseller, /grant, /revoke, /users, /stats).\n\n"
         + text,
         reply_markup=markup,

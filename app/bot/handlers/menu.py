@@ -104,17 +104,6 @@ async def nav_stats(cb: CallbackQuery):
     await cb.answer()
 
 
-# ---------- проверить сейчас ----------
-@router.callback_query(kb.Nav.filter(F.to == "checknow"))
-async def nav_checknow(cb: CallbackQuery):
-    await cb.answer()
-    await _edit(cb, f"{tge('clock')} Запускаю внеочередную проверку всех магазинов...", None)
-    ok = await views.run_checknow(cb.bot, cb.from_user.id)
-    text, markup = await views.view_main(cb.from_user.id)
-    msg = f"{tge('ok')} Готово." if ok else "Нет магазинов для проверки."
-    await cb.bot.send_message(cb.from_user.id, msg, reply_markup=markup, parse_mode="HTML")
-
-
 # ---------- проверка выбранного магазина ----------
 @router.callback_query(kb.Nav.filter(F.to == "check_seller"))
 async def nav_check_seller(cb: CallbackQuery):
