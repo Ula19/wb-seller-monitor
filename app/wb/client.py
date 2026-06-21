@@ -118,6 +118,9 @@ class WBClient:
             items = data.get("products") or (data.get("data") or {}).get("products") or []
             if not items:
                 break
+            if settings.debug_raw and page == 1:
+                import json
+                log.info("RAW первый товар: %s", json.dumps(items[0], ensure_ascii=False))
             products.extend(normalize(p, supplier_id) for p in items)
             if len(items) < 100:
                 break

@@ -13,6 +13,8 @@ class Settings(BaseSettings):
     wb_spp: int = 30
     # кука авторизованного аккаунта WB (для кошелёк-цены). Протухает за дни — обновлять.
     wb_cookie: str = ""
+    # временный дебаг: логировать сырой JSON первого товара (смотрим все поля API)
+    debug_raw: bool = False
 
     # расписание
     monitor_interval_minutes: int = 10
