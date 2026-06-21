@@ -67,6 +67,10 @@ async def sync_seller(seller: models.Seller, *, silent_seed: bool = False):
             await s.commit()
         if silent_seed:
             new = []
+    log.info(
+        "sync продавца %s: товаров %d, новых %d, изменений %d",
+        seller.supplier_id, len(fetched), len(new), len(changes),
+    )
     return fetched, new, changes
 
 
@@ -145,11 +149,13 @@ async def monitoring_job(bot) -> None:
     """Лёгкий проход каждые N минут: новинки + изменения цены/наличия."""
     async with Session() as s:
         sellers = await repo.list_sellers(s)
+    log.info("мониторинг: старт, магазинов %d", len(sellers))
     for seller in sellers:
         try:
             await sync_and_notify(bot, seller)
         except Exception as e:
             log.exception("синхронизация %s упала: %s", seller.supplier_id, e)
+    log.info("мониторинг: завершён")
 
 
 async def report_job(bot) -> None:
