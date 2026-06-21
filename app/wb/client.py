@@ -12,7 +12,7 @@ import random
 from curl_cffi.requests import AsyncSession
 
 from app.config import settings
-from app.wb.parser import NormProduct, basket_host, normalize, photo_url
+from app.wb.parser import NormProduct, _price, basket_host, normalize, photo_url
 
 log = logging.getLogger(__name__)
 
@@ -21,6 +21,14 @@ HEADERS = {"Accept-Language": "ru-RU,ru;q=0.9"}
 
 CATALOG_URL = "https://catalog.wb.ru/sellers/v4/catalog"
 SUPPLIER_INFO_URL = "https://static-basket-01.wbbasket.ru/vol0/data/supplier-by-id/{}.json"
+
+# B2B-цены: detail через прокси основного домена (card.wb.ru напрямую даёт 403).
+B2B_DETAIL_URL = "https://www.wildberries.ru/__internal/card/cards/v4/detail"
+B2B_PARAMS = {
+    "appType": 1, "curr": "rub", "dest": -446112, "spp": 30,
+    "hide_vflags": 4294967296, "hide_dflags": 131072, "hide_dtype": "11;13;14;15",
+    "b2b": "true", "mdg": 3, "mtype": 257, "lang": "ru", "ab_testing": "false",
+}
 
 
 def _parse_cookie(raw: str) -> dict[str, str]:
@@ -63,11 +71,11 @@ class WBClient:
                 await asyncio.sleep(wait)
             self._last = loop.time()
 
-    async def _get(self, url, *, params=None, retries=4):
+    async def _get(self, url, *, params=None, headers=None, retries=4):
         for attempt in range(retries):
             await self._throttle()
             try:
-                r = await self._session.get(url, params=params)
+                r = await self._session.get(url, params=params, headers=headers)
             except Exception as e:
                 log.warning("WB сетевая ошибка %s: %s", url, e)
                 await asyncio.sleep(2**attempt)
@@ -124,7 +132,33 @@ class WBClient:
             products.extend(normalize(p, supplier_id) for p in items)
             if len(items) < 100:
                 break
+        if settings.wb_b2b and products:
+            await self._apply_b2b_prices(products)
         return products
+
+    async def _apply_b2b_prices(self, products: list[NormProduct]) -> None:
+        """Заменяет розничные цены на бизнес-цены (b2b detail, батчи по 100)."""
+        ref = {"Referer": "https://www.wildberries.ru/"}
+        prices: dict[int, int] = {}
+        nm_ids = [p.nm_id for p in products]
+        for i in range(0, len(nm_ids), 100):
+            chunk = nm_ids[i:i + 100]
+            params = {**B2B_PARAMS, "nm": ";".join(map(str, chunk))}
+            r = await self._get(B2B_DETAIL_URL, params=params, headers=ref)
+            if r is None or r.status_code != 200:
+                continue
+            try:
+                items = r.json().get("products") or []
+            except Exception:
+                continue
+            for p in items:
+                val = _price(p)
+                if val is not None:
+                    prices[int(p["id"])] = val
+        for p in products:
+            if p.nm_id in prices:
+                p.price = prices[p.nm_id]
+        log.info("b2b цены применены: %d/%d", len(prices), len(products))
 
     async def fetch_supplier_info(self, supplier_id: int) -> dict | None:
         r = await self._get(SUPPLIER_INFO_URL.format(supplier_id))
