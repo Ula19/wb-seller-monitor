@@ -39,11 +39,10 @@ async def main():
         print(r.text[:150]); await wb_client.close(); return
     p = r.json()["products"][0]
     print("nm", p["id"], "|", p.get("name"))
-    print("ключи товара:", sorted(p.keys()))
-    for s in p.get("sizes", []):
-        if s.get("price"):
-            print("price:", json.dumps(s["price"], ensure_ascii=False))
-            break
+    # поля, которые могут отвечать за склад и доставку
+    for k in ("time1", "time2", "wh", "dist", "dtype"):
+        print(f"{k}:", p.get(k))
+    print("ПОЛНЫЙ товар:", json.dumps(p, ensure_ascii=False))
     await wb_client.close()
 
 
