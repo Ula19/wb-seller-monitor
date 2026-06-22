@@ -1,5 +1,6 @@
 """Inline-меню: навигация по callback'ам и пошаговые диалоги (FSM)."""
 
+import asyncio
 import logging
 
 from aiogram import F, Router
@@ -22,6 +23,7 @@ from app.wb.client import wb_client
 
 log = logging.getLogger(__name__)
 router = Router()
+_bg_tasks: set = set()  # ссылки на фоновые задачи загрузки, чтобы их не убил GC
 
 
 async def _edit(cb: CallbackQuery, text: str, markup) -> None:
@@ -226,20 +228,28 @@ async def add_seller_input(m: Message, state: FSMContext):
         await s.commit()
         seller = await repo.get_seller(s, sid)
     status = await m.answer(
-        f"{tge('clock')} Добавляю «{esc(name or sid)}», загружаю ассортимент...",
+        f"{tge('clock')} Магазин «{esc(name or sid)}» добавлен. "
+        "Гружу ассортимент в фоне — для крупных магазинов это несколько минут, "
+        "пришлю как закончу.",
         parse_mode="HTML",
     )
-    try:
-        fetched, _, _ = await sync_seller(seller, silent_seed=True)
-        await status.edit_text(
-            f"{tge('ok')} Магазин «{esc(name or sid)}» добавлен. Товаров: {len(fetched)}.",
-            parse_mode="HTML",
-        )
-    except Exception as e:
-        await status.edit_text(
-            f"{tge('warn')} Магазин добавлен, но загрузка не удалась: {esc(e)}",
-            parse_mode="HTML",
-        )
+    # Грузим в фоне: у крупных продавцов сотни страниц × пауза 3-7с = до 10+ мин.
+    # Хендлер не блокируем, иначе бот выглядит зависшим.
+    async def _seed():
+        try:
+            fetched, _, _ = await sync_seller(seller, silent_seed=True)
+            await status.edit_text(
+                f"{tge('ok')} Магазин «{esc(name or sid)}» загружен. Товаров: {len(fetched)}.",
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            await status.edit_text(
+                f"{tge('warn')} «{esc(name or sid)}»: загрузка не удалась: {esc(e)}",
+                parse_mode="HTML",
+            )
+    task = asyncio.create_task(_seed())
+    _bg_tasks.add(task)  # держим ссылку, иначе задачу может убрать GC
+    task.add_done_callback(_bg_tasks.discard)
     text, markup = await views.view_sellers(m.from_user.id)
     await m.answer(text, reply_markup=markup, parse_mode="HTML")
 
