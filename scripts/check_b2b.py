@@ -15,14 +15,14 @@ import sys
 from app.config import settings
 from app.wb.client import wb_client
 
-NM = sys.argv[1] if len(sys.argv) > 1 else "1166248655"
+NMS = sys.argv[1:] or ["1166248655"]
 URL = "https://www.wildberries.ru/__internal/card/cards/v4/detail"
 # параметры точно как у браузера на бизнес-странице
 PARAMS = {
     "appType": 1, "curr": "rub", "dest": -446112, "spp": 30,
     "hide_vflags": 4294967296, "hide_dflags": 131072, "hide_dtype": "11;13;14;15",
     "b2b": "true", "mdg": 3, "mtype": 257, "lang": "ru", "ab_testing": "false",
-    "nm": NM,
+    "nm": ";".join(NMS),
 }
 
 
@@ -37,12 +37,16 @@ async def main():
     print("статус:", r.status_code)
     if r.status_code != 200:
         print(r.text[:150]); await wb_client.close(); return
-    p = r.json()["products"][0]
-    print("nm", p["id"], "|", p.get("name"))
-    # поля, которые могут отвечать за склад и доставку
-    for k in ("time1", "time2", "wh", "dist", "dtype"):
-        print(f"{k}:", p.get(k))
-    print("ПОЛНЫЙ товар:", json.dumps(p, ensure_ascii=False))
+    for p in r.json().get("products") or []:
+        sizes = p.get("sizes") or []
+        size = sizes[0] if sizes else {}
+        stock = (size.get("stocks") or [{}])[0]
+        print("=" * 40)
+        print("nm", p["id"], "|", p.get("name"))
+        # верхний уровень + stock — где-то лежит признак склада
+        for k in ("time1", "time2", "wh", "dist", "dtype"):
+            print(f"  top.{k}:", p.get(k), "| stock.{}:".format(k), stock.get(k))
+        print("  supplierFlags:", p.get("supplierFlags"))
     await wb_client.close()
 
 
