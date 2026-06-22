@@ -136,7 +136,7 @@ async def get_active_products(s, supplier_id: int) -> list[models.Product]:
             models.Product.supplier_id == supplier_id,
             models.Product.is_active.is_(True),
         )
-        .order_by(models.Product.first_seen_at.desc())
+        .order_by(func.lower(models.Product.name))  # по названию: похожие товары рядом
     )
     return list(res.scalars().all())
 
