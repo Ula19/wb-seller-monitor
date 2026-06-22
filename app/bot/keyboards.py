@@ -7,7 +7,12 @@
 """
 
 from aiogram.filters.callback_data import CallbackData
-from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
+
+# Тексты reply-кнопок главного меню (премиум-эмодзи на reply не поддерживаются).
+RB_SELLERS = "🏪 Магазины"
+RB_USERS = "👥 Пользователи"
+RB_STATS = "📊 Статистика"
 
 # Семантический ключ -> custom_emoji_id из набора tgmacicons (t.me/addemoji/tgmacicons).
 ICONS: dict[str, str] = {
@@ -54,14 +59,15 @@ def _btn(b: InlineKeyboardBuilder, emoji: str, label: str, cb, *, style=None, ic
     b.button(**kwargs)
 
 
-def main_menu(is_owner: bool):
-    b = InlineKeyboardBuilder()
-    _btn(b, "🏪", "Магазины", Nav(to="sellers"), style="primary", icon="shop")
+def main_reply(is_owner: bool):
+    """Главное меню — постоянные reply-кнопки внизу экрана."""
+    b = ReplyKeyboardBuilder()
+    b.button(text=RB_SELLERS)
     if is_owner:
-        _btn(b, "👥", "Пользователи", Nav(to="users"), style="primary", icon="users")
-        _btn(b, "📊", "Статистика", Nav(to="stats"), style="primary", icon="stats")
+        b.button(text=RB_USERS)
+        b.button(text=RB_STATS)
     b.adjust(1)
-    return b.as_markup()
+    return b.as_markup(resize_keyboard=True)
 
 
 def sellers_menu(is_owner: bool):

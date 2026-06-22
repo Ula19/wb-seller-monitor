@@ -46,20 +46,44 @@ async def cmd_menu(m: Message, state: FSMContext):
     await m.answer(text, reply_markup=markup, parse_mode="HTML")
 
 
+# ---------- reply-кнопки главного меню ----------
+@router.message(F.text == kb.RB_SELLERS)
+async def rb_sellers(m: Message, state: FSMContext):
+    await state.clear()
+    text, markup = await views.view_sellers(m.from_user.id)
+    await m.answer(text, reply_markup=markup, parse_mode="HTML")
+
+
+@router.message(F.text == kb.RB_USERS)
+async def rb_users(m: Message, state: FSMContext):
+    if m.from_user.id != settings.owner_id:
+        return
+    await state.clear()
+    text, markup = await views.view_users_menu()
+    await m.answer(text, reply_markup=markup, parse_mode="HTML")
+
+
+@router.message(F.text == kb.RB_STATS)
+async def rb_stats(m: Message, state: FSMContext):
+    if m.from_user.id != settings.owner_id:
+        return
+    await state.clear()
+    text, markup = await views.view_stats()
+    await m.answer(text, reply_markup=markup, parse_mode="HTML")
+
+
 # ---------- навигация ----------
 @router.callback_query(kb.Nav.filter(F.to == "main"))
 async def nav_main(cb: CallbackQuery, state: FSMContext):
     await state.clear()
-    text, markup = await views.view_main(cb.from_user.id)
-    await _edit(cb, text, markup)
+    await _edit(cb, f"{tge('list')} Главное меню — выберите внизу 👇", None)
     await cb.answer()
 
 
 @router.callback_query(kb.Nav.filter(F.to == "cancel"))
 async def nav_cancel(cb: CallbackQuery, state: FSMContext):
     await state.clear()
-    text, markup = await views.view_main(cb.from_user.id)
-    await _edit(cb, text, markup)
+    await _edit(cb, f"{tge('list')} Главное меню — выберите внизу 👇", None)
     await cb.answer("Отменено")
 
 

@@ -15,7 +15,7 @@ def is_owner(uid: int | None) -> bool:
 
 
 async def view_main(uid: int):
-    return f"{tge('list')} Главное меню. Выберите действие:", kb.main_menu(is_owner(uid))
+    return f"{tge('list')} Главное меню. Выберите действие:", kb.main_reply(is_owner(uid))
 
 
 async def view_sellers(uid: int):
