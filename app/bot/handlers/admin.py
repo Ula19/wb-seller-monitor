@@ -3,7 +3,7 @@ from aiogram.filters import Command
 from aiogram.types import Message
 
 from app.bot.access import access
-from app.bot.utils import parse_supplier_id
+from app.bot.utils import parse_seller_slug, parse_supplier_id
 from app.config import settings
 from app.db import repo
 from app.db.base import Session
@@ -21,7 +21,12 @@ def _arg(text: str | None) -> str:
 
 @router.message(Command("addseller"))
 async def addseller(m: Message):
-    sid = parse_supplier_id(_arg(m.text))
+    arg = _arg(m.text)
+    sid = parse_supplier_id(arg)
+    if not sid:
+        slug = parse_seller_slug(arg)
+        if slug:
+            sid = await wb_client.resolve_seller_slug(slug)
     if not sid:
         await m.answer("Использование: /addseller <ID или ссылка на магазин>")
         return

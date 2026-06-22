@@ -21,6 +21,8 @@ HEADERS = {"Accept-Language": "ru-RU,ru;q=0.9"}
 
 CATALOG_URL = "https://catalog.wb.ru/sellers/v4/catalog"
 SUPPLIER_INFO_URL = "https://static-basket-01.wbbasket.ru/vol0/data/supplier-by-id/{}.json"
+# slug -> supplier_id: страница /seller/<slug> — SPA, ID отдаёт «конструктор магазинов»
+SHOP_BY_SLUG_URL = "https://static-basket-01.wbcontent.net/vol0/constructor-api/shops/v3/{}.json"
 
 # B2B-цены: detail через прокси основного домена (card.wb.ru напрямую даёт 403).
 B2B_DETAIL_URL = "https://www.wildberries.ru/__internal/card/cards/v4/detail"
@@ -187,6 +189,16 @@ class WBClient:
         else:
             self.b2b_fail_streak = 0
         log.info("b2b цены применены: %d/%d", len(prices), len(products))
+
+    async def resolve_seller_slug(self, slug: str) -> int | None:
+        """supplier_id по slug-ссылке /seller/<slug> (для SEO-адресов без числа)."""
+        r = await self._get(SHOP_BY_SLUG_URL.format(slug))
+        if r and r.status_code == 200:
+            try:
+                return int(r.json()["supplierID"])
+            except Exception:
+                return None
+        return None
 
     async def fetch_supplier_info(self, supplier_id: int) -> dict | None:
         r = await self._get(SUPPLIER_INFO_URL.format(supplier_id))

@@ -13,7 +13,7 @@ from app.bot import keyboards as kb
 from app.bot import views
 from app.bot.access import access
 from app.bot.states import AddSeller, AddUser, SetCookie
-from app.bot.utils import parse_supplier_id
+from app.bot.utils import parse_seller_slug, parse_supplier_id
 from app.config import settings
 from app.db import repo
 from app.db.base import Session
@@ -208,6 +208,10 @@ async def nav_add_seller(cb: CallbackQuery, state: FSMContext):
 @router.message(AddSeller.waiting_id)
 async def add_seller_input(m: Message, state: FSMContext):
     sid = parse_supplier_id(m.text or "")
+    if not sid:
+        slug = parse_seller_slug(m.text or "")
+        if slug:
+            sid = await wb_client.resolve_seller_slug(slug)
     if not sid:
         await m.answer(
             "Не похоже на ID или ссылку. Пришлите ещё раз или нажмите Отмена.",
