@@ -1,29 +1,44 @@
-"""Найти supplier_id по slug: голый /seller/<slug> редиректит на /seller/<id>/<slug>.
+"""Найти эндпоинт slug -> supplier_id: собрать все URL-подобные строки из JS-бандла.
 
-Проверяем итоговый URL после редиректа и заголовок Location.
     docker compose cp scripts/resolve_seller.py bot:/app/scripts/resolve_seller.py
     docker compose exec bot env PYTHONPATH=/app python scripts/resolve_seller.py moderndevice
 """
 import asyncio
+import re
 import sys
 
 from app.wb.client import wb_client
 
 SLUG = sys.argv[1] if len(sys.argv) > 1 else "moderndevice"
-URL = f"https://www.wildberries.ru/seller/{SLUG}"
 REF = {"Referer": "https://www.wildberries.ru/"}
+KEYS = ("webapi", "seo", "slug", "supplier", "seller")
+
+
+async def get(url):
+    try:
+        r = await wb_client._session.get(url, headers=REF)
+        return r.status_code, (getattr(r, "text", "") or "")
+    except Exception as e:
+        return None, f"ERR {e}"
 
 
 async def main():
-    # с редиректами — смотрим финальный URL
-    r = await wb_client._session.get(URL, headers=REF)
-    print("итоговый URL:", getattr(r, "url", None))
-    print("статус:", r.status_code)
-    print("история:", [getattr(h, "url", h) for h in (getattr(r, "history", None) or [])])
-    # без редиректов — смотрим Location
-    r2 = await wb_client._session.get(URL, headers=REF, allow_redirects=False)
-    print("без редиректа статус:", r2.status_code)
-    print("Location:", r2.headers.get("Location") or r2.headers.get("location"))
+    st, html = await get(f"https://www.wildberries.ru/seller/{SLUG}")
+    print("HTML:", st, "| размер:", len(html))
+    scripts = re.findall(r'<script[^>]+src="([^"]+)"', html)
+    scripts = [s if s.startswith("http") else "https:" + s for s in scripts]
+    hits = set()
+    for src in scripts:
+        _, js = await get(src)
+        if not isinstance(js, str):
+            continue
+        for s in re.findall(r"""["'`]([^"'`]{4,90})["'`]""", js):
+            low = s.lower()
+            if ("/" in s or "{" in s) and any(k in low for k in KEYS):
+                hits.add(s)
+    print("--- пути со словами webapi/seo/slug/supplier/seller ---")
+    for h in sorted(hits):
+        print(" ", h)
     await wb_client.close()
 
 
