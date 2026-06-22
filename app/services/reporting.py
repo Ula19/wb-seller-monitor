@@ -106,20 +106,6 @@ def change_caption(seller_name: str, p, events) -> str:
     return "\n".join(lines)
 
 
-def new_item_caption(seller_name: str, p) -> str:
-    wh = "".join(f"{line}\n" for line in _wh_delivery_lines(p))
-    return (
-        f"{tge('new')} Новый товар обнаружен\n\n"
-        f"Магазин: {esc(seller_name)}\n\n"
-        f"Название: {esc(p.name)}\n\n"
-        f"Артикул: {p.nm_id}\n\n"
-        f"Цена ВБ: {fmt_price(p.price)}\n"
-        f"Наша цена: {fmt_our(p.price)}\n"
-        f"{wh}\n"
-        f"Ссылка:\n{p.url}"
-    )
-
-
 def build_excel(seller_name: str, products) -> bytes:
     wb = Workbook()
     ws = wb.active

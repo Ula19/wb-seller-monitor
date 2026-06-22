@@ -74,15 +74,6 @@ async def sync_seller(seller: models.Seller, *, silent_seed: bool = False):
     return fetched, new, changes
 
 
-async def broadcast_new_item(bot, user_ids, seller, p) -> None:
-    caption = reporting.new_item_caption(seller.name or str(seller.supplier_id), p)
-    for uid in user_ids:
-        try:
-            await bot.send_message(uid, caption, parse_mode="HTML")
-        except Exception as e:
-            log.warning("уведомление (новинка) не доставлено %s: %s", uid, e)
-
-
 async def broadcast_change(bot, user_ids, seller, p, events) -> None:
     text = reporting.change_caption(seller.name or str(seller.supplier_id), p, events)
     for uid in user_ids:
@@ -93,18 +84,11 @@ async def broadcast_change(bot, user_ids, seller, p, events) -> None:
 
 
 async def notify_seller(bot, seller, new, changes) -> None:
-    """Рассылает новинки (с защитой от дублей) и изменения всем пользователям."""
+    """Рассылает изменения цены/наличия. Новинки больше не уведомляем (спам)."""
     async with Session() as s:
         user_ids = await recipient_ids(s)
     if not user_ids:
         return
-    for p in new:
-        async with Session() as s:
-            if await repo.is_notified(s, p.supplier_id, p.nm_id):
-                continue
-            await repo.mark_notified(s, p.supplier_id, p.nm_id)
-            await s.commit()
-        await broadcast_new_item(bot, user_ids, seller, p)
     for p, events in changes:
         await broadcast_change(bot, user_ids, seller, p, events)
 
