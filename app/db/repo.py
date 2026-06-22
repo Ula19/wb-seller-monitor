@@ -84,6 +84,8 @@ async def upsert_product(s, p: NormProduct) -> None:
         price=p.price,
         stock=p.stock,
         pics=p.pics,
+        delivery_hours=p.delivery_hours,
+        from_seller=p.from_seller,
         is_active=True,
         last_seen_at=func.now(),
     )
@@ -95,6 +97,8 @@ async def upsert_product(s, p: NormProduct) -> None:
             price=stmt.excluded.price,
             stock=stmt.excluded.stock,
             pics=stmt.excluded.pics,
+            delivery_hours=stmt.excluded.delivery_hours,
+            from_seller=stmt.excluded.from_seller,
             is_active=True,
             last_seen_at=func.now(),
         ),

@@ -1,11 +1,40 @@
 """Форматирование сообщений Telegram и Excel."""
 
 import io
+from datetime import datetime, timedelta
 
 from openpyxl import Workbook
 
 from app.config import settings
 from app.emoji import esc, tge
+
+
+def fmt_warehouse(from_seller) -> str | None:
+    if from_seller is None:
+        return None
+    return "продавца" if from_seller else "WB"
+
+
+def fmt_delivery(hours) -> str | None:
+    """Дата доставки словом по часам (time1+time2). Сегодня/Завтра/Послезавтра/ДД.ММ."""
+    if hours is None:
+        return None
+    # ponytail: now() в tz контейнера (TZ=Europe/Moscow в compose); сутки считаем по дате
+    now = datetime.now()
+    arrive = now + timedelta(hours=hours)
+    days = (arrive.date() - now.date()).days
+    return {0: "Сегодня", 1: "Завтра", 2: "Послезавтра"}.get(days) or arrive.strftime("%d.%m")
+
+
+def _wh_delivery_lines(p) -> list[str]:
+    lines = []
+    wh = fmt_warehouse(getattr(p, "from_seller", None))
+    if wh:
+        lines.append(f"Склад: {wh}")
+    dv = fmt_delivery(getattr(p, "delivery_hours", None))
+    if dv:
+        lines.append(f"Доставка: {dv}")
+    return lines
 
 
 def fmt_price(price: int | None) -> str:
@@ -39,6 +68,7 @@ def hourly_report_text(seller_name: str, products) -> str:
             f"Артикул: {p.nm_id}",
             f"Цена ВБ: {fmt_price(p.price)}",
             f"Наша цена: {fmt_our(p.price)}",
+            *_wh_delivery_lines(p),
             f"Остаток: {fmt_stock(p.stock)}",
             f"Ссылка: {p.url}",
             "",
@@ -72,18 +102,20 @@ def change_caption(seller_name: str, p, events) -> str:
                 lines.append(f"{tge('stock')} Снова в наличии (остаток {new})")
             else:
                 lines.append(f"{tge('stock')} Закончился (был остаток {old})")
-    lines += [f"Наша цена: {fmt_our(p.price)}", "", "Ссылка:", p.url]
+    lines += [f"Наша цена: {fmt_our(p.price)}", *_wh_delivery_lines(p), "", "Ссылка:", p.url]
     return "\n".join(lines)
 
 
 def new_item_caption(seller_name: str, p) -> str:
+    wh = "".join(f"{line}\n" for line in _wh_delivery_lines(p))
     return (
         f"{tge('new')} Новый товар обнаружен\n\n"
         f"Магазин: {esc(seller_name)}\n\n"
         f"Название: {esc(p.name)}\n\n"
         f"Артикул: {p.nm_id}\n\n"
         f"Цена ВБ: {fmt_price(p.price)}\n"
-        f"Наша цена: {fmt_our(p.price)}\n\n"
+        f"Наша цена: {fmt_our(p.price)}\n"
+        f"{wh}\n"
         f"Ссылка:\n{p.url}"
     )
 
@@ -93,7 +125,8 @@ def build_excel(seller_name: str, products) -> bytes:
     ws = wb.active
     ws.title = "Товары"
     ws.append(
-        ["Магазин", "Название", "Артикул", "Цена ВБ", "Наша цена", "Остаток", "Ссылка", "Дата обнаружения"]
+        ["Магазин", "Название", "Артикул", "Цена ВБ", "Наша цена", "Склад", "Доставка",
+         "Остаток", "Ссылка", "Дата обнаружения"]
     )
     for p in products:
         fs = getattr(p, "first_seen_at", None)
@@ -104,6 +137,8 @@ def build_excel(seller_name: str, products) -> bytes:
                 p.nm_id,
                 p.price,
                 our_price(p.price),
+                fmt_warehouse(getattr(p, "from_seller", None)) or "",
+                fmt_delivery(getattr(p, "delivery_hours", None)) or "",
                 p.stock,
                 p.url,
                 fs.strftime("%Y-%m-%d %H:%M") if fs else "",

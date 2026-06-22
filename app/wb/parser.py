@@ -12,6 +12,8 @@ class NormProduct:
     stock: int
     pics: int
     supplier_id: int
+    delivery_hours: int | None = None  # time1+time2, для даты доставки
+    from_seller: bool | None = None  # True=склад продавца, False=склад WB
 
     @property
     def url(self) -> str:
@@ -42,7 +44,27 @@ def _stock(p: dict) -> int:
     return total
 
 
+def _delivery(p: dict) -> tuple[int | None, bool | None]:
+    """Часы доставки (time1+time2) и склад по dtype.
+
+    Признак склада — младший разряд dtype: 1=продавца, 8=WB (по образцам b2b).
+    """
+    for size in p.get("sizes") or []:
+        for src in [size, *(size.get("stocks") or [])]:
+            t1, t2, dt = src.get("time1"), src.get("time2"), src.get("dtype")
+            if t1 is None and t2 is None and dt is None:
+                continue
+            hours = (t1 or 0) + (t2 or 0) if (t1 is not None or t2 is not None) else None
+            from_seller = None
+            if dt is not None:
+                # ponytail: 2 образца — продавец=1, WB=8; иной разряд всплывёт в выводе
+                from_seller = (int(dt) & 0xF) == 1
+            return hours, from_seller
+    return None, None
+
+
 def normalize(p: dict, supplier_id: int) -> NormProduct:
+    hours, from_seller = _delivery(p)
     return NormProduct(
         nm_id=int(p["id"]),
         name=(p.get("name") or "").strip(),
@@ -51,4 +73,14 @@ def normalize(p: dict, supplier_id: int) -> NormProduct:
         stock=_stock(p),
         pics=int(p.get("pics") or 0),
         supplier_id=supplier_id,
+        delivery_hours=hours,
+        from_seller=from_seller,
     )
+
+
+if __name__ == "__main__":  # self-check признака склада по реальным образцам b2b
+    wb = {"sizes": [{"time1": 2, "time2": 23, "dtype": 6597069766664}]}
+    seller = {"sizes": [{"time1": 24, "time2": 18, "dtype": 6597069766657}]}
+    assert _delivery(wb) == (25, False), _delivery(wb)
+    assert _delivery(seller) == (42, True), _delivery(seller)
+    print("ok")

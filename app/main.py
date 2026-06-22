@@ -4,6 +4,7 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from sqlalchemy import text
 
 from app.bot.access import access
 from app.bot.handlers import admin, common, menu, user
@@ -19,6 +20,13 @@ log = logging.getLogger(__name__)
 async def on_startup() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # create_all не добавляет колонки в существующую таблицу — добавляем вручную
+        await conn.execute(text(
+            "ALTER TABLE products ADD COLUMN IF NOT EXISTS delivery_hours INTEGER"
+        ))
+        await conn.execute(text(
+            "ALTER TABLE products ADD COLUMN IF NOT EXISTS from_seller BOOLEAN"
+        ))
     await access.load()
     log.info("Старт: владелец %s, разрешённых пользователей %d",
              settings.owner_id, len(access.allowed))

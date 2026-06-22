@@ -12,7 +12,7 @@ import random
 from curl_cffi.requests import AsyncSession
 
 from app.config import settings
-from app.wb.parser import NormProduct, _price, normalize
+from app.wb.parser import NormProduct, _delivery, _price, normalize
 
 log = logging.getLogger(__name__)
 
@@ -138,6 +138,7 @@ class WBClient:
         """Заменяет розничные цены на бизнес-цены (b2b detail, батчи по 100)."""
         ref = {"Referer": "https://www.wildberries.ru/"}
         prices: dict[int, int] = {}
+        deliv: dict[int, tuple] = {}
         nm_ids = [p.nm_id for p in products]
         for i in range(0, len(nm_ids), 100):
             chunk = nm_ids[i:i + 100]
@@ -153,9 +154,12 @@ class WBClient:
                 val = _price(p)
                 if val is not None:
                     prices[int(p["id"])] = val
+                deliv[int(p["id"])] = _delivery(p)
         for p in products:
             if p.nm_id in prices:
                 p.price = prices[p.nm_id]
+            if p.nm_id in deliv:
+                p.delivery_hours, p.from_seller = deliv[p.nm_id]
         log.info("b2b цены применены: %d/%d", len(prices), len(products))
 
     async def fetch_supplier_info(self, supplier_id: int) -> dict | None:
