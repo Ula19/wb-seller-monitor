@@ -13,6 +13,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 RB_SELLERS = "🏪 Магазины"
 RB_USERS = "👥 Пользователи"
 RB_STATS = "📊 Статистика"
+RB_COOKIE = "🔑 Куки"
 
 # Семантический ключ -> custom_emoji_id из набора tgmacicons (t.me/addemoji/tgmacicons).
 ICONS: dict[str, str] = {
@@ -66,6 +67,7 @@ def main_reply(is_owner: bool):
     if is_owner:
         b.button(text=RB_USERS)
         b.button(text=RB_STATS)
+        b.button(text=RB_COOKIE)
     b.adjust(1)
     return b.as_markup(resize_keyboard=True)
 

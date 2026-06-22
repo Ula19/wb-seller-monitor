@@ -151,6 +151,20 @@ async def mark_notified(s, supplier_id: int, nm_id: int) -> None:
         s.add(models.Notified(supplier_id=supplier_id, nm_id=nm_id))
 
 
+# ---------- настройки (key-value) ----------
+async def get_setting(s, key: str) -> str | None:
+    row = await s.get(models.AppSetting, key)
+    return row.value if row else None
+
+
+async def set_setting(s, key: str, value: str) -> None:
+    row = await s.get(models.AppSetting, key)
+    if row:
+        row.value = value
+    else:
+        s.add(models.AppSetting(key=key, value=value))
+
+
 # ---------- статистика ----------
 async def stats(s) -> tuple[int, int, int]:
     sellers = await s.scalar(select(func.count()).select_from(models.Seller))

@@ -11,13 +11,13 @@ from aiogram.types import CallbackQuery, Message
 from app.bot import keyboards as kb
 from app.bot import views
 from app.bot.access import access
-from app.bot.states import AddSeller, AddUser
+from app.bot.states import AddSeller, AddUser, SetCookie
 from app.bot.utils import parse_supplier_id
 from app.config import settings
 from app.db import repo
 from app.db.base import Session
 from app.emoji import esc, tge
-from app.services.monitor import sync_seller
+from app.services.monitor import silent_resync_all, sync_seller
 from app.wb.client import wb_client
 
 log = logging.getLogger(__name__)
@@ -70,6 +70,46 @@ async def rb_stats(m: Message, state: FSMContext):
     await state.clear()
     text, markup = await views.view_stats()
     await m.answer(text, reply_markup=markup, parse_mode="HTML")
+
+
+# ---------- обновление WB-куки (FSM) ----------
+@router.message(F.text == kb.RB_COOKIE)
+async def rb_cookie(m: Message, state: FSMContext):
+    if m.from_user.id != settings.owner_id:
+        return
+    await state.set_state(SetCookie.waiting)
+    await m.answer(
+        f"{tge('shop')} <b>Обновление куки WB</b>\n\n"
+        "1. Открой <b>wildberries.ru</b> на ПК, залогинься в бизнес-аккаунт.\n"
+        "2. F12 → вкладка <b>Network</b> (Сеть), обнови страницу.\n"
+        "3. Кликни любой запрос → <b>Headers</b> → <b>Request Headers</b> → "
+        "скопируй целиком строку <code>Cookie:</code> (без слова Cookie).\n"
+        "4. Пришли её одним сообщением сюда.",
+        reply_markup=kb.cancel_kb(),
+        parse_mode="HTML",
+    )
+
+
+@router.message(SetCookie.waiting)
+async def cookie_input(m: Message, state: FSMContext):
+    raw = (m.text or "").strip()
+    if "=" not in raw or len(raw) < 20:
+        await m.answer(
+            "Это не похоже на строку Cookie. Пришли ещё раз или нажмите Отмена.",
+            reply_markup=kb.cancel_kb(),
+        )
+        return
+    await state.clear()
+    n = await wb_client.set_cookie(raw)
+    async with Session() as s:
+        await repo.set_setting(s, "wb_cookie", raw)
+        await s.commit()
+    await m.answer(
+        f"{tge('ok')} Кука обновлена ({n} полей). Обновляю цены, подожди...",
+        parse_mode="HTML",
+    )
+    await silent_resync_all()
+    await m.answer(f"{tge('ok')} Цены обновлены.", parse_mode="HTML")
 
 
 # ---------- навигация ----------

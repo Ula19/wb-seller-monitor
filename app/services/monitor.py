@@ -136,6 +136,37 @@ async def send_report_to(bot, user_ids, seller, products) -> None:
                     log.warning("отчёт не доставлен %s: %s", uid, e)
 
 
+async def silent_resync_all() -> None:
+    """Тихо пересинхронизирует все магазины: обновить цены без уведомлений.
+
+    Зовём после обновления куки, чтобы протухшие цены сменились на бизнес-цены
+    и при этом не сыпались ложные «цена изменилась».
+    """
+    async with Session() as s:
+        sellers = await repo.list_sellers(s)
+    for seller in sellers:
+        try:
+            await sync_seller(seller, silent_seed=True)
+        except Exception as e:
+            log.warning("тихий ре-синк %s упал: %s", seller.supplier_id, e)
+
+
+async def _check_cookie_health(bot) -> None:
+    """Если b2b-цены не приходят несколько раз подряд — кука протухла, зовём владельца."""
+    if wb_client.b2b_fail_streak >= 2 and not wb_client.cookie_alerted:
+        wb_client.cookie_alerted = True
+        try:
+            await bot.send_message(
+                settings.owner_id,
+                "⚠️ Кука WB протухла — бизнес-цены не приходят. "
+                "Обнови её кнопкой «🔑 Куки».",
+            )
+        except Exception as e:
+            log.warning("алерт о куке не доставлен: %s", e)
+    elif wb_client.b2b_fail_streak == 0:
+        wb_client.cookie_alerted = False
+
+
 async def monitoring_job(bot) -> None:
     """Лёгкий проход каждые N минут: новинки + изменения цены/наличия."""
     async with Session() as s:
@@ -146,6 +177,7 @@ async def monitoring_job(bot) -> None:
             await sync_and_notify(bot, seller)
         except Exception as e:
             log.exception("синхронизация %s упала: %s", seller.supplier_id, e)
+    await _check_cookie_health(bot)
     log.info("мониторинг: завершён")
 
 

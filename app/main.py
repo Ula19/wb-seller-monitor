@@ -10,7 +10,8 @@ from app.bot.access import access
 from app.bot.handlers import admin, common, menu, user
 from app.bot.middlewares import AuthMiddleware
 from app.config import settings
-from app.db.base import Base, engine
+from app.db import repo
+from app.db.base import Base, Session, engine
 from app.services.monitor import monitoring_job, report_job
 from app.wb.client import wb_client
 
@@ -28,6 +29,11 @@ async def on_startup() -> None:
             "ALTER TABLE products ADD COLUMN IF NOT EXISTS from_seller BOOLEAN"
         ))
     await access.load()
+    # актуальная кука живёт в БД (обновляется из Telegram); .env — лишь стартовый seed
+    async with Session() as s:
+        saved = await repo.get_setting(s, "wb_cookie")
+    if saved:
+        await wb_client.set_cookie(saved)
     log.info("Старт: владелец %s, разрешённых пользователей %d",
              settings.owner_id, len(access.allowed))
 

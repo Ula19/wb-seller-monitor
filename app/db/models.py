@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, func
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -64,6 +64,15 @@ class Product(Base):
     @property
     def url(self) -> str:
         return f"https://www.wildberries.ru/catalog/{self.nm_id}/detail.aspx"
+
+
+class AppSetting(Base):
+    """Key-value рантайм-настройки (напр. актуальная WB-кука)."""
+
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class Notified(Base):

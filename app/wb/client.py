@@ -47,11 +47,31 @@ class WBClient:
         cookies = _parse_cookie(settings.wb_cookie) if settings.wb_cookie else None
         if cookies:
             log.info("WB-клиент: использую куку аккаунта (%d полей)", len(cookies))
-        self._session = AsyncSession(
-            headers=HEADERS, cookies=cookies, impersonate=IMPERSONATE, timeout=20
-        )
+        self._session = self._build_session(cookies)
         self._lock = asyncio.Lock()
         self._last = 0.0
+        self.b2b_fail_streak = 0  # подряд провалов b2b (0 цен при наличии товаров)
+        self.cookie_alerted = False  # уже предупредили владельца о протухшей куке
+
+    @staticmethod
+    def _build_session(cookies) -> AsyncSession:
+        return AsyncSession(
+            headers=HEADERS, cookies=cookies, impersonate=IMPERSONATE, timeout=20
+        )
+
+    async def set_cookie(self, raw: str) -> int:
+        """Заменяет куку и пересоздаёт сессию без рестарта. Возвращает число полей."""
+        cookies = _parse_cookie(raw) if raw else None
+        old = self._session
+        self._session = self._build_session(cookies)
+        self.b2b_fail_streak = 0
+        self.cookie_alerted = False
+        try:
+            await old.close()
+        except Exception:
+            pass
+        log.info("WB-клиент: кука обновлена (%d полей)", len(cookies or {}))
+        return len(cookies or {})
 
     async def close(self) -> None:
         await self._session.close()
@@ -160,6 +180,12 @@ class WBClient:
                 p.price = prices[p.nm_id]
             if p.nm_id in deliv:
                 p.delivery_hours, p.from_seller = deliv[p.nm_id]
+        # 0 цен при наличии товаров = кука протухла (403/401). Вариант «200 с розницей»
+        # так не ловится — об этом честно: ponytail, автодетект тихой розницы невозможен.
+        if products and not prices:
+            self.b2b_fail_streak += 1
+        else:
+            self.b2b_fail_streak = 0
         log.info("b2b цены применены: %d/%d", len(prices), len(products))
 
     async def fetch_supplier_info(self, supplier_id: int) -> dict | None:

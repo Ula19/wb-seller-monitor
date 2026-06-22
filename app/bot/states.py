@@ -9,3 +9,7 @@ class AddSeller(StatesGroup):
 
 class AddUser(StatesGroup):
     waiting_id = State()
+
+
+class SetCookie(StatesGroup):
+    waiting = State()
