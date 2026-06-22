@@ -1,6 +1,7 @@
 """Найти числовой supplier_id по slug-ссылке продавца (.../seller/<slug>).
 
-Безопасно: 1 запрос HTML-страницы через сессию бота (с кукой). Запуск:
+Страница продавца — SPA-шелл, ID грузится JS-запросом. Скрипт ищет рабочий
+API-эндпоинт slug -> id. Безопасно (несколько запросов через сессию бота).
     docker compose cp scripts/resolve_seller.py bot:/app/scripts/resolve_seller.py
     docker compose exec bot env PYTHONPATH=/app python scripts/resolve_seller.py moderndevice
 """
@@ -11,29 +12,39 @@ import sys
 from app.wb.client import wb_client
 
 SLUG = sys.argv[1] if len(sys.argv) > 1 else "moderndevice"
-URL = f"https://www.wildberries.ru/seller/{SLUG}"
+REF = {"Referer": "https://www.wildberries.ru/"}
+
+# кандидаты API, которые могут отдать данные продавца по slug
+CANDIDATES = [
+    f"https://www.wildberries.ru/webapi/seller/{SLUG}",
+    f"https://www.wildberries.ru/webapi/seller/data/short/{SLUG}",
+    f"https://www.wildberries.ru/webapi/seller/seo-data/{SLUG}",
+    f"https://static-basket-01.wbbasket.ru/vol0/data/supplier-by-name/{SLUG}.json",
+    f"https://seller-supplier.wildberries.ru/api/v1/seller/{SLUG}",
+]
+
+
+async def probe(url):
+    try:
+        r = await wb_client._session.get(url, headers=REF)
+    except Exception as e:
+        print(f"  {url}\n    ERR {e}")
+        return
+    body = (getattr(r, "text", "") or "")[:300]
+    print(f"  {url}\n    {r.status_code} | {body!r}")
 
 
 async def main():
-    r = await wb_client._session.get(
-        URL, headers={"Referer": "https://www.wildberries.ru/"}
-    )
+    page = f"https://www.wildberries.ru/seller/{SLUG}"
+    r = await wb_client._session.get(page, headers=REF)
     html = getattr(r, "text", "") or ""
-    print("URL:", URL)
-    print("статус:", r.status_code, "| размер:", len(html))
-    # кандидаты на supplier_id в HTML/встроенном JSON
-    patterns = [
-        r'supplierId["\':= ]+(\d+)',
-        r'supplier[_-]?id["\':= ]+(\d+)',
-        r'"id"\s*:\s*(\d{4,})',
-        r'/seller/(\d+)',
-        r'supplier=(\d+)',
-    ]
-    for pat in patterns:
-        found = re.findall(pat, html)
-        print(f"{pat} -> {found[:8]}")
-    i = html.lower().find("supplier")
-    print("контекст 'supplier':", repr(html[max(0, i - 40):i + 140]) if i >= 0 else "нет")
+    print("HTML страница:", r.status_code, "| размер:", len(html))
+    print("script src:", re.findall(r'<script[^>]+src="([^"]+)"', html)[:10])
+    print("ссылки api/webapi:", re.findall(r'https?://[^\s"\'<>]*?(?:api|webapi)[^\s"\'<>]*', html)[:10])
+    print("длинные числа (>=5):", re.findall(r'\b\d{5,}\b', html)[:10])
+    print("--- кандидаты эндпоинтов ---")
+    for url in CANDIDATES:
+        await probe(url)
     await wb_client.close()
 
 
