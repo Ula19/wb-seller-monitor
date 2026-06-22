@@ -1,7 +1,7 @@
-"""Найти числовой supplier_id по slug-ссылке продавца (.../seller/<slug>).
+"""Найти эндпоинт slug -> supplier_id, выкопав URL-шаблоны из JS-бандла WB SPA.
 
-Страница продавца — SPA-шелл, но в HTML встречается 9-значный supplier_id.
-Скрипт показывает контекст длинных чисел и проверяет кандидата по id-эндпоинтам.
+В HTML страницы продавца числового ID нет — его грузит JS. Ищем в бандлах строки
+с 'seller'/'supplier'/'slug'/'seo', чтобы понять, какой API даёт ID по slug.
     docker compose cp scripts/resolve_seller.py bot:/app/scripts/resolve_seller.py
     docker compose exec bot env PYTHONPATH=/app python scripts/resolve_seller.py moderndevice
 """
@@ -24,27 +24,24 @@ async def get(url):
 
 
 async def main():
-    page = f"https://www.wildberries.ru/seller/{SLUG}"
-    st, html = await get(page)
+    st, html = await get(f"https://www.wildberries.ru/seller/{SLUG}")
     print("HTML:", st, "| размер:", len(html))
-    # контекст всех чисел 6+ знаков — где лежит supplier_id
-    for n in dict.fromkeys(re.findall(r"\d{6,}", html)):
-        i = html.find(n)
-        print(f"  {n}: ...{html[max(0,i-45):i+len(n)+15]}...")
-    # кандидаты supplier_id: 8-9 значные числа
-    cands = [n for n in dict.fromkeys(re.findall(r"\b\d{8,9}\b", html))]
-    print("кандидаты supplier_id:", cands)
-    for sid in cands:
-        print(f"--- проверяю {sid} ---")
-        st, body = await get(
-            f"https://static-basket-01.wbbasket.ru/vol0/data/supplier-by-id/{sid}.json"
-        )
-        print(f"  supplier-by-id: {st} | {body[:200]!r}")
-        st, body = await get(
-            f"https://catalog.wb.ru/sellers/v4/catalog?appType=1&curr=rub&dest=-1257786&page=1&supplier={sid}"
-        )
-        cnt = body.count('"id":') if isinstance(body, str) else 0
-        print(f"  catalog: {st} | товаров на стр1≈{cnt}")
+    scripts = re.findall(r'<script[^>]+src="([^"]+)"', html)
+    scripts = [s if s.startswith("http") else "https:" + s for s in scripts]
+    hits = set()
+    for src in scripts:
+        st, js = await get(src)
+        if not isinstance(js, str):
+            continue
+        for pat in (r'["\'][^"\']{0,40}(?:seller|supplier)[^"\']{0,60}["\']',
+                    r'[A-Za-z0-9_./{}-]*(?:bySlug|seo)[A-Za-z0-9_./{}-]*'):
+            for mt in re.findall(pat, js):
+                if "/" in mt or "Slug" in mt or "seo" in mt.lower():
+                    hits.add(mt.strip("\"'"))
+        print(f"  просмотрел {src.rsplit('/',1)[-1]} ({len(js)} б)")
+    print("--- кандидаты путей ---")
+    for h in sorted(hits):
+        print(" ", h)
     await wb_client.close()
 
 
