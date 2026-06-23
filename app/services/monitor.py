@@ -166,23 +166,18 @@ async def monitoring_job(bot) -> None:
     log.info("мониторинг: завершён")
 
 
-def _in_window(hour: int, frm: int, to: int) -> bool:
-    """Час внутри окна [frm, to] (включительно). Поддержка ночного wrap: 22→6."""
-    return frm <= hour <= to if frm <= to else (hour >= frm or hour <= to)
-
-
 async def report_job(bot) -> None:
     """Часовой отчёт по всем магазинам из БД (без обращения к WB).
 
-    Шлём только в окне рабочих часов (МСК); окно не задано — круглосуточно.
+    Шлём только в выбранные часы (МСК); список пуст — каждый час.
     """
     async with Session() as s:
-        frm = await repo.get_setting(s, "report_from")
-        to = await repo.get_setting(s, "report_to")
-    if frm is not None and to is not None:
+        hours_csv = await repo.get_setting(s, "report_hours")
+    if hours_csv:
+        selected = {int(x) for x in hours_csv.split(",") if x.strip()}
         hour = datetime.now(ZoneInfo("Europe/Moscow")).hour
-        if not _in_window(hour, int(frm), int(to)):
-            log.info("отчёт пропущен: %d вне окна %s–%s", hour, frm, to)
+        if hour not in selected:
+            log.info("отчёт пропущен: %d не в списке %s", hour, hours_csv)
             return
     async with Session() as s:
         sellers = await repo.list_sellers(s)
@@ -192,9 +187,9 @@ async def report_job(bot) -> None:
         await send_report_to(bot, user_ids, seller, products)
 
 
-if __name__ == "__main__":  # self-check окна часов
-    assert _in_window(10, 9, 21) and not _in_window(22, 9, 21)
-    assert _in_window(23, 22, 6) and _in_window(3, 22, 6)  # ночной wrap
-    assert not _in_window(12, 22, 6)
-    assert _in_window(9, 9, 9)  # окно в один час
+if __name__ == "__main__":  # self-check разбора часов
+    parse = lambda csv: {int(x) for x in csv.split(",") if x.strip()}
+    assert parse("9,13,18") == {9, 13, 18}
+    assert parse("") == set()
+    assert 13 in parse("9,13,18") and 12 not in parse("9,13,18")
     print("ok")

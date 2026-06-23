@@ -48,9 +48,8 @@ class UserCB(CallbackData, prefix="ud"):
 
 
 class HourCB(CallbackData, prefix="rh"):
-    """Выбор часа окна отчётов. part: from|to."""
+    """Тумблер часа отчёта (вкл/выкл)."""
 
-    part: str
     hour: int
 
 
@@ -81,12 +80,13 @@ def main_reply(is_owner: bool):
     return b.as_markup(resize_keyboard=True)
 
 
-def hours_grid(part: str):
-    """Сетка часов 00–23 для выбора начала/конца окна отчётов."""
+def hours_grid(selected: set[int]):
+    """Чеклист часов 00–23: ✅ — отчёт шлётся в этот час."""
     b = InlineKeyboardBuilder()
     for h in range(24):
-        b.button(text=f"{h:02d}", callback_data=HourCB(part=part, hour=h))
-    _btn(b, "⬅️", "Назад", Nav(to="main"), icon="back")
+        mark = "✅" if h in selected else "▫️"
+        b.button(text=f"{mark}{h:02d}", callback_data=HourCB(hour=h))
+    _btn(b, "✔️", "Готово", Nav(to="main"))
     b.adjust(6, 6, 6, 6, 1)
     return b.as_markup()
 

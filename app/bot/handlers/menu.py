@@ -115,10 +115,15 @@ async def cookie_input(m: Message, state: FSMContext):
 
 
 # ---------- часы отчётов ----------
-def _window_text(frm, to) -> str:
-    if frm is None or to is None:
-        return "круглосуточно"
-    return f"с {int(frm):02d}:00 до {int(to):02d}:00"
+def _parse_hours(csv) -> set[int]:
+    return {int(x) for x in (csv or "").split(",") if x.strip()}
+
+
+def _hours_caption(selected: set[int]) -> str:
+    if not selected:
+        return "🕐 Часы отчёта: <b>каждый час</b>.\nОтметь часы, когда слать отчёт:"
+    hrs = ", ".join(f"{h:02d}:00" for h in sorted(selected))
+    return f"🕐 Отчёт в: <b>{hrs}</b> (МСК).\nЖми час, чтобы вкл/выкл:"
 
 
 @router.message(F.text == kb.RB_HOURS)
@@ -127,45 +132,23 @@ async def rb_hours(m: Message, state: FSMContext):
         return
     await state.clear()
     async with Session() as s:
-        frm = await repo.get_setting(s, "report_from")
-        to = await repo.get_setting(s, "report_to")
+        selected = _parse_hours(await repo.get_setting(s, "report_hours"))
     await m.answer(
-        f"🕐 Отчёты сейчас: <b>{_window_text(frm, to)}</b>\n\n"
-        "Выберите час <b>начала</b>:",
-        reply_markup=kb.hours_grid("from"),
-        parse_mode="HTML",
+        _hours_caption(selected), reply_markup=kb.hours_grid(selected), parse_mode="HTML"
     )
 
 
-@router.callback_query(kb.HourCB.filter(F.part == "from"))
-async def hour_from(cb: CallbackQuery, callback_data: kb.HourCB):
+@router.callback_query(kb.HourCB.filter())
+async def toggle_hour(cb: CallbackQuery, callback_data: kb.HourCB):
     if await _deny_if_not_owner(cb):
         return
     async with Session() as s:
-        await repo.set_setting(s, "report_from", str(callback_data.hour))
+        selected = _parse_hours(await repo.get_setting(s, "report_hours"))
+        selected.symmetric_difference_update({callback_data.hour})  # toggle
+        await repo.set_setting(s, "report_hours", ",".join(map(str, sorted(selected))))
         await s.commit()
-    await _edit(
-        cb,
-        f"Начало: <b>{callback_data.hour:02d}:00</b>\n\nВыберите час <b>конца</b>:",
-        kb.hours_grid("to"),
-    )
+    await _edit(cb, _hours_caption(selected), kb.hours_grid(selected))
     await cb.answer()
-
-
-@router.callback_query(kb.HourCB.filter(F.part == "to"))
-async def hour_to(cb: CallbackQuery, callback_data: kb.HourCB):
-    if await _deny_if_not_owner(cb):
-        return
-    async with Session() as s:
-        await repo.set_setting(s, "report_to", str(callback_data.hour))
-        frm = await repo.get_setting(s, "report_from")
-        await s.commit()
-    await _edit(
-        cb,
-        f"{tge('ok')} Отчёты: <b>{_window_text(frm, callback_data.hour)}</b>.",
-        None,
-    )
-    await cb.answer("Сохранено")
 
 
 # ---------- навигация ----------
