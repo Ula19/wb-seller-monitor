@@ -2,6 +2,7 @@
 
 import logging
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from aiogram.types import BufferedInputFile
 
@@ -165,11 +166,35 @@ async def monitoring_job(bot) -> None:
     log.info("мониторинг: завершён")
 
 
+def _in_window(hour: int, frm: int, to: int) -> bool:
+    """Час внутри окна [frm, to] (включительно). Поддержка ночного wrap: 22→6."""
+    return frm <= hour <= to if frm <= to else (hour >= frm or hour <= to)
+
+
 async def report_job(bot) -> None:
-    """Часовой отчёт по всем магазинам из БД (без обращения к WB)."""
+    """Часовой отчёт по всем магазинам из БД (без обращения к WB).
+
+    Шлём только в окне рабочих часов (МСК); окно не задано — круглосуточно.
+    """
+    async with Session() as s:
+        frm = await repo.get_setting(s, "report_from")
+        to = await repo.get_setting(s, "report_to")
+    if frm is not None and to is not None:
+        hour = datetime.now(ZoneInfo("Europe/Moscow")).hour
+        if not _in_window(hour, int(frm), int(to)):
+            log.info("отчёт пропущен: %d вне окна %s–%s", hour, frm, to)
+            return
     async with Session() as s:
         sellers = await repo.list_sellers(s)
         user_ids = await recipient_ids(s)
         data = [(sl, await repo.get_active_products(s, sl.supplier_id)) for sl in sellers]
     for seller, products in data:
         await send_report_to(bot, user_ids, seller, products)
+
+
+if __name__ == "__main__":  # self-check окна часов
+    assert _in_window(10, 9, 21) and not _in_window(22, 9, 21)
+    assert _in_window(23, 22, 6) and _in_window(3, 22, 6)  # ночной wrap
+    assert not _in_window(12, 22, 6)
+    assert _in_window(9, 9, 9)  # окно в один час
+    print("ok")

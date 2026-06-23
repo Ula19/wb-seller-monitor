@@ -14,6 +14,7 @@ RB_SELLERS = "🏪 Магазины"
 RB_USERS = "👥 Пользователи"
 RB_STATS = "📊 Статистика"
 RB_COOKIE = "🔑 Куки"
+RB_HOURS = "🕐 Часы отчётов"
 
 # Семантический ключ -> custom_emoji_id из набора tgmacicons (t.me/addemoji/tgmacicons).
 ICONS: dict[str, str] = {
@@ -46,6 +47,13 @@ class UserCB(CallbackData, prefix="ud"):
     uid: int
 
 
+class HourCB(CallbackData, prefix="rh"):
+    """Выбор часа окна отчётов. part: from|to."""
+
+    part: str
+    hour: int
+
+
 def _btn(b: InlineKeyboardBuilder, emoji: str, label: str, cb, *, style=None, icon=None):
     """Добавляет кнопку: цвет style + премиум-иконка (если задана), иначе emoji в тексте."""
     kwargs = {"callback_data": cb}
@@ -68,8 +76,19 @@ def main_reply(is_owner: bool):
         b.button(text=RB_USERS)
         b.button(text=RB_STATS)
         b.button(text=RB_COOKIE)
+        b.button(text=RB_HOURS)
     b.adjust(1)
     return b.as_markup(resize_keyboard=True)
+
+
+def hours_grid(part: str):
+    """Сетка часов 00–23 для выбора начала/конца окна отчётов."""
+    b = InlineKeyboardBuilder()
+    for h in range(24):
+        b.button(text=f"{h:02d}", callback_data=HourCB(part=part, hour=h))
+    _btn(b, "⬅️", "Назад", Nav(to="main"), icon="back")
+    b.adjust(6, 6, 6, 6, 1)
+    return b.as_markup()
 
 
 def sellers_menu(is_owner: bool):

@@ -114,6 +114,60 @@ async def cookie_input(m: Message, state: FSMContext):
     await m.answer(f"{tge('ok')} Цены обновлены.", parse_mode="HTML")
 
 
+# ---------- часы отчётов ----------
+def _window_text(frm, to) -> str:
+    if frm is None or to is None:
+        return "круглосуточно"
+    return f"с {int(frm):02d}:00 до {int(to):02d}:00"
+
+
+@router.message(F.text == kb.RB_HOURS)
+async def rb_hours(m: Message, state: FSMContext):
+    if m.from_user.id != settings.owner_id:
+        return
+    await state.clear()
+    async with Session() as s:
+        frm = await repo.get_setting(s, "report_from")
+        to = await repo.get_setting(s, "report_to")
+    await m.answer(
+        f"🕐 Отчёты сейчас: <b>{_window_text(frm, to)}</b>\n\n"
+        "Выберите час <b>начала</b>:",
+        reply_markup=kb.hours_grid("from"),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(kb.HourCB.filter(F.part == "from"))
+async def hour_from(cb: CallbackQuery, callback_data: kb.HourCB):
+    if await _deny_if_not_owner(cb):
+        return
+    async with Session() as s:
+        await repo.set_setting(s, "report_from", str(callback_data.hour))
+        await s.commit()
+    await _edit(
+        cb,
+        f"Начало: <b>{callback_data.hour:02d}:00</b>\n\nВыберите час <b>конца</b>:",
+        kb.hours_grid("to"),
+    )
+    await cb.answer()
+
+
+@router.callback_query(kb.HourCB.filter(F.part == "to"))
+async def hour_to(cb: CallbackQuery, callback_data: kb.HourCB):
+    if await _deny_if_not_owner(cb):
+        return
+    async with Session() as s:
+        await repo.set_setting(s, "report_to", str(callback_data.hour))
+        frm = await repo.get_setting(s, "report_from")
+        await s.commit()
+    await _edit(
+        cb,
+        f"{tge('ok')} Отчёты: <b>{_window_text(frm, callback_data.hour)}</b>.",
+        None,
+    )
+    await cb.answer("Сохранено")
+
+
 # ---------- навигация ----------
 @router.callback_query(kb.Nav.filter(F.to == "main"))
 async def nav_main(cb: CallbackQuery, state: FSMContext):
