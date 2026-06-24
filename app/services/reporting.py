@@ -3,10 +3,18 @@
 import io
 from datetime import datetime, timedelta
 
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from openpyxl import Workbook
 
 from app.config import settings
 from app.emoji import esc, tge
+
+
+def wb_button(url: str) -> InlineKeyboardMarkup:
+    """Кнопка-ссылка на карточку товара под уведомлением."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="🛒 Открыть на WB", url=url)]]
+    )
 
 
 def fmt_warehouse(from_seller) -> str | None:
@@ -102,7 +110,23 @@ def change_caption(seller_name: str, p, events) -> str:
                 lines.append(f"{tge('stock')} Снова в наличии (остаток {new})")
             else:
                 lines.append(f"{tge('stock')} Закончился (был остаток {old})")
-    lines += [f"Наша цена: {fmt_our(p.price)}", *_wh_delivery_lines(p), "", "Ссылка:", p.url]
+    lines += [f"Наша цена: {fmt_our(p.price)}", *_wh_delivery_lines(p)]
+    return "\n".join(lines)
+
+
+def new_caption(seller_name: str, p) -> str:
+    """Текст уведомления о новом товаре в ассортименте магазина."""
+    lines = [
+        f"{tge('add')} Новый товар",
+        "",
+        f"Магазин: {esc(seller_name)}",
+        esc(p.name),
+        f"Артикул: {p.nm_id}",
+        "",
+        f"{tge('price')} Цена: {fmt_price(p.price)}",
+        f"Наша цена: {fmt_our(p.price)}",
+        *_wh_delivery_lines(p),
+    ]
     return "\n".join(lines)
 
 

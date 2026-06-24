@@ -77,19 +77,32 @@ async def sync_seller(seller: models.Seller, *, silent_seed: bool = False):
 
 async def broadcast_change(bot, user_ids, seller, p, events) -> None:
     text = reporting.change_caption(seller.name or str(seller.supplier_id), p, events)
+    markup = reporting.wb_button(p.url)
     for uid in user_ids:
         try:
-            await bot.send_message(uid, text, parse_mode="HTML")
+            await bot.send_message(uid, text, parse_mode="HTML", reply_markup=markup)
         except Exception as e:
             log.warning("уведомление (изменение) не доставлено %s: %s", uid, e)
 
 
+async def broadcast_new(bot, user_ids, seller, p) -> None:
+    text = reporting.new_caption(seller.name or str(seller.supplier_id), p)
+    markup = reporting.wb_button(p.url)
+    for uid in user_ids:
+        try:
+            await bot.send_message(uid, text, parse_mode="HTML", reply_markup=markup)
+        except Exception as e:
+            log.warning("уведомление (новинка) не доставлено %s: %s", uid, e)
+
+
 async def notify_seller(bot, seller, new, changes) -> None:
-    """Рассылает изменения цены/наличия. Новинки больше не уведомляем (спам)."""
+    """Рассылает новинки и изменения цены/наличия."""
     async with Session() as s:
         user_ids = await recipient_ids(s)
     if not user_ids:
         return
+    for p in new:
+        await broadcast_new(bot, user_ids, seller, p)
     for p, events in changes:
         await broadcast_change(bot, user_ids, seller, p, events)
 
