@@ -1,5 +1,6 @@
 """Кэш разрешённых пользователей (whitelist в памяти, синхронен с БД)."""
 
+from app.config import settings
 from app.db import repo
 from app.db.base import Session
 
@@ -14,6 +15,11 @@ class Access:
 
     def is_allowed(self, uid: int | None) -> bool:
         return uid is not None and uid in self.allowed
+
+    def is_admin(self, uid: int | None) -> bool:
+        """Админ — владелец или любой пользователь из whitelist (права на всё,
+        кроме управления пользователями — это только владелец)."""
+        return uid is not None and (uid == settings.owner_id or uid in self.allowed)
 
     def add(self, uid: int) -> None:
         self.allowed.add(uid)

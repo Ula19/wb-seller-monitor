@@ -1,4 +1,4 @@
-from aiogram import F, Router
+from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
@@ -11,12 +11,17 @@ from app.services.monitor import sync_seller
 from app.wb.client import wb_client
 
 router = Router()
-# все хендлеры этого роутера — только для владельца
-router.message.filter(F.from_user.id == settings.owner_id)
+# хендлеры этого роутера — для админов (владелец + whitelist).
+# управление пользователями (grant/revoke/users) дополнительно ограничено владельцем.
+router.message.filter(lambda m: access.is_admin(m.from_user.id))
 
 
 def _arg(text: str | None) -> str:
     return (text or "").partition(" ")[2].strip()
+
+
+def _is_owner(m: Message) -> bool:
+    return m.from_user.id == settings.owner_id
 
 
 @router.message(Command("addseller"))
@@ -63,6 +68,9 @@ async def removeseller(m: Message):
 
 @router.message(Command("grant"))
 async def grant(m: Message):
+    if not _is_owner(m):
+        await m.answer("⛔ Управление пользователями — только для владельца.")
+        return
     arg = _arg(m.text)
     if not arg.isdigit():
         await m.answer("Использование: /grant <user_id>")
@@ -77,6 +85,9 @@ async def grant(m: Message):
 
 @router.message(Command("revoke"))
 async def revoke(m: Message):
+    if not _is_owner(m):
+        await m.answer("⛔ Управление пользователями — только для владельца.")
+        return
     arg = _arg(m.text)
     if not arg.isdigit():
         await m.answer("Использование: /revoke <user_id>")
@@ -94,6 +105,9 @@ async def revoke(m: Message):
 
 @router.message(Command("users"))
 async def users(m: Message):
+    if not _is_owner(m):
+        await m.answer("⛔ Управление пользователями — только для владельца.")
+        return
     async with Session() as s:
         us = await repo.list_users(s)
     lines = ["👥 Пользователи:", ""]
