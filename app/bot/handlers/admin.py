@@ -46,12 +46,12 @@ async def addseller(m: Message):
         await repo.add_seller(s, sid, name=name, brand=brand)
         await s.commit()
         seller = await repo.get_seller(s, sid)
-    await m.answer(f"⏳ Добавляю «{name or sid}», загружаю текущий ассортимент...")
+    status = await m.answer(f"⏳ Добавляю «{name or sid}», загружаю текущий ассортимент...")
     try:
         fetched, _, _ = await sync_seller(seller, silent_seed=True)
-        await m.answer(f"✅ Магазин «{name or sid}» добавлен. Товаров: {len(fetched)}.")
+        await status.edit_text(f"✅ Магазин «{name or sid}» добавлен. Товаров: {len(fetched)}.")
     except Exception as e:
-        await m.answer(f"⚠️ Магазин добавлен, но первичная загрузка не удалась: {e}")
+        await status.edit_text(f"⚠️ Магазин добавлен, но первичная загрузка не удалась: {e}")
 
 
 @router.message(Command("removeseller"))

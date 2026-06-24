@@ -113,12 +113,14 @@ async def cookie_input(m: Message, state: FSMContext):
     async with Session() as s:
         await repo.set_setting(s, "wb_cookie", raw)
         await s.commit()
-    await m.answer(
+    status = await m.answer(
         f"{tge('ok')} Кука обновлена ({n} полей). Обновляю цены, подожди...",
         parse_mode="HTML",
     )
     await silent_resync_all()
-    await m.answer(f"{tge('ok')} Цены обновлены.", parse_mode="HTML")
+    await status.edit_text(
+        f"{tge('ok')} Кука обновлена ({n} полей). Цены обновлены.", parse_mode="HTML"
+    )
 
 
 # ---------- часы отчётов ----------
@@ -234,9 +236,10 @@ async def check_seller_do(cb: CallbackQuery, callback_data: kb.SellerCB):
     name = seller.name if seller and seller.name else callback_data.sid
     await _edit(cb, f"{tge('clock')} Проверяю магазин «{esc(name)}»...", None)
     ok = await views.run_checknow_one(cb.bot, cb.from_user.id, callback_data.sid)
-    text, markup = await views.view_sellers(cb.from_user.id)
+    _, markup = await views.view_sellers(cb.from_user.id)
     msg = f"{tge('ok')} Готово." if ok else "Магазин не найден."
-    await cb.bot.send_message(cb.from_user.id, msg, reply_markup=markup, parse_mode="HTML")
+    # редактируем «Проверяю...» в результат, чтобы не плодить лишнее сообщение
+    await _edit(cb, msg, markup)
 
 
 # ---------- добавление магазина (FSM) ----------
