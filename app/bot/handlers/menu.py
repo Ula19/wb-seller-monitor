@@ -35,6 +35,13 @@ async def _edit(cb: CallbackQuery, text: str, markup) -> None:
 
 async def _deny_if_not_owner(cb: CallbackQuery) -> bool:
     if cb.from_user.id != settings.owner_id:
+        await cb.answer("⛔ Только для владельца", show_alert=True)
+        return True
+    return False
+
+
+async def _deny_if_not_admin(cb: CallbackQuery) -> bool:
+    if not access.is_admin(cb.from_user.id):
         await cb.answer("⛔ Только для администратора", show_alert=True)
         return True
     return False
@@ -67,7 +74,7 @@ async def rb_users(m: Message, state: FSMContext):
 
 @router.message(F.text == kb.RB_STATS)
 async def rb_stats(m: Message, state: FSMContext):
-    if m.from_user.id != settings.owner_id:
+    if not access.is_admin(m.from_user.id):
         return
     await state.clear()
     text, markup = await views.view_stats()
@@ -77,7 +84,7 @@ async def rb_stats(m: Message, state: FSMContext):
 # ---------- обновление WB-куки (FSM) ----------
 @router.message(F.text == kb.RB_COOKIE)
 async def rb_cookie(m: Message, state: FSMContext):
-    if m.from_user.id != settings.owner_id:
+    if not access.is_admin(m.from_user.id):
         return
     await state.set_state(SetCookie.waiting)
     await m.answer(
@@ -128,7 +135,7 @@ def _hours_caption(selected: set[int]) -> str:
 
 @router.message(F.text == kb.RB_HOURS)
 async def rb_hours(m: Message, state: FSMContext):
-    if m.from_user.id != settings.owner_id:
+    if not access.is_admin(m.from_user.id):
         return
     await state.clear()
     async with Session() as s:
@@ -140,7 +147,7 @@ async def rb_hours(m: Message, state: FSMContext):
 
 @router.callback_query(kb.HourCB.filter())
 async def toggle_hour(cb: CallbackQuery, callback_data: kb.HourCB):
-    if await _deny_if_not_owner(cb):
+    if await _deny_if_not_admin(cb):
         return
     async with Session() as s:
         selected = _parse_hours(await repo.get_setting(s, "report_hours"))
@@ -200,7 +207,7 @@ async def nav_list_users(cb: CallbackQuery):
 
 @router.callback_query(kb.Nav.filter(F.to == "stats"))
 async def nav_stats(cb: CallbackQuery):
-    if await _deny_if_not_owner(cb):
+    if await _deny_if_not_admin(cb):
         return
     text, markup = await views.view_stats()
     await _edit(cb, text, markup)
@@ -235,7 +242,7 @@ async def check_seller_do(cb: CallbackQuery, callback_data: kb.SellerCB):
 # ---------- добавление магазина (FSM) ----------
 @router.callback_query(kb.Nav.filter(F.to == "add_seller"))
 async def nav_add_seller(cb: CallbackQuery, state: FSMContext):
-    if await _deny_if_not_owner(cb):
+    if await _deny_if_not_admin(cb):
         return
     await state.set_state(AddSeller.waiting_id)
     await _edit(cb, f"{tge('add')} Пришлите ID или ссылку на магазин:", kb.cancel_kb())
@@ -298,7 +305,7 @@ async def add_seller_input(m: Message, state: FSMContext):
 # ---------- удаление магазина ----------
 @router.callback_query(kb.Nav.filter(F.to == "del_seller"))
 async def nav_del_seller(cb: CallbackQuery):
-    if await _deny_if_not_owner(cb):
+    if await _deny_if_not_admin(cb):
         return
     async with Session() as s:
         sellers = await repo.list_sellers(s)
@@ -311,7 +318,7 @@ async def nav_del_seller(cb: CallbackQuery):
 
 @router.callback_query(kb.SellerCB.filter(F.action == "del"))
 async def del_seller_ask(cb: CallbackQuery, callback_data: kb.SellerCB):
-    if await _deny_if_not_owner(cb):
+    if await _deny_if_not_admin(cb):
         return
     async with Session() as s:
         sl = await repo.get_seller(s, callback_data.sid)
@@ -322,7 +329,7 @@ async def del_seller_ask(cb: CallbackQuery, callback_data: kb.SellerCB):
 
 @router.callback_query(kb.SellerCB.filter(F.action == "delc"))
 async def del_seller_do(cb: CallbackQuery, callback_data: kb.SellerCB):
-    if await _deny_if_not_owner(cb):
+    if await _deny_if_not_admin(cb):
         return
     async with Session() as s:
         await repo.remove_seller(s, callback_data.sid)

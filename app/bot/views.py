@@ -1,6 +1,7 @@
 """Построители экранов меню (текст + клавиатура) и общие действия."""
 
 from app.bot import keyboards as kb
+from app.bot.access import access
 from app.config import settings
 from app.db import repo
 from app.db.base import Session
@@ -15,11 +16,13 @@ def is_owner(uid: int | None) -> bool:
 
 
 async def view_main(uid: int):
-    return f"{tge('list')} Главное меню. Выберите действие:", kb.main_reply(is_owner(uid))
+    return f"{tge('list')} Главное меню. Выберите действие:", kb.main_reply(
+        access.is_admin(uid), is_owner(uid)
+    )
 
 
 async def view_sellers(uid: int):
-    return f"{tge('shop')} Магазины:", kb.sellers_menu(is_owner(uid))
+    return f"{tge('shop')} Магазины:", kb.sellers_menu(access.is_admin(uid))
 
 
 async def view_list_sellers():

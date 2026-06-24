@@ -67,15 +67,16 @@ def _btn(b: InlineKeyboardBuilder, emoji: str, label: str, cb, *, style=None, ic
     b.button(**kwargs)
 
 
-def main_reply(is_owner: bool):
+def main_reply(is_admin: bool, is_owner: bool):
     """Главное меню — постоянные reply-кнопки внизу экрана."""
     b = ReplyKeyboardBuilder()
     b.button(text=RB_SELLERS)
-    if is_owner:
-        b.button(text=RB_USERS)
+    if is_admin:
         b.button(text=RB_STATS)
         b.button(text=RB_COOKIE)
         b.button(text=RB_HOURS)
+    if is_owner:  # управление пользователями — только владелец
+        b.button(text=RB_USERS)
     b.adjust(1)
     return b.as_markup(resize_keyboard=True)
 
@@ -91,11 +92,11 @@ def hours_grid(selected: set[int]):
     return b.as_markup()
 
 
-def sellers_menu(is_owner: bool):
+def sellers_menu(is_admin: bool):
     b = InlineKeyboardBuilder()
     _btn(b, "📋", "Список магазинов", Nav(to="list_sellers"), style="primary", icon="list")
     _btn(b, "🔄", "Проверить магазин", Nav(to="check_seller"), style="success", icon="refresh")
-    if is_owner:
+    if is_admin:
         _btn(b, "➕", "Добавить", Nav(to="add_seller"), style="success", icon="add")
         _btn(b, "➖", "Удалить", Nav(to="del_seller"), style="danger", icon="remove")
     _btn(b, "⬅️", "Назад", Nav(to="main"), icon="back")
