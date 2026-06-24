@@ -43,7 +43,7 @@ async def addseller(m: Message):
     name = (info or {}).get("trademark") or (info or {}).get("supplierName")
     brand = (info or {}).get("trademark")
     async with Session() as s:
-        await repo.add_seller(s, sid, name=name, brand=brand)
+        await repo.add_seller(s, sid, name=name, brand=brand, b2b=settings.wb_b2b)
         await s.commit()
         seller = await repo.get_seller(s, sid)
     status = await m.answer(f"⏳ Добавляю «{name or sid}», загружаю текущий ассортимент...")

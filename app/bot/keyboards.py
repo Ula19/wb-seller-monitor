@@ -38,8 +38,14 @@ class Nav(CallbackData, prefix="nav"):
 
 
 class SellerCB(CallbackData, prefix="sd"):
-    action: str  # del | check | fast
+    action: str  # del | check | fast | mode
     sid: int
+
+
+class PriceModeCB(CallbackData, prefix="pm"):
+    """Выбор режима цены при добавлении магазина."""
+
+    b2b: int  # 1 — бизнес, 0 — розница
 
 
 class UserCB(CallbackData, prefix="ud"):
@@ -100,7 +106,29 @@ def sellers_menu(is_admin: bool):
         _btn(b, "➕", "Добавить", Nav(to="add_seller"), style="success", icon="add")
         _btn(b, "➖", "Удалить", Nav(to="del_seller"), style="danger", icon="remove")
         _btn(b, "⚡", "Ежеминутные", Nav(to="fast_sellers"), style="primary")
+        _btn(b, "💰", "Режим цены", Nav(to="price_sellers"), style="primary")
     _btn(b, "⬅️", "Назад", Nav(to="main"), icon="back")
+    b.adjust(1)
+    return b.as_markup()
+
+
+def price_mode_kb():
+    """Выбор режима цены при добавлении магазина."""
+    b = InlineKeyboardBuilder()
+    b.button(text="🏢 Бизнес-цена", callback_data=PriceModeCB(b2b=1))
+    b.button(text="👤 Розничная", callback_data=PriceModeCB(b2b=0))
+    b.adjust(1)
+    return b.as_markup()
+
+
+def sellers_price_list(sellers):
+    """Список магазинов с тумблером режима цены: 🏢 бизнес / 👤 розница."""
+    b = InlineKeyboardBuilder()
+    for sl in sellers:
+        mark = "🏢" if sl.b2b else "👤"
+        title = f"{mark} {sl.name or sl.supplier_id}"
+        b.button(text=title, callback_data=SellerCB(action="mode", sid=sl.supplier_id))
+    _btn(b, "⬅️", "Назад", Nav(to="sellers"), icon="back")
     b.adjust(1)
     return b.as_markup()
 

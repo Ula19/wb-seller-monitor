@@ -35,6 +35,8 @@ class Seller(Base):
     )
     # приоритетный магазин: опрашивается отдельным быстрым джобом (раз в минуту)
     is_fast: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    # режим цены: True — бизнес-цена (b2b, нужна кука), False — розничная
+    b2b: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
 
 
 class Product(Base):

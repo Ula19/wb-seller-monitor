@@ -36,10 +36,10 @@ async def remove_user(s, uid: int) -> bool:
 
 
 # ---------- магазины ----------
-async def add_seller(s, supplier_id: int, name=None, brand=None) -> bool:
+async def add_seller(s, supplier_id: int, name=None, brand=None, b2b: bool = True) -> bool:
     if await s.get(models.Seller, supplier_id):
         return False
-    s.add(models.Seller(supplier_id=supplier_id, name=name, brand=brand))
+    s.add(models.Seller(supplier_id=supplier_id, name=name, brand=brand, b2b=b2b))
     return True
 
 
@@ -67,6 +67,14 @@ async def set_seller_fast(s, supplier_id: int, value: bool) -> bool:
     sl = await s.get(models.Seller, supplier_id)
     if sl:
         sl.is_fast = value
+        return True
+    return False
+
+
+async def set_seller_b2b(s, supplier_id: int, value: bool) -> bool:
+    sl = await s.get(models.Seller, supplier_id)
+    if sl:
+        sl.b2b = value
         return True
     return False
 

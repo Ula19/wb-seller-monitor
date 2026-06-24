@@ -40,7 +40,7 @@ async def sync_seller(seller: models.Seller, *, silent_seed: bool = False):
     silent_seed=True — первичная загрузка при добавлении магазина:
     товары помечаются известными, новинки/изменения не формируются.
     """
-    fetched = await wb_client.fetch_seller_catalog(seller.supplier_id)
+    fetched = await wb_client.fetch_seller_catalog(seller.supplier_id, seller.b2b)
     new = []
     changes = []
     if fetched:
@@ -76,7 +76,7 @@ async def sync_seller(seller: models.Seller, *, silent_seed: bool = False):
 
 
 async def broadcast_change(bot, user_ids, seller, p, events) -> None:
-    text = reporting.change_caption(seller.name or str(seller.supplier_id), p, events)
+    text = reporting.change_caption(seller.name or str(seller.supplier_id), p, events, seller.b2b)
     markup = reporting.wb_button(p.url)
     for uid in user_ids:
         try:
@@ -86,7 +86,7 @@ async def broadcast_change(bot, user_ids, seller, p, events) -> None:
 
 
 async def broadcast_new(bot, user_ids, seller, p) -> None:
-    text = reporting.new_caption(seller.name or str(seller.supplier_id), p)
+    text = reporting.new_caption(seller.name or str(seller.supplier_id), p, seller.b2b)
     markup = reporting.wb_button(p.url)
     for uid in user_ids:
         try:
@@ -119,14 +119,14 @@ async def send_report_to(bot, user_ids, seller, products) -> None:
     if len(products) >= settings.big_shop_threshold:
         data = reporting.build_excel(name, products)
         doc = BufferedInputFile(data, filename=f"seller_{seller.supplier_id}.xlsx")
-        caption = f"🏪 {name}\nВсего товаров: {len(products)}"
+        caption = f"🏪 {name} ({reporting.mode_tag(seller.b2b)})\nВсего товаров: {len(products)}"
         for uid in user_ids:
             try:
                 await bot.send_document(uid, doc, caption=caption)
             except Exception as e:
                 log.warning("отчёт (xlsx) не доставлен %s: %s", uid, e)
     else:
-        for chunk in reporting.chunk_text(reporting.hourly_report_text(name, products)):
+        for chunk in reporting.chunk_text(reporting.hourly_report_text(name, products, seller.b2b)):
             for uid in user_ids:
                 try:
                     await bot.send_message(uid, chunk, parse_mode="HTML")

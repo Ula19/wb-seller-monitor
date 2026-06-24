@@ -18,6 +18,7 @@ from app.config import settings
 from app.db import repo
 from app.db.base import Session
 from app.emoji import esc, tge
+from app.services import reporting
 from app.services.monitor import silent_resync_all, sync_seller
 from app.wb.client import wb_client
 
@@ -262,6 +263,40 @@ async def toggle_fast(cb: CallbackQuery, callback_data: kb.SellerCB):
     await cb.answer("⚡ Приоритет включён" if new_val else "Приоритет снят")
 
 
+PRICE_HINT = (
+    f"{tge('clock')} Режим цены: 🏢 бизнес-цена (нужна кука) / 👤 розница. "
+    "Жми магазин, чтобы переключить:"
+)
+
+
+@router.callback_query(kb.Nav.filter(F.to == "price_sellers"))
+async def nav_price_sellers(cb: CallbackQuery):
+    if await _deny_if_not_admin(cb):
+        return
+    async with Session() as s:
+        sellers = await repo.list_sellers(s)
+    if not sellers:
+        await cb.answer("Список магазинов пуст", show_alert=True)
+        return
+    await _edit(cb, PRICE_HINT, kb.sellers_price_list(sellers))
+    await cb.answer()
+
+
+@router.callback_query(kb.SellerCB.filter(F.action == "mode"))
+async def toggle_mode(cb: CallbackQuery, callback_data: kb.SellerCB):
+    if await _deny_if_not_admin(cb):
+        return
+    async with Session() as s:
+        sl = await repo.get_seller(s, callback_data.sid)
+        new_b2b = not sl.b2b if sl else True
+        if sl:
+            await repo.set_seller_b2b(s, callback_data.sid, new_b2b)
+            await s.commit()
+        sellers = await repo.list_sellers(s)
+    await _edit(cb, PRICE_HINT, kb.sellers_price_list(sellers))
+    await cb.answer(f"Режим: {reporting.mode_tag(new_b2b)}")
+
+
 @router.callback_query(kb.SellerCB.filter(F.action == "check"))
 async def check_seller_do(cb: CallbackQuery, callback_data: kb.SellerCB):
     await cb.answer("Проверяю...")
@@ -299,27 +334,27 @@ async def add_seller_input(m: Message, state: FSMContext):
             reply_markup=kb.cancel_kb(),
         )
         return
-    await state.clear()
     async with Session() as s:
         if await repo.get_seller(s, sid):
+            await state.clear()
             text, markup = await views.view_sellers(m.from_user.id)
             await m.answer(f"Магазин {sid} уже в списке.", reply_markup=markup)
             return
     info = await wb_client.fetch_supplier_info(sid)
     name = (info or {}).get("trademark") or (info or {}).get("supplierName")
     brand = (info or {}).get("trademark")
-    async with Session() as s:
-        await repo.add_seller(s, sid, name=name, brand=brand)
-        await s.commit()
-        seller = await repo.get_seller(s, sid)
-    status = await m.answer(
-        f"{tge('clock')} Магазин «{esc(name or sid)}» добавлен. "
-        "Гружу ассортимент в фоне — для крупных магазинов это несколько минут, "
-        "пришлю как закончу.",
+    # имя/бренд держим в FSM, магазин создаём после выбора режима цены
+    await state.update_data(sid=sid, name=name, brand=brand)
+    await state.set_state(AddSeller.waiting_mode)
+    await m.answer(
+        f"{tge('add')} Магазин «{esc(name or sid)}». Каким аккаунтом следить за ценой?",
+        reply_markup=kb.price_mode_kb(),
         parse_mode="HTML",
     )
-    # Грузим в фоне: у крупных продавцов сотни страниц × пауза 3-7с = до 10+ мин.
-    # Хендлер не блокируем, иначе бот выглядит зависшим.
+
+
+def _start_seed(status, seller, name, sid) -> None:
+    """Фоновая первичная загрузка ассортимента (у крупных — до 10+ мин)."""
     async def _seed():
         try:
             fetched, _, _ = await sync_seller(seller, silent_seed=True)
@@ -335,8 +370,30 @@ async def add_seller_input(m: Message, state: FSMContext):
     task = asyncio.create_task(_seed())
     _bg_tasks.add(task)  # держим ссылку, иначе задачу может убрать GC
     task.add_done_callback(_bg_tasks.discard)
-    text, markup = await views.view_sellers(m.from_user.id)
-    await m.answer(text, reply_markup=markup, parse_mode="HTML")
+
+
+@router.callback_query(AddSeller.waiting_mode, kb.PriceModeCB.filter())
+async def choose_price_mode(cb: CallbackQuery, callback_data: kb.PriceModeCB, state: FSMContext):
+    data = await state.get_data()
+    await state.clear()
+    sid, name, brand = data.get("sid"), data.get("name"), data.get("brand")
+    if not sid:
+        await cb.answer("Сессия истекла, начните заново", show_alert=True)
+        return
+    b2b = bool(callback_data.b2b)
+    async with Session() as s:
+        await repo.add_seller(s, sid, name=name, brand=brand, b2b=b2b)
+        await s.commit()
+        seller = await repo.get_seller(s, sid)
+    status = await cb.message.edit_text(
+        f"{tge('clock')} Магазин «{esc(name or sid)}» ({reporting.mode_tag(b2b)}) добавлен. "
+        "Гружу ассортимент в фоне — пришлю, как закончу.",
+        parse_mode="HTML",
+    )
+    _start_seed(status, seller, name, sid)
+    await cb.answer()
+    text, markup = await views.view_sellers(cb.from_user.id)
+    await cb.bot.send_message(cb.from_user.id, text, reply_markup=markup, parse_mode="HTML")
 
 
 # ---------- удаление магазина ----------

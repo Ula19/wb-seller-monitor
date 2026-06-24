@@ -68,8 +68,18 @@ def fmt_stock(stock) -> str:
     return "нет в наличии" if stock == 0 else str(stock)
 
 
-def hourly_report_text(seller_name: str, products) -> str:
-    lines = [f"{tge('shop')} Магазин: {esc(seller_name)}", "", f"Всего товаров: {len(products)}", ""]
+def mode_tag(b2b: bool) -> str:
+    """Пометка режима цены для магазина."""
+    return "🏢 бизнес" if b2b else "👤 розница"
+
+
+def hourly_report_text(seller_name: str, products, b2b: bool = True) -> str:
+    lines = [
+        f"{tge('shop')} Магазин: {esc(seller_name)} ({mode_tag(b2b)})",
+        "",
+        f"Всего товаров: {len(products)}",
+        "",
+    ]
     for i, p in enumerate(products, 1):
         lines += [
             f"{i}. {esc(p.name)}",
@@ -90,12 +100,12 @@ def _price_delta(old: int, new: int) -> str:
     return f"{arrow} {abs(d):,}".replace(",", " ") + " ₽"
 
 
-def change_caption(seller_name: str, p, events) -> str:
+def change_caption(seller_name: str, p, events, b2b: bool = True) -> str:
     """events — список кортежей ('price', old, new) | ('availability', old, new)."""
     lines = [
         f"{tge('change')} Изменение товара",
         "",
-        f"Магазин: {esc(seller_name)}",
+        f"Магазин: {esc(seller_name)} ({mode_tag(b2b)})",
         esc(p.name),
         f"Артикул: {p.nm_id}",
         "",
@@ -114,12 +124,12 @@ def change_caption(seller_name: str, p, events) -> str:
     return "\n".join(lines)
 
 
-def new_caption(seller_name: str, p) -> str:
+def new_caption(seller_name: str, p, b2b: bool = True) -> str:
     """Текст уведомления о новом товаре в ассортименте магазина."""
     lines = [
         f"{tge('add')} Новый товар",
         "",
-        f"Магазин: {esc(seller_name)}",
+        f"Магазин: {esc(seller_name)} ({mode_tag(b2b)})",
         esc(p.name),
         f"Артикул: {p.nm_id}",
         "",
