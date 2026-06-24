@@ -31,6 +31,9 @@ async def on_startup() -> None:
         await conn.execute(text(
             "ALTER TABLE sellers ADD COLUMN IF NOT EXISTS is_fast BOOLEAN DEFAULT FALSE"
         ))
+        await conn.execute(text(
+            "ALTER TABLE sellers ADD COLUMN IF NOT EXISTS b2b BOOLEAN DEFAULT TRUE"
+        ))
     await access.load()
     # актуальная кука живёт в БД (обновляется из Telegram); .env — лишь стартовый seed
     async with Session() as s:

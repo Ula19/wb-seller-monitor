@@ -5,6 +5,7 @@ from aiogram.fsm.state import State, StatesGroup
 
 class AddSeller(StatesGroup):
     waiting_id = State()
+    waiting_mode = State()  # выбор режима цены: бизнес / розница
 
 
 class AddUser(StatesGroup):

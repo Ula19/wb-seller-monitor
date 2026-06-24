@@ -123,8 +123,13 @@ class WBClient:
             return r
         return None
 
-    async def fetch_seller_catalog(self, supplier_id: int) -> list[NormProduct]:
-        """Все товары продавца: листаем страницы пока есть данные."""
+    async def fetch_seller_catalog(
+        self, supplier_id: int, b2b: bool = True
+    ) -> list[NormProduct]:
+        """Все товары продавца: листаем страницы пока есть данные.
+
+        b2b=True — подменяем розничные цены на бизнес-цены (нужна валидная кука).
+        """
         products: list[NormProduct] = []
         for page in range(1, settings.max_pages + 1):
             params = {
@@ -152,7 +157,7 @@ class WBClient:
             products.extend(normalize(p, supplier_id) for p in items)
             if len(items) < 100:
                 break
-        if settings.wb_b2b and products:
+        if b2b and products:
             await self._apply_b2b_prices(products)
         return products
 
