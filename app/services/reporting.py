@@ -112,10 +112,9 @@ def build_excel(seller_name: str, products) -> bytes:
     ws.title = "Товары"
     ws.append(
         ["Магазин", "Название", "Артикул", "Цена ВБ", "Наша цена", "Склад", "Доставка",
-         "Остаток", "Ссылка", "Дата обнаружения"]
+         "Остаток", "Ссылка"]
     )
     for p in products:
-        fs = getattr(p, "first_seen_at", None)
         ws.append(
             [
                 seller_name,
@@ -127,7 +126,6 @@ def build_excel(seller_name: str, products) -> bytes:
                 fmt_delivery(getattr(p, "delivery_hours", None)) or "",
                 p.stock,
                 p.url,
-                fs.strftime("%Y-%m-%d %H:%M") if fs else "",
             ]
         )
     bio = io.BytesIO()
