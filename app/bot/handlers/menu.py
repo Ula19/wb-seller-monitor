@@ -113,12 +113,14 @@ async def cookie_input(m: Message, state: FSMContext):
     async with Session() as s:
         await repo.set_setting(s, "wb_cookie", raw)
         await s.commit()
-    await m.answer(
+    status = await m.answer(
         f"{tge('ok')} Кука обновлена ({n} полей). Обновляю цены, подожди...",
         parse_mode="HTML",
     )
     await silent_resync_all()
-    await m.answer(f"{tge('ok')} Цены обновлены.", parse_mode="HTML")
+    await status.edit_text(
+        f"{tge('ok')} Кука обновлена ({n} полей). Цены обновлены.", parse_mode="HTML"
+    )
 
 
 # ---------- часы отчётов ----------
@@ -226,6 +228,40 @@ async def nav_check_seller(cb: CallbackQuery):
     await cb.answer()
 
 
+FAST_HINT = (
+    f"{tge('clock')} Приоритетные магазины (⚡) проверяются раз в минуту, "
+    "остальные — реже. Жми магазин, чтобы вкл/выкл:"
+)
+
+
+@router.callback_query(kb.Nav.filter(F.to == "fast_sellers"))
+async def nav_fast_sellers(cb: CallbackQuery):
+    if await _deny_if_not_admin(cb):
+        return
+    async with Session() as s:
+        sellers = await repo.list_sellers(s)
+    if not sellers:
+        await cb.answer("Список магазинов пуст", show_alert=True)
+        return
+    await _edit(cb, FAST_HINT, kb.sellers_fast_list(sellers))
+    await cb.answer()
+
+
+@router.callback_query(kb.SellerCB.filter(F.action == "fast"))
+async def toggle_fast(cb: CallbackQuery, callback_data: kb.SellerCB):
+    if await _deny_if_not_admin(cb):
+        return
+    async with Session() as s:
+        sl = await repo.get_seller(s, callback_data.sid)
+        new_val = not sl.is_fast if sl else False
+        if sl:
+            await repo.set_seller_fast(s, callback_data.sid, new_val)
+            await s.commit()
+        sellers = await repo.list_sellers(s)
+    await _edit(cb, FAST_HINT, kb.sellers_fast_list(sellers))
+    await cb.answer("⚡ Приоритет включён" if new_val else "Приоритет снят")
+
+
 @router.callback_query(kb.SellerCB.filter(F.action == "check"))
 async def check_seller_do(cb: CallbackQuery, callback_data: kb.SellerCB):
     await cb.answer("Проверяю...")
@@ -234,9 +270,10 @@ async def check_seller_do(cb: CallbackQuery, callback_data: kb.SellerCB):
     name = seller.name if seller and seller.name else callback_data.sid
     await _edit(cb, f"{tge('clock')} Проверяю магазин «{esc(name)}»...", None)
     ok = await views.run_checknow_one(cb.bot, cb.from_user.id, callback_data.sid)
-    text, markup = await views.view_sellers(cb.from_user.id)
+    _, markup = await views.view_sellers(cb.from_user.id)
     msg = f"{tge('ok')} Готово." if ok else "Магазин не найден."
-    await cb.bot.send_message(cb.from_user.id, msg, reply_markup=markup, parse_mode="HTML")
+    # редактируем «Проверяю...» в результат, чтобы не плодить лишнее сообщение
+    await _edit(cb, msg, markup)
 
 
 # ---------- добавление магазина (FSM) ----------

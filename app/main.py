@@ -28,6 +28,9 @@ async def on_startup() -> None:
         await conn.execute(text(
             "ALTER TABLE products ADD COLUMN IF NOT EXISTS from_seller BOOLEAN"
         ))
+        await conn.execute(text(
+            "ALTER TABLE sellers ADD COLUMN IF NOT EXISTS is_fast BOOLEAN DEFAULT FALSE"
+        ))
     await access.load()
     # актуальная кука живёт в БД (обновляется из Telegram); .env — лишь стартовый seed
     async with Session() as s:
@@ -59,7 +62,15 @@ async def main() -> None:
         monitoring_job,
         "interval",
         minutes=settings.monitor_interval_minutes,
-        args=[bot],
+        args=[bot, False],
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(  # быстрый джоб только по приоритетным магазинам
+        monitoring_job,
+        "interval",
+        minutes=settings.fast_monitor_interval_minutes,
+        args=[bot, True],
         max_instances=1,
         coalesce=True,
     )
