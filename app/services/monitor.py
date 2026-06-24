@@ -165,18 +165,24 @@ async def _check_cookie_health(bot) -> None:
         wb_client.cookie_alerted = False
 
 
-async def monitoring_job(bot) -> None:
-    """Лёгкий проход каждые N минут: новинки + изменения цены/наличия."""
+async def monitoring_job(bot, only_fast: bool = False) -> None:
+    """Проход по магазинам: новинки + изменения цены/наличия.
+
+    only_fast=True — быстрый джоб (раз в минуту) только по приоритетным магазинам;
+    only_fast=False — обычный джоб по остальным. Так приоритетные не опрашиваются дважды.
+    """
     async with Session() as s:
-        sellers = await repo.list_sellers(s)
-    log.info("мониторинг: старт, магазинов %d", len(sellers))
+        sellers = await repo.list_sellers(s, fast=True if only_fast else False)
+    tag = "быстрый" if only_fast else "обычный"
+    log.info("мониторинг (%s): старт, магазинов %d", tag, len(sellers))
     for seller in sellers:
         try:
             await sync_and_notify(bot, seller)
         except Exception as e:
             log.exception("синхронизация %s упала: %s", seller.supplier_id, e)
-    await _check_cookie_health(bot)
-    log.info("мониторинг: завершён")
+    if not only_fast:  # проверку куки гоняем в обычном джобе, не каждую минуту
+        await _check_cookie_health(bot)
+    log.info("мониторинг (%s): завершён", tag)
 
 
 async def report_job(bot) -> None:

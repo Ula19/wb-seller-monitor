@@ -228,6 +228,40 @@ async def nav_check_seller(cb: CallbackQuery):
     await cb.answer()
 
 
+FAST_HINT = (
+    f"{tge('clock')} Приоритетные магазины (⚡) проверяются раз в минуту, "
+    "остальные — реже. Жми магазин, чтобы вкл/выкл:"
+)
+
+
+@router.callback_query(kb.Nav.filter(F.to == "fast_sellers"))
+async def nav_fast_sellers(cb: CallbackQuery):
+    if await _deny_if_not_admin(cb):
+        return
+    async with Session() as s:
+        sellers = await repo.list_sellers(s)
+    if not sellers:
+        await cb.answer("Список магазинов пуст", show_alert=True)
+        return
+    await _edit(cb, FAST_HINT, kb.sellers_fast_list(sellers))
+    await cb.answer()
+
+
+@router.callback_query(kb.SellerCB.filter(F.action == "fast"))
+async def toggle_fast(cb: CallbackQuery, callback_data: kb.SellerCB):
+    if await _deny_if_not_admin(cb):
+        return
+    async with Session() as s:
+        sl = await repo.get_seller(s, callback_data.sid)
+        new_val = not sl.is_fast if sl else False
+        if sl:
+            await repo.set_seller_fast(s, callback_data.sid, new_val)
+            await s.commit()
+        sellers = await repo.list_sellers(s)
+    await _edit(cb, FAST_HINT, kb.sellers_fast_list(sellers))
+    await cb.answer("⚡ Приоритет включён" if new_val else "Приоритет снят")
+
+
 @router.callback_query(kb.SellerCB.filter(F.action == "check"))
 async def check_seller_do(cb: CallbackQuery, callback_data: kb.SellerCB):
     await cb.answer("Проверяю...")

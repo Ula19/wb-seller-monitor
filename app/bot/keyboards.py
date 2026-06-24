@@ -38,7 +38,7 @@ class Nav(CallbackData, prefix="nav"):
 
 
 class SellerCB(CallbackData, prefix="sd"):
-    action: str  # del | check
+    action: str  # del | check | fast
     sid: int
 
 
@@ -99,7 +99,20 @@ def sellers_menu(is_admin: bool):
     if is_admin:
         _btn(b, "➕", "Добавить", Nav(to="add_seller"), style="success", icon="add")
         _btn(b, "➖", "Удалить", Nav(to="del_seller"), style="danger", icon="remove")
+        _btn(b, "⚡", "Ежеминутные", Nav(to="fast_sellers"), style="primary")
     _btn(b, "⬅️", "Назад", Nav(to="main"), icon="back")
+    b.adjust(1)
+    return b.as_markup()
+
+
+def sellers_fast_list(sellers):
+    """Список магазинов с тумблером приоритета: ⚡ — опрос раз в минуту."""
+    b = InlineKeyboardBuilder()
+    for sl in sellers:
+        mark = "⚡" if sl.is_fast else "▫️"
+        title = f"{mark} {sl.name or sl.supplier_id}"
+        b.button(text=title, callback_data=SellerCB(action="fast", sid=sl.supplier_id))
+    _btn(b, "⬅️", "Назад", Nav(to="sellers"), icon="back")
     b.adjust(1)
     return b.as_markup()
 

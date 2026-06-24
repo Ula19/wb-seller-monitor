@@ -20,6 +20,8 @@ class Settings(BaseSettings):
 
     # расписание
     monitor_interval_minutes: int = 10
+    # приоритетные магазины (is_fast) опрашиваются отдельным быстрым джобом
+    fast_monitor_interval_minutes: int = 1
     big_shop_threshold: int = 100
     # минимальное изменение цены (%) для уведомления
     price_change_threshold_pct: float = 5.0
