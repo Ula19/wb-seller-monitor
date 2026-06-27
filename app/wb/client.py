@@ -161,10 +161,9 @@ class WBClient:
     ) -> list[NormProduct]:
         """Все товары продавца: листаем страницы пока есть данные.
 
-        Цену каталога (обезличенный SPP) заменяем на персональную из detail с кукой:
-        b2b=True — бизнес-цена, b2b=False — личная розничная (как на сайте под аккаунтом).
-        subjects — непустой набор оставляет только товары этих предметов (категорий WB);
-        фильтруем до detail, чтобы не дёргать цены на лишнее.
+        b2b=True — подменяем цену каталога на бизнес-цену из detail (нужна валидная кука).
+        b2b=False — розница: цена каталога минус скидка WB Кошелька (WB_WALLET_DISCOUNT_PCT),
+        куки не нужны (каталог публичный). subjects — оставляем только эти предметы.
         """
         products: list[NormProduct] = []
         for page in range(1, settings.max_pages + 1):
@@ -195,26 +194,33 @@ class WBClient:
                 break
         if subjects:
             products = [p for p in products if p.subject_id in subjects]
-        if products:
-            await self._apply_detail_prices(products, b2b)
+        if b2b and products:
+            await self._apply_b2b_prices(products)
+        elif products and settings.wb_wallet_discount_pct:
+            self._apply_wallet_price(products)
         return products
 
-    async def _apply_detail_prices(self, products: list[NormProduct], b2b: bool) -> None:
-        """Заменяет цену каталога на персональную из detail (с кукой), батчи по 100.
+    def _apply_wallet_price(self, products: list[NormProduct]) -> None:
+        """Розница: цена с WB Кошельком = product − WB_WALLET_DISCOUNT_PCT.
 
-        b2b=True — бизнес-цена; b2b=False — личная розница (то же поле product, но без
-        флага b2b). Если detail ничего не вернул — оставляем цену каталога (graceful).
+        Скидки кошелька нет в API (WB считает её на фронте) — накладываем сами.
+        ponytail: процент плоский на весь аккаунт (подтверждено 6% на нескольких товарах);
+        если WB сменит ставку — поправить WB_WALLET_DISCOUNT_PCT.
         """
+        k = 1 - settings.wb_wallet_discount_pct / 100
+        for p in products:
+            if p.price is not None:
+                p.price = int(p.price * k)  # WB округляет вниз (отбрасывает копейки)
+
+    async def _apply_b2b_prices(self, products: list[NormProduct]) -> None:
+        """Заменяет розничные цены на бизнес-цены (b2b detail, батчи по 100)."""
         ref = {"Referer": "https://www.wildberries.ru/"}
-        base = {**B2B_PARAMS}
-        if not b2b:
-            base.pop("b2b", None)  # розница: тот же detail, но без бизнес-флага
         prices: dict[int, int] = {}
         deliv: dict[int, tuple] = {}
         nm_ids = [p.nm_id for p in products]
         for i in range(0, len(nm_ids), 100):
             chunk = nm_ids[i:i + 100]
-            params = {**base, "nm": ";".join(map(str, chunk))}
+            params = {**B2B_PARAMS, "nm": ";".join(map(str, chunk))}
             r = await self._get(B2B_DETAIL_URL, params=params, headers=ref)
             if r is None or r.status_code != 200:
                 continue
@@ -232,15 +238,12 @@ class WBClient:
                 p.price = prices[p.nm_id]
             if p.nm_id in deliv:
                 p.delivery_hours, p.from_seller = deliv[p.nm_id]
-        # стрик/алерт о протухшей куке считаем только в бизнес-режиме: для розницы
-        # «0 персональных цен» может значить просто нет личной скидки, а не протухшую куку.
-        if b2b:
-            if products and not prices:
-                self.b2b_fail_streak += 1
-            else:
-                self.b2b_fail_streak = 0
-        mode = "b2b" if b2b else "розница"
-        log.info("detail цены применены (%s): %d/%d", mode, len(prices), len(products))
+        # 0 цен при наличии товаров = кука протухла (403/401).
+        if products and not prices:
+            self.b2b_fail_streak += 1
+        else:
+            self.b2b_fail_streak = 0
+        log.info("b2b цены применены: %d/%d", len(prices), len(products))
 
     async def resolve_seller_slug(self, slug: str) -> int | None:
         """supplier_id по slug-ссылке /seller/<slug> (для SEO-адресов без числа)."""
