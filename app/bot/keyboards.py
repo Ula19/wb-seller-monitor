@@ -48,6 +48,12 @@ class PriceModeCB(CallbackData, prefix="pm"):
     b2b: int  # 1 — бизнес, 0 — розница
 
 
+class SubjectCB(CallbackData, prefix="subj"):
+    """Тумблер предмета (категории) в глобальном фильтре мониторинга."""
+
+    sid: int  # subject_id WB
+
+
 class UserCB(CallbackData, prefix="ud"):
     action: str  # del
     uid: int
@@ -107,6 +113,7 @@ def sellers_menu(is_admin: bool):
         _btn(b, "➖", "Удалить", Nav(to="del_seller"), style="danger", icon="remove")
         _btn(b, "⚡", "Ежеминутные", Nav(to="fast_sellers"), style="primary")
         _btn(b, "💰", "Режим цены", Nav(to="price_sellers"), style="primary")
+        _btn(b, "📂", "Предметы (фильтр)", Nav(to="subjects"), style="primary")
     _btn(b, "⬅️", "Назад", Nav(to="main"), icon="back")
     b.adjust(1)
     return b.as_markup()
@@ -128,6 +135,18 @@ def sellers_price_list(sellers):
         mark = "🏢" if sl.b2b else "👤"
         title = f"{mark} {sl.name or sl.supplier_id}"
         b.button(text=title, callback_data=SellerCB(action="mode", sid=sl.supplier_id))
+    _btn(b, "⬅️", "Назад", Nav(to="sellers"), icon="back")
+    b.adjust(1)
+    return b.as_markup()
+
+
+def subjects_filter_list(overview, selected: set[int]):
+    """Тумблеры предметов: ✅ — в мониторинге. overview=(subject_id, кол-во, пример)."""
+    b = InlineKeyboardBuilder()
+    for sid, cnt, sample in overview:
+        mark = "✅" if sid in selected else "▫️"
+        label = f"{mark} {(sample or '—')} · {cnt}"
+        b.button(text=label[:64], callback_data=SubjectCB(sid=sid))
     _btn(b, "⬅️", "Назад", Nav(to="sellers"), icon="back")
     b.adjust(1)
     return b.as_markup()
