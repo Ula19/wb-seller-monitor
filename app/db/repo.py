@@ -105,6 +105,7 @@ async def upsert_product(s, p: NormProduct) -> None:
         pics=p.pics,
         delivery_hours=p.delivery_hours,
         from_seller=p.from_seller,
+        subject_id=p.subject_id,
         is_active=True,
         last_seen_at=func.now(),
     )
@@ -118,6 +119,7 @@ async def upsert_product(s, p: NormProduct) -> None:
             pics=stmt.excluded.pics,
             delivery_hours=stmt.excluded.delivery_hours,
             from_seller=stmt.excluded.from_seller,
+            subject_id=stmt.excluded.subject_id,
             is_active=True,
             last_seen_at=func.now(),
         ),
@@ -182,6 +184,28 @@ async def set_setting(s, key: str, value: str) -> None:
         row.value = value
     else:
         s.add(models.AppSetting(key=key, value=value))
+
+
+# ---------- фильтр предметов (категорий) ----------
+# Глобальный список subject_id в настройке "subject_ids" (csv). Пусто = мониторим всё.
+async def get_subject_ids(s) -> set[int]:
+    raw = await get_setting(s, "subject_ids")
+    return {int(x) for x in (raw or "").split(",") if x.strip()}
+
+
+async def set_subject_ids(s, ids: set[int]) -> None:
+    await set_setting(s, "subject_ids", ",".join(map(str, sorted(ids))))
+
+
+async def subjects_overview(s) -> list[tuple[int, int, str | None]]:
+    """Предметы, встречающиеся в товарах: (subject_id, кол-во, пример названия)."""
+    res = await s.execute(
+        select(models.Product.subject_id, func.count(), func.min(models.Product.name))
+        .where(models.Product.subject_id.is_not(None))
+        .group_by(models.Product.subject_id)
+        .order_by(func.count().desc())
+    )
+    return [(r[0], r[1], r[2]) for r in res.all()]
 
 
 # ---------- статистика ----------

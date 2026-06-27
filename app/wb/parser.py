@@ -14,6 +14,7 @@ class NormProduct:
     supplier_id: int
     delivery_hours: int | None = None  # time1+time2, для даты доставки
     from_seller: bool | None = None  # True=склад продавца, False=склад WB
+    subject_id: int | None = None  # предмет WB (категория): смартфоны=515 и т.д.
 
     @property
     def url(self) -> str:
@@ -75,6 +76,7 @@ def normalize(p: dict, supplier_id: int) -> NormProduct:
         supplier_id=supplier_id,
         delivery_hours=hours,
         from_seller=from_seller,
+        subject_id=int(p["subjectId"]) if p.get("subjectId") is not None else None,
     )
 
 

@@ -297,6 +297,49 @@ async def toggle_mode(cb: CallbackQuery, callback_data: kb.SellerCB):
     await cb.answer(f"Режим: {reporting.mode_tag(new_b2b)}")
 
 
+def _subj_caption(selected: set[int]) -> str:
+    if not selected:
+        return (
+            "📂 Фильтр предметов: <b>все категории</b>.\n"
+            "Отметь, что мониторить (пусто = всё подряд):"
+        )
+    return (
+        f"📂 В мониторинге предметов: <b>{len(selected)}</b>.\n"
+        "Жми, чтобы вкл/выкл (применится при следующем синке):"
+    )
+
+
+@router.callback_query(kb.Nav.filter(F.to == "subjects"))
+async def nav_subjects(cb: CallbackQuery):
+    if await _deny_if_not_admin(cb):
+        return
+    async with Session() as s:
+        overview = await repo.subjects_overview(s)
+        selected = await repo.get_subject_ids(s)
+    if not overview:
+        await cb.answer(
+            "Каталог ещё не загружен — предметы появятся после первого опроса магазинов",
+            show_alert=True,
+        )
+        return
+    await _edit(cb, _subj_caption(selected), kb.subjects_filter_list(overview, selected))
+    await cb.answer()
+
+
+@router.callback_query(kb.SubjectCB.filter())
+async def toggle_subject(cb: CallbackQuery, callback_data: kb.SubjectCB):
+    if await _deny_if_not_admin(cb):
+        return
+    async with Session() as s:
+        selected = await repo.get_subject_ids(s)
+        selected.symmetric_difference_update({callback_data.sid})  # toggle
+        await repo.set_subject_ids(s, selected)
+        await s.commit()
+        overview = await repo.subjects_overview(s)
+    await _edit(cb, _subj_caption(selected), kb.subjects_filter_list(overview, selected))
+    await cb.answer("Фильтр обновлён")
+
+
 @router.callback_query(kb.SellerCB.filter(F.action == "check"))
 async def check_seller_do(cb: CallbackQuery, callback_data: kb.SellerCB):
     await cb.answer("Проверяю...")

@@ -57,6 +57,7 @@ class Product(Base):
     pics: Mapped[int | None] = mapped_column(Integer, nullable=True)
     delivery_hours: Mapped[int | None] = mapped_column(Integer, nullable=True)
     from_seller: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    subject_id: Mapped[int | None] = mapped_column(Integer, nullable=True)  # предмет WB
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     first_seen_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
