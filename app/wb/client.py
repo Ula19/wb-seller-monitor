@@ -44,36 +44,66 @@ def _parse_cookie(raw: str) -> dict[str, str]:
     return out
 
 
+def _parse_proxies(raw: str) -> list[str]:
+    """'socks5h://h:p, http://h2:p2' -> список прокси. Пусто = без прокси (прямое соединение)."""
+    return [x.strip() for x in (raw or "").split(",") if x.strip()]
+
+
 class WBClient:
     def __init__(self) -> None:
-        cookies = _parse_cookie(settings.wb_cookie) if settings.wb_cookie else None
-        if cookies:
-            log.info("WB-клиент: использую куку аккаунта (%d полей)", len(cookies))
-        self._session = self._build_session(cookies)
+        self._cookies = _parse_cookie(settings.wb_cookie) if settings.wb_cookie else None
+        if self._cookies:
+            log.info("WB-клиент: использую куку аккаунта (%d полей)", len(self._cookies))
+        self._proxies = _parse_proxies(settings.wb_proxies)
+        self._proxy_idx = 0
+        if self._proxies:
+            log.info("WB-клиент: прокси %d шт., текущий %s", len(self._proxies), self._current_proxy())
+        self._session = self._build_session()
         self._lock = asyncio.Lock()
         self._last = 0.0
         self.b2b_fail_streak = 0  # подряд провалов b2b (0 цен при наличии товаров)
         self.cookie_alerted = False  # уже предупредили владельца о протухшей куке
 
-    @staticmethod
-    def _build_session(cookies) -> AsyncSession:
+    def _current_proxy(self) -> str | None:
+        return self._proxies[self._proxy_idx] if self._proxies else None
+
+    def _build_session(self) -> AsyncSession:
+        proxy = self._current_proxy()
+        proxies = {"http": proxy, "https": proxy} if proxy else None
         return AsyncSession(
-            headers=HEADERS, cookies=cookies, impersonate=IMPERSONATE, timeout=20
+            headers=HEADERS, cookies=self._cookies, impersonate=IMPERSONATE,
+            timeout=20, proxies=proxies,
         )
+
+    async def _rotate_proxy(self) -> bool:
+        """На 403 переключаемся на следующий прокси из списка. False — переключать некуда."""
+        if len(self._proxies) < 2:
+            return False
+        self._proxy_idx = (self._proxy_idx + 1) % len(self._proxies)
+        old = self._session
+        # ponytail: monitoring почти последователен (2 джоба, max_instances=1) — гонкой
+        # за self._session пренебрегаем; если станет проблемой — лок вокруг свопа.
+        self._session = self._build_session()
+        try:
+            await old.close()
+        except Exception:
+            pass
+        log.warning("WB: переключаюсь на прокси %s", self._current_proxy())
+        return True
 
     async def set_cookie(self, raw: str) -> int:
         """Заменяет куку и пересоздаёт сессию без рестарта. Возвращает число полей."""
-        cookies = _parse_cookie(raw) if raw else None
+        self._cookies = _parse_cookie(raw) if raw else None
         old = self._session
-        self._session = self._build_session(cookies)
+        self._session = self._build_session()
         self.b2b_fail_streak = 0
         self.cookie_alerted = False
         try:
             await old.close()
         except Exception:
             pass
-        log.info("WB-клиент: кука обновлена (%d полей)", len(cookies or {}))
-        return len(cookies or {})
+        log.info("WB-клиент: кука обновлена (%d полей)", len(self._cookies or {}))
+        return len(self._cookies or {})
 
     async def close(self) -> None:
         await self._session.close()
@@ -103,8 +133,11 @@ class WBClient:
             if r.status_code == 200:
                 return r
             if r.status_code == 403:
-                # WAF/бан по IP: ретраи бесполезны и только продлевают бан.
-                # Отступаем сразу — пусть следующий цикл попробует позже.
+                # WAF/бан по IP. Если есть запасные прокси — пробуем следующий и ретраим;
+                # иначе отступаем сразу (ретраи на том же IP бесполезны).
+                if await self._rotate_proxy():
+                    log.warning("WB %s -> 403, пробую следующий прокси", url)
+                    continue
                 log.warning("WB %s -> 403 (WAF/бан), пропуск без ретраев", url)
                 return None
             if r.status_code == 429 or r.status_code >= 500:
