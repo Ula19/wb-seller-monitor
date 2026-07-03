@@ -12,7 +12,7 @@ from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from app.bot import keyboards as kb
 from app.bot import views
 from app.bot.access import access
-from app.bot.states import AddSeller, AddUser, CheckBrands, SetCookie
+from app.bot.states import AddSeller, AddUser, CheckBrands, SetCookie, WorkHours
 from app.bot.utils import parse_seller_slug, parse_supplier_id
 from app.config import settings
 from app.db import repo
@@ -159,6 +159,69 @@ async def toggle_hour(cb: CallbackQuery, callback_data: kb.HourCB):
         await s.commit()
     await _edit(cb, _hours_caption(selected), kb.hours_grid(selected))
     await cb.answer()
+
+
+# ---------- часы работы бота (окно мониторинга) ----------
+async def _work_caption() -> str:
+    async with Session() as s:
+        ws = await repo.get_setting(s, "work_start")
+        we = await repo.get_setting(s, "work_end")
+    if not ws or not we:
+        return "🌙 Часы работы: <b>круглосуточно</b>.\nВыбери час <b>начала</b> работы:"
+    return (
+        f"🌙 Часы работы: <b>{int(ws):02d}:00–{int(we):02d}:00</b> (МСК).\n"
+        "Выбери час <b>начала</b>, чтобы задать заново:"
+    )
+
+
+@router.message(F.text == kb.RB_WORK)
+async def rb_work(m: Message, state: FSMContext):
+    if not access.is_admin(m.from_user.id):
+        return
+    await state.set_state(WorkHours.pick_start)
+    await m.answer(await _work_caption(), reply_markup=kb.work_hours_grid(), parse_mode="HTML")
+
+
+@router.callback_query(WorkHours.pick_start, kb.WorkHourCB.filter())
+async def work_pick_start(cb: CallbackQuery, callback_data: kb.WorkHourCB, state: FSMContext):
+    if await _deny_if_not_admin(cb):
+        return
+    await state.update_data(work_start=callback_data.hour)
+    await state.set_state(WorkHours.pick_end)
+    await _edit(
+        cb,
+        f"🌙 Начало: <b>{callback_data.hour:02d}:00</b>. Теперь выбери час <b>конца</b>:",
+        kb.work_hours_grid(),
+    )
+    await cb.answer()
+
+
+@router.callback_query(WorkHours.pick_end, kb.WorkHourCB.filter())
+async def work_pick_end(cb: CallbackQuery, callback_data: kb.WorkHourCB, state: FSMContext):
+    if await _deny_if_not_admin(cb):
+        return
+    start = (await state.get_data()).get("work_start")
+    end = callback_data.hour
+    await state.clear()
+    async with Session() as s:
+        await repo.set_setting(s, "work_start", str(start))
+        await repo.set_setting(s, "work_end", str(end))
+        await s.commit()
+    await _edit(cb, f"{tge('ok')} Часы работы: <b>{start:02d}:00–{end:02d}:00</b> (МСК).", None)
+    await cb.answer("Сохранено")
+
+
+@router.callback_query(kb.Nav.filter(F.to == "work_reset"))
+async def work_reset(cb: CallbackQuery, state: FSMContext):
+    if await _deny_if_not_admin(cb):
+        return
+    await state.clear()
+    async with Session() as s:
+        await repo.set_setting(s, "work_start", "")
+        await repo.set_setting(s, "work_end", "")
+        await s.commit()
+    await _edit(cb, f"{tge('ok')} Часы работы: <b>круглосуточно</b>.", None)
+    await cb.answer("Сброшено")
 
 
 # ---------- навигация ----------
@@ -326,9 +389,8 @@ async def nav_bc_run(cb: CallbackQuery, state: FSMContext):
                 hay = f"{p.brand or ''} {p.name or ''}".lower()
                 if any(n in hay for n in needles):
                     rows.append((p.name, p.price, shop))
-    # сортировку и группировку делает brands_report_text (модель→память→цвет→цена)
-    body = reporting.brands_report_text(rows).encode("utf-8")
-    doc = BufferedInputFile(body, filename="brands.txt")
+    # сортировку и группировку делает brands_excel (модель→память→цвет→цена)
+    doc = BufferedInputFile(reporting.brands_excel(rows), filename="brands.xlsx")
     caption = (
         f"🔎 {', '.join(sorted(brands))} · "
         f"магазинов {len(sids)} · товаров {len(rows)}"

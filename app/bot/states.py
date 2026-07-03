@@ -19,3 +19,8 @@ class SetCookie(StatesGroup):
 class CheckBrands(StatesGroup):
     pick_sellers = State()  # мультивыбор магазинов
     pick_brands = State()   # мультивыбор брендов
+
+
+class WorkHours(StatesGroup):
+    pick_start = State()  # выбор часа начала работы бота
+    pick_end = State()    # выбор часа конца
