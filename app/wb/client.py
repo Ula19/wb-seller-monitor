@@ -16,7 +16,9 @@ from app.wb.parser import NormProduct, _delivery, _price, normalize
 
 log = logging.getLogger(__name__)
 
-IMPERSONATE = "chrome"
+# b2b-эндпоинт (__internal) пускает только «настоящий» браузерный отпечаток.
+# Safari 18 — подтверждённо рабочий (chrome отдаёт 403 на __internal).
+IMPERSONATE = "safari18_0"
 HEADERS = {"Accept-Language": "ru-RU,ru;q=0.9"}
 
 CATALOG_URL = "https://catalog.wb.ru/sellers/v4/catalog"
@@ -216,15 +218,28 @@ class WBClient:
                 p.price = int(p.price * k)  # WB округляет вниз (отбрасывает копейки)
 
     async def _apply_b2b_prices(self, products: list[NormProduct]) -> None:
-        """Заменяет розничные цены на бизнес-цены (b2b detail, батчи по 100)."""
-        ref = {"Referer": "https://www.wildberries.ru/"}
+        """Заменяет розничные цены на бизнес-цены (b2b detail, батчи по 100).
+
+        WBAAS пускает __internal только на браузерный набор заголовков (без них — 403,
+        даже с валидной кукой). IP не проверяет — куку можно минтить дома, ходить через прокси.
+        """
         prices: dict[int, int] = {}
         deliv: dict[int, tuple] = {}
         nm_ids = [p.nm_id for p in products]
         for i in range(0, len(nm_ids), 100):
             chunk = nm_ids[i:i + 100]
             params = {**B2B_PARAMS, "nm": ";".join(map(str, chunk))}
-            r = await self._get(B2B_DETAIL_URL, params=params, headers=ref)
+            headers = {
+                "Accept": "*/*",
+                "Referer": f"https://www.wildberries.ru/catalog/{chunk[0]}/detail.aspx",
+                "Sec-Fetch-Site": "same-origin",
+                "Sec-Fetch-Mode": "cors",
+                "Sec-Fetch-Dest": "empty",
+                "x-requested-with": "XMLHttpRequest",
+                "deviceid": settings.wb_device_id,
+                "x-spa-version": settings.wb_spa_version,
+            }
+            r = await self._get(B2B_DETAIL_URL, params=params, headers=headers)
             if r is None or r.status_code != 200:
                 continue
             try:
