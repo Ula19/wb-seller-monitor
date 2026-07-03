@@ -131,7 +131,7 @@ def _parse_hours(csv) -> set[int]:
 
 def _hours_caption(selected: set[int]) -> str:
     if not selected:
-        return "🕐 Часы отчёта: <b>каждый час</b>.\nОтметь часы, когда слать отчёт:"
+        return "🕐 Часы отчёта: <b>не выбраны — отчёт не шлётся</b>.\nОтметь часы, когда слать отчёт:"
     hrs = ", ".join(f"{h:02d}:00" for h in sorted(selected))
     return f"🕐 Отчёт в: <b>{hrs}</b> (МСК).\nЖми час, чтобы вкл/выкл:"
 

@@ -178,16 +178,18 @@ async def monitoring_job(bot, only_fast: bool = False) -> None:
 async def report_job(bot) -> None:
     """Часовой отчёт по всем магазинам из БД (без обращения к WB).
 
-    Шлём только в выбранные часы (МСК); список пуст — каждый час.
+    Шлём только в выбранные часы (МСК); список пуст — отчёт не нужен вовсе.
     """
     async with Session() as s:
         hours_csv = await repo.get_setting(s, "report_hours")
-    if hours_csv:
-        selected = {int(x) for x in hours_csv.split(",") if x.strip()}
-        hour = datetime.now(ZoneInfo("Europe/Moscow")).hour
-        if hour not in selected:
-            log.info("отчёт пропущен: %d не в списке %s", hour, hours_csv)
-            return
+    selected = {int(x) for x in (hours_csv or "").split(",") if x.strip()}
+    if not selected:
+        log.info("отчёт пропущен: часы не выбраны")
+        return
+    hour = datetime.now(ZoneInfo("Europe/Moscow")).hour
+    if hour not in selected:
+        log.info("отчёт пропущен: %d не в списке %s", hour, hours_csv)
+        return
     async with Session() as s:
         sellers = await repo.list_sellers(s)
         user_ids = await recipient_ids(s)
