@@ -304,7 +304,7 @@ async def nav_bc_run(cb: CallbackQuery, state: FSMContext):
                 hay = f"{p.brand or ''} {p.name or ''}".lower()
                 if any(n in hay for n in needles):
                     rows.append((p.name, p.price, shop))
-    rows.sort(key=lambda r: ((r[0] or "").lower(), r[2]))  # одинаковые модели рядом
+    # сортировку и группировку делает brands_report_text (модель→память→цвет→цена)
     body = reporting.brands_report_text(rows).encode("utf-8")
     doc = BufferedInputFile(body, filename="brands.txt")
     caption = (
@@ -382,49 +382,6 @@ async def toggle_mode(cb: CallbackQuery, callback_data: kb.SellerCB):
         sellers = await repo.list_sellers(s)
     await _edit(cb, PRICE_HINT, kb.sellers_price_list(sellers))
     await cb.answer(f"Режим: {reporting.mode_tag(new_b2b)}")
-
-
-def _subj_caption(selected: set[int]) -> str:
-    if not selected:
-        return (
-            "📂 Фильтр предметов: <b>все категории</b>.\n"
-            "Отметь, что мониторить (пусто = всё подряд):"
-        )
-    return (
-        f"📂 В мониторинге предметов: <b>{len(selected)}</b>.\n"
-        "Жми, чтобы вкл/выкл (применится при следующем синке):"
-    )
-
-
-@router.callback_query(kb.Nav.filter(F.to == "subjects"))
-async def nav_subjects(cb: CallbackQuery):
-    if await _deny_if_not_admin(cb):
-        return
-    async with Session() as s:
-        overview = await repo.subjects_overview(s)
-        selected = await repo.get_subject_ids(s)
-    if not overview:
-        await cb.answer(
-            "Каталог ещё не загружен — предметы появятся после первого опроса магазинов",
-            show_alert=True,
-        )
-        return
-    await _edit(cb, _subj_caption(selected), kb.subjects_filter_list(overview, selected))
-    await cb.answer()
-
-
-@router.callback_query(kb.SubjectCB.filter())
-async def toggle_subject(cb: CallbackQuery, callback_data: kb.SubjectCB):
-    if await _deny_if_not_admin(cb):
-        return
-    async with Session() as s:
-        selected = await repo.get_subject_ids(s)
-        selected.symmetric_difference_update({callback_data.sid})  # toggle
-        await repo.set_subject_ids(s, selected)
-        await s.commit()
-        overview = await repo.subjects_overview(s)
-    await _edit(cb, _subj_caption(selected), kb.subjects_filter_list(overview, selected))
-    await cb.answer("Фильтр обновлён")
 
 
 @router.callback_query(kb.SellerCB.filter(F.action == "check"))

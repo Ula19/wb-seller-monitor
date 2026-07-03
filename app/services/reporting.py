@@ -1,6 +1,7 @@
 """Форматирование сообщений Telegram и Excel."""
 
 import io
+import re
 from datetime import datetime, timedelta
 
 from openpyxl import Workbook
@@ -129,14 +130,87 @@ def digest_text(seller_name: str, new, changes, b2b: bool = True) -> str:
     return "\n".join(lines)
 
 
+# --- грубый разбор названия для группировки/сортировки (модель · память · цвет) ---
+# ponytail: эвристика под «модель <RAM> <ROM> <цвет>»; экзотику разложит хуже,
+# апгрейд — словарь моделей по брендам, если понадобится.
+_COLORS = [
+    ("light violet", "violet"), ("light green", "green"),
+    ("чёрн", "black"), ("черн", "black"), ("black", "black"),
+    ("бел", "white"), ("white", "white"),
+    ("зел", "green"), ("green", "green"),
+    ("фиолет", "violet"), ("violet", "violet"), ("purple", "violet"),
+    ("лаванд", "lavender"), ("lavender", "lavender"),
+    ("голуб", "blue"), ("син", "blue"), ("blue", "blue"),
+    ("золот", "gold"), ("gold", "gold"),
+    ("серебр", "silver"), ("silver", "silver"),
+    ("сер", "gray"), ("gray", "gray"), ("grey", "gray"),
+    ("красн", "red"), ("red", "red"),
+    ("розов", "pink"), ("pink", "pink"),
+]
+_RAM = {2, 3, 4, 6, 8, 12, 16}
+_STO = {16, 32, 64, 128, 256, 512, 1024}
+_NOISE = {"смартфон", "телефон", "phone", "мобильный", "light", "ds", "dual",
+          "sim", "lte", "4g", "5g", "nfc", "android", "андроид", "ru", "eac",
+          "global", "гб", "gb", "tb", "тб", "ram", "rom"}
+
+
+def _color(s: str) -> str:
+    for needle, canon in _COLORS:
+        if needle in s:
+            return canon
+    return ""
+
+
+def _memory(nums: list[int]) -> tuple[int, int]:
+    ram = next((n for n in nums if n in _RAM), 0)
+    sto = next((n for n in nums if n in _STO and n != ram), 0)
+    return ram, sto
+
+
+def _model(s: str) -> str:
+    """Остаток названия без памяти, цвета, артикульных кодов и шума — это модель."""
+    out = []
+    for tok in re.split(r"[\s,()/]+", s):
+        t = tok.strip(".\"'")
+        if not t or t in _NOISE or _color(t):
+            continue
+        if t.replace("+", "").replace("gb", "").replace("гб", "").isdigit():
+            continue
+        if '"' in tok or re.fullmatch(r"\d+[.,]\d+", t):  # диагональ 6.7"
+            continue
+        has_d = any(c.isdigit() for c in t)
+        has_a = any(c.isalpha() for c in t)
+        if t.startswith("sm") or "-" in tok or (has_d and has_a and len(t) >= 5):
+            continue  # артикульный код (SM-A075..., A075FZKDSKZ)
+        out.append(t)
+    return " ".join(out)
+
+
+def _prod_key(name: str) -> tuple:
+    """Ключ товара: (модель, RAM, ROM, цвет) — одинаковый у того же товара в разных магазинах."""
+    s = (name or "").lower()
+    nums = [int(x) for x in re.findall(r"\d+", s)]
+    ram, sto = _memory(nums)
+    return (_model(s), ram, sto, _color(s))
+
+
 def brands_report_text(rows) -> str:
-    """Файл выборки по брендам. rows=(название, цена, магазин). Пустая строка между товарами."""
+    """Файл выборки по брендам. rows=(название, цена, магазин).
+
+    Сортировка: модель → память → цвет → цена. Пустая строка между разными
+    товарами; один и тот же товар из разных магазинов идёт подряд.
+    """
     if not rows:
         return "Ничего не найдено по выбранным магазинам и брендам."
+    keyed = [(_prod_key(name), name, price, shop) for name, price, shop in rows]
+    keyed.sort(key=lambda r: (r[0], r[2] if r[2] is not None else 10**12))
     out = []
-    for name, price, shop in rows:
+    prev = None
+    for key, name, price, shop in keyed:
+        if prev is not None and key != prev:
+            out.append("")  # разделитель между разными товарами
         out.append(f"{name} — {fmt_price(price)} / {shop}")
-        out.append("")
+        prev = key
     return "\n".join(out)
 
 
@@ -190,6 +264,15 @@ if __name__ == "__main__":  # self-check дайджеста
     assert "НОВЫЕ ТОВАРЫ" in txt and "ИЗМЕНЕНИЯ" in txt, txt
     assert "1 000 ₽ → 1 200 ₽" in txt and "▲ 200 ₽" in txt, txt
     assert "123" in txt
-    r = brands_report_text([("A26 6/128", 14600, "хобот"), ("A26 6/128", 14600, "мтс")])
-    assert "A26 6/128 — 14 600 ₽ / хобот" in r and r.count("\n\n") >= 1, r
+    sample = [
+        ("Смартфон Galaxy A07 4 128GB Black SM-A075FZKDSKZ", 8000, "b"),
+        ("Смартфон Galaxy A07 4 128 ГБ, чёрный", 7900, "a"),
+        ("Смартфон Galaxy A07 6 128GB Green SM-A075FZGHSKZ", 9000, "a"),
+        ("Смартфон Galaxy A26 6/128 Black", 14000, "a"),
+    ]
+    rep = brands_report_text(sample)
+    assert rep.index("7 900") < rep.index("8 000"), rep  # тот же товар — по цене
+    assert len(rep.split("\n\n")) == 3, rep  # A07 4/128 black | A07 6/128 green | A26
+    assert _prod_key("Galaxy A07 4 128GB Black") == _prod_key("Galaxy A07 A075F 4 128Gb чёрный"), \
+        "разные названия одного товара должны совпасть"
     print("ok")
