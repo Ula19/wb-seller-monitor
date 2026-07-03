@@ -77,36 +77,26 @@ async def sync_seller(seller: models.Seller, *, silent_seed: bool = False):
     return fetched, new, changes
 
 
-async def broadcast_change(bot, user_ids, seller, p, events) -> None:
-    text = reporting.change_caption(seller.name or str(seller.supplier_id), p, events, seller.b2b)
-    markup = reporting.wb_button(p.url)
-    for uid in user_ids:
-        try:
-            await bot.send_message(uid, text, parse_mode="HTML", reply_markup=markup)
-        except Exception as e:
-            log.warning("уведомление (изменение) не доставлено %s: %s", uid, e)
-
-
-async def broadcast_new(bot, user_ids, seller, p) -> None:
-    text = reporting.new_caption(seller.name or str(seller.supplier_id), p, seller.b2b)
-    markup = reporting.wb_button(p.url)
-    for uid in user_ids:
-        try:
-            await bot.send_message(uid, text, parse_mode="HTML", reply_markup=markup)
-        except Exception as e:
-            log.warning("уведомление (новинка) не доставлено %s: %s", uid, e)
-
-
 async def notify_seller(bot, seller, new, changes) -> None:
-    """Рассылает новинки и изменения цены/наличия."""
+    """Новинки и изменения по магазину — одним файлом, чтобы не спамить чат."""
+    if not new and not changes:
+        return
     async with Session() as s:
         user_ids = await recipient_ids(s)
     if not user_ids:
         return
-    for p in new:
-        await broadcast_new(bot, user_ids, seller, p)
-    for p, events in changes:
-        await broadcast_change(bot, user_ids, seller, p, events)
+    name = seller.name or str(seller.supplier_id)
+    body = reporting.digest_text(name, new, changes, seller.b2b).encode("utf-8")
+    doc = BufferedInputFile(body, filename=f"changes_{seller.supplier_id}.txt")
+    caption = (
+        f"🏪 {name} ({reporting.mode_tag(seller.b2b)}) — "
+        f"новинок {len(new)}, изменений {len(changes)}"
+    )
+    for uid in user_ids:
+        try:
+            await bot.send_document(uid, doc, caption=caption)
+        except Exception as e:
+            log.warning("дайджест не доставлен %s: %s", uid, e)
 
 
 async def sync_and_notify(bot, seller) -> list:

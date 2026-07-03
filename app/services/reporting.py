@@ -3,18 +3,10 @@
 import io
 from datetime import datetime, timedelta
 
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from openpyxl import Workbook
 
 from app.config import settings
 from app.emoji import esc, tge
-
-
-def wb_button(url: str) -> InlineKeyboardMarkup:
-    """Кнопка-ссылка на карточку товара под уведомлением."""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="🛒 Открыть на WB", url=url)]]
-    )
 
 
 def fmt_warehouse(from_seller) -> str | None:
@@ -100,44 +92,52 @@ def _price_delta(old: int, new: int) -> str:
     return f"{arrow} {abs(d):,}".replace(",", " ") + " ₽"
 
 
-def change_caption(seller_name: str, p, events, b2b: bool = True) -> str:
-    """events — список кортежей ('price', old, new) | ('availability', old, new)."""
+def digest_text(seller_name: str, new, changes, b2b: bool = True) -> str:
+    """Плоский текст файла-дайджеста по магазину: новинки + изменения (без HTML)."""
     lines = [
-        f"{tge('change')} Изменение товара",
-        "",
-        f"Магазин: {esc(seller_name)} ({mode_tag(b2b)})",
-        esc(p.name),
-        f"Артикул: {p.nm_id}",
+        f"🏪 Магазин: {seller_name} ({mode_tag(b2b)})",
+        f"Новинок: {len(new)} · Изменений: {len(changes)}",
         "",
     ]
-    for kind, old, new in events:
-        if kind == "price":
-            lines.append(
-                f"{tge('price')} Цена: {fmt_price(old)} → {fmt_price(new)} ({_price_delta(old, new)})"
-            )
-        elif kind == "availability":
-            if new > 0:
-                lines.append(f"{tge('stock')} Снова в наличии (остаток {new})")
-            else:
-                lines.append(f"{tge('stock')} Закончился (был остаток {old})")
-    lines += [f"Наша цена: {fmt_our(p.price)}", *_wh_delivery_lines(p)]
+    if new:
+        lines += ["━━━━━ 🆕 НОВЫЕ ТОВАРЫ ━━━━━", ""]
+        for i, p in enumerate(new, 1):
+            lines += [
+                f"{i}. {p.name}",
+                f"   Артикул: {p.nm_id}",
+                f"   Цена ВБ: {fmt_price(p.price)}   Наша: {fmt_our(p.price)}",
+                *(f"   {ln}" for ln in _wh_delivery_lines(p)),
+                f"   {p.url}",
+                "",
+            ]
+    if changes:
+        lines += ["━━━━━ ✏️ ИЗМЕНЕНИЯ ━━━━━", ""]
+        for i, (p, events) in enumerate(changes, 1):
+            lines += [f"{i}. {p.name}", f"   Артикул: {p.nm_id}"]
+            for kind, old, new_val in events:
+                if kind == "price":
+                    lines.append(
+                        f"   💰 Цена: {fmt_price(old)} → {fmt_price(new_val)} "
+                        f"({_price_delta(old, new_val)})"
+                    )
+                elif kind == "availability":
+                    if new_val > 0:
+                        lines.append(f"   📦 Снова в наличии (остаток {new_val})")
+                    else:
+                        lines.append(f"   📦 Закончился (был остаток {old})")
+            lines += [f"   Наша: {fmt_our(p.price)}", f"   {p.url}", ""]
     return "\n".join(lines)
 
 
-def new_caption(seller_name: str, p, b2b: bool = True) -> str:
-    """Текст уведомления о новом товаре в ассортименте магазина."""
-    lines = [
-        f"{tge('add')} Новый товар",
-        "",
-        f"Магазин: {esc(seller_name)} ({mode_tag(b2b)})",
-        esc(p.name),
-        f"Артикул: {p.nm_id}",
-        "",
-        f"{tge('price')} Цена: {fmt_price(p.price)}",
-        f"Наша цена: {fmt_our(p.price)}",
-        *_wh_delivery_lines(p),
-    ]
-    return "\n".join(lines)
+def brands_report_text(rows) -> str:
+    """Файл выборки по брендам. rows=(название, цена, магазин). Пустая строка между товарами."""
+    if not rows:
+        return "Ничего не найдено по выбранным магазинам и брендам."
+    out = []
+    for name, price, shop in rows:
+        out.append(f"{name} — {fmt_price(price)} / {shop}")
+        out.append("")
+    return "\n".join(out)
 
 
 def build_excel(seller_name: str, products) -> bytes:
@@ -180,3 +180,16 @@ def chunk_text(text: str, limit: int = 4000) -> list[str]:
         chunks.append(text[:cut])
         text = text[cut:].lstrip("\n")
     return chunks
+
+
+if __name__ == "__main__":  # self-check дайджеста
+    from types import SimpleNamespace
+    p = SimpleNamespace(name="Тест", nm_id=123, price=1000, url="http://x",
+                        stock=5, from_seller=None, delivery_hours=None)
+    txt = digest_text("Магазин", [p], [(p, [("price", 1000, 1200)])], b2b=False)
+    assert "НОВЫЕ ТОВАРЫ" in txt and "ИЗМЕНЕНИЯ" in txt, txt
+    assert "1 000 ₽ → 1 200 ₽" in txt and "▲ 200 ₽" in txt, txt
+    assert "123" in txt
+    r = brands_report_text([("A26 6/128", 14600, "хобот"), ("A26 6/128", 14600, "мтс")])
+    assert "A26 6/128 — 14 600 ₽ / хобот" in r and r.count("\n\n") >= 1, r
+    print("ok")
