@@ -261,6 +261,18 @@ async def bc_toggle_seller(cb: CallbackQuery, callback_data: kb.BCSeller, state:
     await cb.answer()
 
 
+@router.callback_query(kb.Nav.filter(F.to == "bc_all_sellers"))
+async def bc_all_sellers(cb: CallbackQuery, state: FSMContext):
+    async with Session() as s:
+        sellers = await repo.list_sellers(s)
+    all_ids = {sl.supplier_id for sl in sellers}
+    cur = set((await state.get_data()).get("bc_sids", []))
+    new = set() if cur >= all_ids else all_ids  # все выбраны → снять, иначе выбрать все
+    await state.update_data(bc_sids=list(new))
+    await _edit(cb, BC_SELLERS_HINT, kb.brand_sellers_kb(sellers, new))
+    await cb.answer()
+
+
 @router.callback_query(kb.Nav.filter(F.to == "bc_brands"))
 async def nav_bc_brands(cb: CallbackQuery, state: FSMContext):
     data = await state.get_data()
@@ -281,6 +293,16 @@ async def bc_toggle_brand(cb: CallbackQuery, callback_data: kb.BCBrand, state: F
     brands.symmetric_difference_update({name})  # toggle
     await state.update_data(bc_brands=list(brands))
     await _edit(cb, BC_BRANDS_HINT, kb.brand_pick_kb(brands))
+    await cb.answer()
+
+
+@router.callback_query(kb.Nav.filter(F.to == "bc_all_brands"))
+async def bc_all_brands(cb: CallbackQuery, state: FSMContext):
+    cur = set((await state.get_data()).get("bc_brands", []))
+    all_b = set(kb.BRANDS)
+    new = set() if cur >= all_b else all_b
+    await state.update_data(bc_brands=list(new))
+    await _edit(cb, BC_BRANDS_HINT, kb.brand_pick_kb(new))
     await cb.answer()
 
 

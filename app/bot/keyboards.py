@@ -213,6 +213,8 @@ def user_delete_confirm(uid: int):
 def brand_sellers_kb(sellers, selected: set[int]):
     """Шаг 1 выборки по брендам: чеклист магазинов (✅ — выбран)."""
     b = InlineKeyboardBuilder()
+    all_on = sellers and {sl.supplier_id for sl in sellers} <= selected
+    _btn(b, "☑️", "Снять все" if all_on else "Выбрать все", Nav(to="bc_all_sellers"))
     for sl in sellers:
         mark = "✅" if sl.supplier_id in selected else "▫️"
         b.button(text=f"{mark} {sl.name or sl.supplier_id}", callback_data=BCSeller(sid=sl.supplier_id))
@@ -225,6 +227,8 @@ def brand_sellers_kb(sellers, selected: set[int]):
 def brand_pick_kb(selected: set[str]):
     """Шаг 2 выборки по брендам: чеклист брендов (✅ — выбран)."""
     b = InlineKeyboardBuilder()
+    all_on = set(BRANDS) <= selected
+    _btn(b, "☑️", "Снять все" if all_on else "Выбрать все", Nav(to="bc_all_brands"))
     for i, name in enumerate(BRANDS):
         mark = "✅" if name in selected else "▫️"
         b.button(text=f"{mark} {name}", callback_data=BCBrand(idx=i))
