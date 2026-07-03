@@ -40,9 +40,7 @@ async def sync_seller(seller: models.Seller, *, silent_seed: bool = False):
     silent_seed=True — первичная загрузка при добавлении магазина:
     товары помечаются известными, новинки/изменения не формируются.
     """
-    async with Session() as s:
-        subjects = await repo.get_subject_ids(s)
-    fetched = await wb_client.fetch_seller_catalog(seller.supplier_id, seller.b2b, subjects)
+    fetched = await wb_client.fetch_seller_catalog(seller.supplier_id, seller.b2b)
     new = []
     changes = []
     if fetched:

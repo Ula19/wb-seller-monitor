@@ -20,6 +20,7 @@ IMPERSONATE = "chrome"
 HEADERS = {"Accept-Language": "ru-RU,ru;q=0.9"}
 
 CATALOG_URL = "https://catalog.wb.ru/sellers/v4/catalog"
+SMARTPHONE_SUBJECT_ID = 515  # WB-предмет «Смартфоны» — по умолчанию мониторим только их
 SUPPLIER_INFO_URL = "https://static-basket-01.wbbasket.ru/vol0/data/supplier-by-id/{}.json"
 # slug -> supplier_id: страница /seller/<slug> — SPA, ID отдаёт «конструктор магазинов»
 SHOP_BY_SLUG_URL = "https://static-basket-01.wbcontent.net/vol0/constructor-api/shops/v3/{}.json"
@@ -163,8 +164,10 @@ class WBClient:
 
         b2b=True — подменяем цену каталога на бизнес-цену из detail (нужна валидная кука).
         b2b=False — розница: цена каталога минус скидка WB Кошелька (WB_WALLET_DISCOUNT_PCT),
-        куки не нужны (каталог публичный). subjects — оставляем только эти предметы.
+        куки не нужны (каталог публичный). subjects — оставляем только эти предметы
+        (по умолчанию — смартфоны).
         """
+        subjects = subjects or {SMARTPHONE_SUBJECT_ID}
         products: list[NormProduct] = []
         for page in range(1, settings.max_pages + 1):
             params = {
