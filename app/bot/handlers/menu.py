@@ -7,12 +7,12 @@ from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, Message
 
 from app.bot import keyboards as kb
 from app.bot import views
 from app.bot.access import access
-from app.bot.states import AddSeller, AddUser, SetCookie
+from app.bot.states import AddSeller, AddUser, CheckBrands, SetCookie
 from app.bot.utils import parse_seller_slug, parse_supplier_id
 from app.config import settings
 from app.db import repo
@@ -177,7 +177,8 @@ async def nav_cancel(cb: CallbackQuery, state: FSMContext):
 
 
 @router.callback_query(kb.Nav.filter(F.to == "sellers"))
-async def nav_sellers(cb: CallbackQuery):
+async def nav_sellers(cb: CallbackQuery, state: FSMContext):
+    await state.clear()  # выход из выборки по брендам сбрасывает выбор
     text, markup = await views.view_sellers(cb.from_user.id)
     await _edit(cb, text, markup)
     await cb.answer()
@@ -227,6 +228,92 @@ async def nav_check_seller(cb: CallbackQuery):
         return
     await _edit(cb, "Выберите магазин для проверки:", kb.sellers_check_list(sellers))
     await cb.answer()
+
+
+# ---------- выборка товаров по брендам (мультивыбор магазинов + брендов) ----------
+BC_SELLERS_HINT = "Выберите магазины (можно несколько), затем «Дальше»:"
+BC_BRANDS_HINT = "Выберите бренды, затем «Показать товары»:"
+
+
+@router.callback_query(kb.Nav.filter(F.to == "check_brands"))
+async def nav_check_brands(cb: CallbackQuery, state: FSMContext):
+    async with Session() as s:
+        sellers = await repo.list_sellers(s)
+    if not sellers:
+        await cb.answer("Список магазинов пуст", show_alert=True)
+        return
+    data = await state.get_data()
+    selected = set(data.get("bc_sids", []))  # сохраняем выбор при «Назад» с брендов
+    await state.set_state(CheckBrands.pick_sellers)
+    await _edit(cb, BC_SELLERS_HINT, kb.brand_sellers_kb(sellers, selected))
+    await cb.answer()
+
+
+@router.callback_query(kb.BCSeller.filter())
+async def bc_toggle_seller(cb: CallbackQuery, callback_data: kb.BCSeller, state: FSMContext):
+    data = await state.get_data()
+    sids = set(data.get("bc_sids", []))
+    sids.symmetric_difference_update({callback_data.sid})  # toggle
+    await state.update_data(bc_sids=list(sids))
+    async with Session() as s:
+        sellers = await repo.list_sellers(s)
+    await _edit(cb, BC_SELLERS_HINT, kb.brand_sellers_kb(sellers, sids))
+    await cb.answer()
+
+
+@router.callback_query(kb.Nav.filter(F.to == "bc_brands"))
+async def nav_bc_brands(cb: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    if not data.get("bc_sids"):
+        await cb.answer("Выберите хотя бы один магазин", show_alert=True)
+        return
+    selected = set(data.get("bc_brands", []))
+    await state.set_state(CheckBrands.pick_brands)
+    await _edit(cb, BC_BRANDS_HINT, kb.brand_pick_kb(selected))
+    await cb.answer()
+
+
+@router.callback_query(kb.BCBrand.filter())
+async def bc_toggle_brand(cb: CallbackQuery, callback_data: kb.BCBrand, state: FSMContext):
+    name = kb.BRANDS[callback_data.idx]
+    data = await state.get_data()
+    brands = set(data.get("bc_brands", []))
+    brands.symmetric_difference_update({name})  # toggle
+    await state.update_data(bc_brands=list(brands))
+    await _edit(cb, BC_BRANDS_HINT, kb.brand_pick_kb(brands))
+    await cb.answer()
+
+
+@router.callback_query(kb.Nav.filter(F.to == "bc_run"))
+async def nav_bc_run(cb: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    sids = set(data.get("bc_sids", []))
+    brands = set(data.get("bc_brands", []))
+    if not sids or not brands:
+        await cb.answer("Нужно выбрать магазины и бренды", show_alert=True)
+        return
+    await cb.answer("Собираю...")
+    await state.clear()
+    needles = [b.lower() for b in brands]
+    rows = []
+    async with Session() as s:
+        for sid in sids:
+            sl = await repo.get_seller(s, sid)
+            shop = (sl.name if sl and sl.name else None) or str(sid)
+            for p in await repo.get_active_products(s, sid):
+                hay = f"{p.brand or ''} {p.name or ''}".lower()
+                if any(n in hay for n in needles):
+                    rows.append((p.name, p.price, shop))
+    rows.sort(key=lambda r: ((r[0] or "").lower(), r[2]))  # одинаковые модели рядом
+    body = reporting.brands_report_text(rows).encode("utf-8")
+    doc = BufferedInputFile(body, filename="brands.txt")
+    caption = (
+        f"🔎 {', '.join(sorted(brands))} · "
+        f"магазинов {len(sids)} · товаров {len(rows)}"
+    )
+    _, markup = await views.view_sellers(cb.from_user.id)
+    await _edit(cb, f"{tge('ok')} Готово, товаров: {len(rows)}.", markup)
+    await cb.bot.send_document(cb.from_user.id, doc, caption=caption)
 
 
 FAST_HINT = (

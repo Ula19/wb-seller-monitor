@@ -14,3 +14,8 @@ class AddUser(StatesGroup):
 
 class SetCookie(StatesGroup):
     waiting = State()
+
+
+class CheckBrands(StatesGroup):
+    pick_sellers = State()  # мультивыбор магазинов
+    pick_brands = State()   # мультивыбор брендов

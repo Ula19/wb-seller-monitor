@@ -59,6 +59,22 @@ class UserCB(CallbackData, prefix="ud"):
     uid: int
 
 
+# Бренды для выборки «Проверить по брендам» (порядок = как показываем).
+BRANDS = ["Samsung", "Redmi", "Xiaomi", "Poco", "Honor", "Tecno", "Realme", "Infinix", "Huawei"]
+
+
+class BCSeller(CallbackData, prefix="bcs"):
+    """Тумблер магазина в выборке по брендам."""
+
+    sid: int
+
+
+class BCBrand(CallbackData, prefix="bcb"):
+    """Тумблер бренда (idx — индекс в BRANDS)."""
+
+    idx: int
+
+
 class HourCB(CallbackData, prefix="rh"):
     """Тумблер часа отчёта (вкл/выкл)."""
 
@@ -108,6 +124,7 @@ def sellers_menu(is_admin: bool):
     b = InlineKeyboardBuilder()
     _btn(b, "📋", "Список магазинов", Nav(to="list_sellers"), style="primary", icon="list")
     _btn(b, "🔄", "Проверить магазин", Nav(to="check_seller"), style="success", icon="refresh")
+    _btn(b, "🔎", "Проверить по брендам", Nav(to="check_brands"), style="primary")
     if is_admin:
         _btn(b, "➕", "Добавить", Nav(to="add_seller"), style="success", icon="add")
         _btn(b, "➖", "Удалить", Nav(to="del_seller"), style="danger", icon="remove")
@@ -208,6 +225,30 @@ def user_delete_confirm(uid: int):
     b = InlineKeyboardBuilder()
     _btn(b, "✅", "Да, забрать", UserCB(action="delc", uid=uid), style="danger", icon="delete")
     _btn(b, "✖️", "Отмена", Nav(to="del_user"), icon="cancel")
+    b.adjust(1)
+    return b.as_markup()
+
+
+def brand_sellers_kb(sellers, selected: set[int]):
+    """Шаг 1 выборки по брендам: чеклист магазинов (✅ — выбран)."""
+    b = InlineKeyboardBuilder()
+    for sl in sellers:
+        mark = "✅" if sl.supplier_id in selected else "▫️"
+        b.button(text=f"{mark} {sl.name or sl.supplier_id}", callback_data=BCSeller(sid=sl.supplier_id))
+    _btn(b, "➡️", "Дальше (бренды)", Nav(to="bc_brands"), style="success")
+    _btn(b, "⬅️", "Назад", Nav(to="sellers"), icon="back")
+    b.adjust(1)
+    return b.as_markup()
+
+
+def brand_pick_kb(selected: set[str]):
+    """Шаг 2 выборки по брендам: чеклист брендов (✅ — выбран)."""
+    b = InlineKeyboardBuilder()
+    for i, name in enumerate(BRANDS):
+        mark = "✅" if name in selected else "▫️"
+        b.button(text=f"{mark} {name}", callback_data=BCBrand(idx=i))
+    _btn(b, "📄", "Показать товары", Nav(to="bc_run"), style="success")
+    _btn(b, "⬅️", "Назад", Nav(to="check_brands"), icon="back")
     b.adjust(1)
     return b.as_markup()
 
