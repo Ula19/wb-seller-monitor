@@ -4,6 +4,7 @@ import io
 import re
 from datetime import datetime, timedelta
 
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from openpyxl import Workbook
 
 from app.config import settings
@@ -93,40 +94,50 @@ def _price_delta(old: int, new: int) -> str:
     return f"{arrow} {abs(d):,}".replace(",", " ") + " ₽"
 
 
-def digest_text(seller_name: str, new, changes, b2b: bool = True) -> str:
-    """Плоский текст файла-дайджеста по магазину: новинки + изменения (без HTML)."""
+def wb_button(url: str) -> InlineKeyboardMarkup:
+    """Кнопка-ссылка на карточку товара под уведомлением."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="🛒 Открыть на WB", url=url)]]
+    )
+
+
+def new_caption(seller_name: str, p, b2b: bool = True) -> str:
+    """Текст уведомления о новом товаре в ассортименте магазина."""
     lines = [
-        f"🏪 Магазин: {seller_name} ({mode_tag(b2b)})",
-        f"Новинок: {len(new)} · Изменений: {len(changes)}",
+        f"{tge('add')} Новый товар",
+        "",
+        f"Магазин: {esc(seller_name)} ({mode_tag(b2b)})",
+        esc(p.name),
+        f"Артикул: {p.nm_id}",
+        "",
+        f"{tge('price')} Цена: {fmt_price(p.price)}",
+        f"Наша цена: {fmt_our(p.price)}",
+        *_wh_delivery_lines(p),
+    ]
+    return "\n".join(lines)
+
+
+def change_caption(seller_name: str, p, events, b2b: bool = True) -> str:
+    """events — список кортежей ('price', old, new) | ('availability', old, new)."""
+    lines = [
+        f"{tge('change')} Изменение товара",
+        "",
+        f"Магазин: {esc(seller_name)} ({mode_tag(b2b)})",
+        esc(p.name),
+        f"Артикул: {p.nm_id}",
         "",
     ]
-    if new:
-        lines += ["━━━━━ 🆕 НОВЫЕ ТОВАРЫ ━━━━━", ""]
-        for i, p in enumerate(new, 1):
-            lines += [
-                f"{i}. {p.name}",
-                f"   Артикул: {p.nm_id}",
-                f"   Цена ВБ: {fmt_price(p.price)}   Наша: {fmt_our(p.price)}",
-                *(f"   {ln}" for ln in _wh_delivery_lines(p)),
-                f"   {p.url}",
-                "",
-            ]
-    if changes:
-        lines += ["━━━━━ ✏️ ИЗМЕНЕНИЯ ━━━━━", ""]
-        for i, (p, events) in enumerate(changes, 1):
-            lines += [f"{i}. {p.name}", f"   Артикул: {p.nm_id}"]
-            for kind, old, new_val in events:
-                if kind == "price":
-                    lines.append(
-                        f"   💰 Цена: {fmt_price(old)} → {fmt_price(new_val)} "
-                        f"({_price_delta(old, new_val)})"
-                    )
-                elif kind == "availability":
-                    if new_val > 0:
-                        lines.append(f"   📦 Снова в наличии (остаток {new_val})")
-                    else:
-                        lines.append(f"   📦 Закончился (был остаток {old})")
-            lines += [f"   Наша: {fmt_our(p.price)}", f"   {p.url}", ""]
+    for kind, old, new in events:
+        if kind == "price":
+            lines.append(
+                f"{tge('price')} Цена: {fmt_price(old)} → {fmt_price(new)} ({_price_delta(old, new)})"
+            )
+        elif kind == "availability":
+            if new > 0:
+                lines.append(f"{tge('stock')} Снова в наличии (остаток {new})")
+            else:
+                lines.append(f"{tge('stock')} Закончился (был остаток {old})")
+    lines += [f"Наша цена: {fmt_our(p.price)}", *_wh_delivery_lines(p)]
     return "\n".join(lines)
 
 
@@ -194,24 +205,39 @@ def _prod_key(name: str) -> tuple:
     return (_model(s), ram, sto, _color(s))
 
 
-def brands_report_text(rows) -> str:
-    """Файл выборки по брендам. rows=(название, цена, магазин).
-
-    Сортировка: модель → память → цвет → цена. Пустая строка между разными
-    товарами; один и тот же товар из разных магазинов идёт подряд.
-    """
-    if not rows:
-        return "Ничего не найдено по выбранным магазинам и брендам."
+def _grouped_brand_rows(rows):
+    """Сортирует (модель→память→цвет→цена) и вставляет None между разными товарами."""
     keyed = [(_prod_key(name), name, price, shop) for name, price, shop in rows]
     keyed.sort(key=lambda r: (r[0], r[2] if r[2] is not None else 10**12))
     out = []
     prev = None
     for key, name, price, shop in keyed:
         if prev is not None and key != prev:
-            out.append("")  # разделитель между разными товарами
-        out.append(f"{name} — {fmt_price(price)} / {shop}")
+            out.append(None)  # разделитель между разными товарами
+        out.append((name, price, shop))
         prev = key
-    return "\n".join(out)
+    return out
+
+
+def brands_excel(rows) -> bytes:
+    """Xlsx выборки по брендам: колонки Название · Цена · Магазин.
+
+    Сортировка модель→память→цвет→цена; пустая строка между разными товарами,
+    один и тот же товар из разных магазинов идёт подряд.
+    """
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Товары"
+    ws.append(["Название", "Цена", "Магазин"])
+    for row in _grouped_brand_rows(rows):
+        if row is None:
+            ws.append([])  # пустая строка-разделитель между товарами
+        else:
+            name, price, shop = row
+            ws.append([name, price, shop])
+    bio = io.BytesIO()
+    wb.save(bio)
+    return bio.getvalue()
 
 
 def build_excel(seller_name: str, products) -> bytes:
@@ -256,23 +282,24 @@ def chunk_text(text: str, limit: int = 4000) -> list[str]:
     return chunks
 
 
-if __name__ == "__main__":  # self-check дайджеста
+if __name__ == "__main__":  # self-check уведомлений и группировки по брендам
     from types import SimpleNamespace
     p = SimpleNamespace(name="Тест", nm_id=123, price=1000, url="http://x",
                         stock=5, from_seller=None, delivery_hours=None)
-    txt = digest_text("Магазин", [p], [(p, [("price", 1000, 1200)])], b2b=False)
-    assert "НОВЫЕ ТОВАРЫ" in txt and "ИЗМЕНЕНИЯ" in txt, txt
-    assert "1 000 ₽ → 1 200 ₽" in txt and "▲ 200 ₽" in txt, txt
-    assert "123" in txt
+    assert "123" in new_caption("Магазин", p, b2b=False)
+    ch = change_caption("Магазин", p, [("price", 1000, 1200)], b2b=False)
+    assert "1 000 ₽ → 1 200 ₽" in ch and "▲ 200 ₽" in ch, ch
     sample = [
         ("Смартфон Galaxy A07 4 128GB Black SM-A075FZKDSKZ", 8000, "b"),
         ("Смартфон Galaxy A07 4 128 ГБ, чёрный", 7900, "a"),
         ("Смартфон Galaxy A07 6 128GB Green SM-A075FZGHSKZ", 9000, "a"),
         ("Смартфон Galaxy A26 6/128 Black", 14000, "a"),
     ]
-    rep = brands_report_text(sample)
-    assert rep.index("7 900") < rep.index("8 000"), rep  # тот же товар — по цене
-    assert len(rep.split("\n\n")) == 3, rep  # A07 4/128 black | A07 6/128 green | A26
+    grouped = _grouped_brand_rows(sample)
+    # A07 4/128 black (7900, 8000) | None | A07 6/128 green | None | A26
+    assert grouped[0][1] == 7900 and grouped[1][1] == 8000, grouped  # внутри по цене
+    assert grouped.count(None) == 2, grouped  # два разделителя = три товара
     assert _prod_key("Galaxy A07 4 128GB Black") == _prod_key("Galaxy A07 A075F 4 128Gb чёрный"), \
         "разные названия одного товара должны совпасть"
+    assert isinstance(brands_excel(sample), bytes)
     print("ok")

@@ -75,26 +75,38 @@ async def sync_seller(seller: models.Seller, *, silent_seed: bool = False):
     return fetched, new, changes
 
 
+async def broadcast_change(bot, user_ids, seller, p, events) -> None:
+    text = reporting.change_caption(seller.name or str(seller.supplier_id), p, events, seller.b2b)
+    markup = reporting.wb_button(p.url)
+    for uid in user_ids:
+        try:
+            await bot.send_message(uid, text, parse_mode="HTML", reply_markup=markup)
+        except Exception as e:
+            log.warning("уведомление (изменение) не доставлено %s: %s", uid, e)
+
+
+async def broadcast_new(bot, user_ids, seller, p) -> None:
+    text = reporting.new_caption(seller.name or str(seller.supplier_id), p, seller.b2b)
+    markup = reporting.wb_button(p.url)
+    for uid in user_ids:
+        try:
+            await bot.send_message(uid, text, parse_mode="HTML", reply_markup=markup)
+        except Exception as e:
+            log.warning("уведомление (новинка) не доставлено %s: %s", uid, e)
+
+
 async def notify_seller(bot, seller, new, changes) -> None:
-    """Новинки и изменения по магазину — одним файлом, чтобы не спамить чат."""
+    """Рассылает новинки и изменения цены/наличия отдельными сообщениями в чат."""
     if not new and not changes:
         return
     async with Session() as s:
         user_ids = await recipient_ids(s)
     if not user_ids:
         return
-    name = seller.name or str(seller.supplier_id)
-    body = reporting.digest_text(name, new, changes, seller.b2b).encode("utf-8")
-    doc = BufferedInputFile(body, filename=f"changes_{seller.supplier_id}.txt")
-    caption = (
-        f"🏪 {name} ({reporting.mode_tag(seller.b2b)}) — "
-        f"новинок {len(new)}, изменений {len(changes)}"
-    )
-    for uid in user_ids:
-        try:
-            await bot.send_document(uid, doc, caption=caption)
-        except Exception as e:
-            log.warning("дайджест не доставлен %s: %s", uid, e)
+    for p in new:
+        await broadcast_new(bot, user_ids, seller, p)
+    for p, events in changes:
+        await broadcast_change(bot, user_ids, seller, p, events)
 
 
 async def sync_and_notify(bot, seller) -> list:
@@ -139,20 +151,44 @@ async def silent_resync_all() -> None:
             log.warning("тихий ре-синк %s упал: %s", seller.supplier_id, e)
 
 
+COOKIE_ALERT = (
+    "‼️‼️‼️ <b>ВНИМАНИЕ: КУКА WB ПРОТУХЛА</b> ‼️‼️‼️\n\n"
+    "🔴 Бизнес-цены <b>не приходят</b>.\n"
+    "👉 Срочно обнови куку кнопкой «🔑 Куки»."
+)
+
+
 async def _check_cookie_health(bot) -> None:
-    """Если b2b-цены не приходят несколько раз подряд — кука протухла, зовём владельца."""
+    """Если b2b-цены не приходят несколько раз подряд — кука протухла, шумим всем."""
     if wb_client.b2b_fail_streak >= 2 and not wb_client.cookie_alerted:
         wb_client.cookie_alerted = True
-        try:
-            await bot.send_message(
-                settings.owner_id,
-                "⚠️ Кука WB протухла — бизнес-цены не приходят. "
-                "Обнови её кнопкой «🔑 Куки».",
-            )
-        except Exception as e:
-            log.warning("алерт о куке не доставлен: %s", e)
+        async with Session() as s:
+            user_ids = await recipient_ids(s)
+        for uid in user_ids:
+            try:
+                await bot.send_message(uid, COOKIE_ALERT, parse_mode="HTML")
+            except Exception as e:
+                log.warning("алерт о куке не доставлен %s: %s", uid, e)
     elif wb_client.b2b_fail_streak == 0:
         wb_client.cookie_alerted = False
+
+
+def _within_work_hours(start, end, hour) -> bool:
+    """Час hour внутри рабочего окна [start, end) (МСК). Пусто/вырождено = круглосуточно."""
+    if start is None or end is None or start == end:
+        return True
+    if start < end:
+        return start <= hour < end
+    return hour >= start or hour < end  # ночной переход, напр. 22→06
+
+
+async def _work_window() -> tuple[int | None, int | None]:
+    async with Session() as s:
+        ws = await repo.get_setting(s, "work_start")
+        we = await repo.get_setting(s, "work_end")
+    start = int(ws) if ws not in (None, "") else None
+    end = int(we) if we not in (None, "") else None
+    return start, end
 
 
 async def monitoring_job(bot, only_fast: bool = False) -> None:
@@ -161,6 +197,11 @@ async def monitoring_job(bot, only_fast: bool = False) -> None:
     only_fast=True — быстрый джоб (раз в минуту) только по приоритетным магазинам;
     only_fast=False — обычный джоб по остальным. Так приоритетные не опрашиваются дважды.
     """
+    start, end = await _work_window()
+    hour = datetime.now(ZoneInfo("Europe/Moscow")).hour
+    if not _within_work_hours(start, end, hour):
+        log.info("мониторинг пропущен: вне рабочих часов (%s–%s), сейчас %d", start, end, hour)
+        return
     async with Session() as s:
         sellers = await repo.list_sellers(s, fast=True if only_fast else False)
     tag = "быстрый" if only_fast else "обычный"
@@ -198,9 +239,16 @@ async def report_job(bot) -> None:
         await send_report_to(bot, user_ids, seller, products)
 
 
-if __name__ == "__main__":  # self-check разбора часов
+if __name__ == "__main__":  # self-check разбора часов и рабочего окна
     parse = lambda csv: {int(x) for x in csv.split(",") if x.strip()}
     assert parse("9,13,18") == {9, 13, 18}
     assert parse("") == set()
     assert 13 in parse("9,13,18") and 12 not in parse("9,13,18")
+    # окно [8,23): день внутри, ночь снаружи
+    assert _within_work_hours(8, 23, 10) and not _within_work_hours(8, 23, 3)
+    assert not _within_work_hours(8, 23, 23)  # конец не включаем
+    # ночной переход 22→6: 23 и 2 внутри, 12 снаружи
+    assert _within_work_hours(22, 6, 23) and _within_work_hours(22, 6, 2)
+    assert not _within_work_hours(22, 6, 12)
+    assert _within_work_hours(None, None, 3)  # не задано = круглосуточно
     print("ok")
