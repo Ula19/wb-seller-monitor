@@ -160,7 +160,7 @@ COOKIE_ALERT = (
 
 async def _check_cookie_health(bot) -> None:
     """Если b2b-цены не приходят несколько раз подряд — кука протухла, шумим всем."""
-    if wb_client.b2b_fail_streak >= 2 and not wb_client.cookie_alerted:
+    if wb_client.b2b_fail_streak >= 5 and not wb_client.cookie_alerted:
         wb_client.cookie_alerted = True
         async with Session() as s:
             user_ids = await recipient_ids(s)
