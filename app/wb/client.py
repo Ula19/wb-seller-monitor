@@ -199,20 +199,22 @@ class WBClient:
                 break
         if subjects:
             products = [p for p in products if p.subject_id in subjects]
-        if b2b and products:
+        # detail с кукой отдаёт личную цену аккаунта для обоих режимов (b2b-флаг на неё
+        # не влияет — аккаунт бизнесовый). Для розницы добавляем наценку до витрины.
+        if products:
             await self._apply_b2b_prices(products)
-        elif products and settings.wb_wallet_discount_pct:
-            self._apply_wallet_price(products)
+            if not b2b and settings.wb_retail_markup_pct:
+                self._apply_retail_markup(products)
         return products
 
-    def _apply_wallet_price(self, products: list[NormProduct]) -> None:
-        """Розница: цена с WB Кошельком = product − WB_WALLET_DISCOUNT_PCT.
+    def _apply_retail_markup(self, products: list[NormProduct]) -> None:
+        """Розница: витринная цена «с WB Кошельком» = business-product + WB_RETAIL_MARKUP_PCT.
 
-        Скидки кошелька нет в API (WB считает её на фронте) — накладываем сами.
-        ponytail: процент плоский на весь аккаунт (подтверждено 6% на нескольких товарах);
-        если WB сменит ставку — поправить WB_WALLET_DISCOUNT_PCT.
+        detail с кукой отдаёт business-цену аккаунта (ниже витрины, напр. 15974);
+        потребительская цена на сайте на ~2.73% выше (16410). Плоский коэффициент —
+        SPP аккаунта плоский; если WB сменит SPP/кошелёк, поправить WB_RETAIL_MARKUP_PCT.
         """
-        k = 1 - settings.wb_wallet_discount_pct / 100
+        k = 1 + settings.wb_retail_markup_pct / 100
         for p in products:
             if p.price is not None:
                 p.price = int(p.price * k)  # WB округляет вниз (отбрасывает копейки)
@@ -294,3 +296,10 @@ class WBClient:
 
 # единый экземпляр на всё приложение (общий троттлинг для планировщика и хендлеров)
 wb_client = WBClient()
+
+
+if __name__ == "__main__":  # self-check наценки розницы (business-product → витрина)
+    k = 1 + 2.73 / 100
+    assert int(15974 * k) == 16410, int(15974 * k)  # nm 762087347
+    assert int(9477 * k) == 9735, int(9477 * k)      # nm 507392655
+    print("ok")
