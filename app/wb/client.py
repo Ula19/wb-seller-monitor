@@ -142,7 +142,7 @@ class WBClient:
                     log.warning("WB %s -> 403, пробую следующий прокси", url)
                     continue
                 log.warning("WB %s -> 403 (WAF/бан), пропуск без ретраев", url)
-                return None
+                return r  # отдаём 403, а не None: None теперь значит только «сеть легла»
             if r.status_code == 429 or r.status_code >= 500:
                 retry_after = r.headers.get("X-Ratelimit-Retry") or r.headers.get(
                     "Retry-After"
@@ -225,6 +225,7 @@ class WBClient:
         """
         prices: dict[int, int] = {}
         deliv: dict[int, tuple] = {}
+        saw_response = False  # получили ли хоть один HTTP-ответ (не сетевой обрыв)
         nm_ids = [p.nm_id for p in products]
         for i in range(0, len(nm_ids), 100):
             chunk = nm_ids[i:i + 100]
@@ -240,7 +241,10 @@ class WBClient:
                 "x-spa-version": settings.wb_spa_version,
             }
             r = await self._get(B2B_DETAIL_URL, params=params, headers=headers)
-            if r is None or r.status_code != 200:
+            if r is None:
+                continue  # сеть легла (прокси оборвал) — не признак протухшей куки
+            saw_response = True
+            if r.status_code != 200:
                 continue
             try:
                 items = r.json().get("products") or []
@@ -256,9 +260,14 @@ class WBClient:
                 p.price = prices[p.nm_id]
             if p.nm_id in deliv:
                 p.delivery_hours, p.from_seller = deliv[p.nm_id]
-        # 0 цен при наличии товаров = кука протухла (403/401).
+        # 0 цен при наличии товаров = кука протухла — НО только если WB реально ответил.
+        # Если все чанки легли по сети (прокси оборвал), это не про куку — не копим счётчик,
+        # иначе транзиентные обрывы мобильного прокси дают ложный алерт «кука протухла».
         if products and not prices:
-            self.b2b_fail_streak += 1
+            if saw_response:
+                self.b2b_fail_streak += 1
+            else:
+                log.warning("b2b: все запросы легли по сети (прокси), счётчик куки не трогаю")
         else:
             self.b2b_fail_streak = 0
         log.info("b2b цены применены: %d/%d", len(prices), len(products))

@@ -27,13 +27,23 @@ PARAMS = {
 
 
 async def main():
-    print("кука активна:", bool(settings.wb_cookie), "| b2b=true")
-    headers = {"Referer": "https://www.wildberries.ru/"}
-    if os.environ.get("WB_AUTH"):
-        headers["authorization"] = os.environ["WB_AUTH"]
-    if os.environ.get("WB_POW"):
-        headers["x-pow"] = os.environ["WB_POW"]
-    r = await wb_client._session.get(URL, params=PARAMS, headers=headers)
+    print("кука активна:", bool(settings.wb_cookie), "| прокси:", wb_client._current_proxy())
+    # те же браузерные заголовки, что шлёт бот в _apply_b2b_prices (без них WBAAS даёт 403)
+    headers = {
+        "Accept": "*/*",
+        "Referer": f"https://www.wildberries.ru/catalog/{NMS[0]}/detail.aspx",
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Dest": "empty",
+        "x-requested-with": "XMLHttpRequest",
+        "deviceid": settings.wb_device_id,
+        "x-spa-version": settings.wb_spa_version,
+    }
+    try:
+        r = await wb_client._session.get(URL, params=PARAMS, headers=headers)
+    except Exception as e:
+        print("СЕТЕВАЯ ОШИБКА (прокси/таймаут, НЕ кука):", e)
+        await wb_client.close(); return
     print("статус:", r.status_code)
     if r.status_code != 200:
         print(r.text[:150]); await wb_client.close(); return
