@@ -165,9 +165,8 @@ class WBClient:
         """Все товары продавца: листаем страницы пока есть данные.
 
         b2b=True — подменяем цену каталога на бизнес-цену из detail (нужна валидная кука).
-        b2b=False — розница: цена каталога минус скидка WB Кошелька (WB_WALLET_DISCOUNT_PCT),
-        куки не нужны (каталог публичный). subjects — оставляем только эти предметы
-        (по умолчанию — смартфоны).
+        b2b=False — розница: цена каталога как есть (= витрина покупателя без кошелька),
+        куки не нужны. subjects — оставляем только эти предметы (по умолчанию — смартфоны).
         """
         subjects = subjects or {SMARTPHONE_SUBJECT_ID}
         products: list[NormProduct] = []
@@ -199,25 +198,12 @@ class WBClient:
                 break
         if subjects:
             products = [p for p in products if p.subject_id in subjects]
-        # detail с кукой отдаёт личную цену аккаунта для обоих режимов (b2b-флаг на неё
-        # не влияет — аккаунт бизнесовый). Для розницы добавляем наценку до витрины.
-        if products:
+        # Розница: цена каталога = витрина обычного покупателя без кошелька (проверено
+        # на аккаунте без WB Кошелька, 4/4 до рубля) — detail не зовём, лишних запросов нет.
+        # «Цена с кошельком −6%» — чисто отображение, считается в reporting.
+        if b2b and products:
             await self._apply_b2b_prices(products)
-            if not b2b and settings.wb_retail_markup_pct:
-                self._apply_retail_markup(products)
         return products
-
-    def _apply_retail_markup(self, products: list[NormProduct]) -> None:
-        """Розница: витринная цена «с WB Кошельком» = business-product + WB_RETAIL_MARKUP_PCT.
-
-        detail с кукой отдаёт business-цену аккаунта (ниже витрины, напр. 15974);
-        потребительская цена на сайте на ~2.73% выше (16410). Плоский коэффициент —
-        SPP аккаунта плоский; если WB сменит SPP/кошелёк, поправить WB_RETAIL_MARKUP_PCT.
-        """
-        k = 1 + settings.wb_retail_markup_pct / 100
-        for p in products:
-            if p.price is not None:
-                p.price = int(p.price * k)  # WB округляет вниз (отбрасывает копейки)
 
     async def _apply_b2b_prices(self, products: list[NormProduct]) -> None:
         """Заменяет розничные цены на бизнес-цены (b2b detail, батчи по 100).
@@ -298,8 +284,3 @@ class WBClient:
 wb_client = WBClient()
 
 
-if __name__ == "__main__":  # self-check наценки розницы (business-product → витрина)
-    k = 1 + 2.73 / 100
-    assert int(15974 * k) == 16410, int(15974 * k)  # nm 762087347
-    assert int(9477 * k) == 9735, int(9477 * k)      # nm 507392655
-    print("ok")
