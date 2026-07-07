@@ -34,8 +34,8 @@ class Settings(BaseSettings):
     # приоритетные магазины (is_fast) опрашиваются отдельным быстрым джобом
     fast_monitor_interval_minutes: int = 1
     big_shop_threshold: int = 100
-    # минимальное изменение цены (%) для уведомления
-    price_change_threshold_pct: float = 5.0
+    # минимальное СНИЖЕНИЕ цены (%) для уведомления. Рост цены не алертим вовсе.
+    price_drop_threshold_pct: float = 1.0
     # наша цена = цена ВБ минус этот процент
     our_discount_pct: float = 15.0
     # наценка от личной business-цены (detail с кукой) до витринной «с WB Кошельком».
