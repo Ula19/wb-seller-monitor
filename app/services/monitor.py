@@ -23,9 +23,11 @@ async def recipient_ids(s) -> list[int]:
 def detect_changes(old_price, old_stock, p):
     """Сравнивает старые цену/остаток с новыми. Возвращает список событий."""
     events = []
-    if old_price and p.price and old_price != p.price:
-        pct = abs(p.price - old_price) / old_price * 100
-        if pct >= settings.price_change_threshold_pct:
+    # Алертим только СНИЖЕНИЕ цены (демпинг конкурента); рост — не шлём.
+    # Мягкий порог, чтобы мизерные копеечные сдвиги не спамили чат.
+    if old_price and p.price and p.price < old_price:
+        drop_pct = (old_price - p.price) / old_price * 100
+        if drop_pct >= settings.price_drop_threshold_pct:
             events.append(("price", old_price, p.price))
     old_in = (old_stock or 0) > 0
     new_in = (p.stock or 0) > 0
@@ -251,4 +253,11 @@ if __name__ == "__main__":  # self-check разбора часов и рабоч
     assert _within_work_hours(22, 6, 23) and _within_work_hours(22, 6, 2)
     assert not _within_work_hours(22, 6, 12)
     assert _within_work_hours(None, None, 3)  # не задано = круглосуточно
+    # detect_changes: снижение ≥1% алертит, <1% и рост — молчат
+    from types import SimpleNamespace
+    settings.price_drop_threshold_pct = 1.0
+    kinds = lambda evs: [e[0] for e in evs]
+    assert "price" in kinds(detect_changes(1000, 5, SimpleNamespace(price=980, stock=5)))   # −2%
+    assert "price" not in kinds(detect_changes(1000, 5, SimpleNamespace(price=995, stock=5)))  # −0.5%
+    assert "price" not in kinds(detect_changes(1000, 5, SimpleNamespace(price=1200, stock=5)))  # рост
     print("ok")
