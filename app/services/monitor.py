@@ -121,7 +121,7 @@ async def sync_and_notify(bot, seller) -> list:
 async def send_report_to(bot, user_ids, seller, products) -> None:
     name = seller.name or str(seller.supplier_id)
     if len(products) >= settings.big_shop_threshold:
-        data = reporting.build_excel(name, products)
+        data = reporting.build_excel(name, products, seller.b2b)
         doc = BufferedInputFile(data, filename=f"seller_{seller.supplier_id}.xlsx")
         caption = f"🏪 {name} ({reporting.mode_tag(seller.b2b)})\nВсего товаров: {len(products)}"
         for uid in user_ids:

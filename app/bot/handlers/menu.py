@@ -385,10 +385,11 @@ async def nav_bc_run(cb: CallbackQuery, state: FSMContext):
         for sid in sids:
             sl = await repo.get_seller(s, sid)
             shop = (sl.name if sl and sl.name else None) or str(sid)
+            b2b = sl.b2b if sl else True
             for p in await repo.get_active_products(s, sid):
                 hay = f"{p.brand or ''} {p.name or ''}".lower()
                 if any(n in hay for n in needles):
-                    rows.append((p, shop))
+                    rows.append((p, shop, b2b))
     # сортировку и группировку делает brands_excel (модель→память→цвет→цена)
     doc = BufferedInputFile(reporting.brands_excel(rows), filename="brands.xlsx")
     caption = (
