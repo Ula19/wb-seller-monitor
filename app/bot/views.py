@@ -74,7 +74,7 @@ async def run_checknow_one(bot, user_id: int, supplier_id: int) -> bool:
     if not seller:
         return False
     try:
-        await sync_and_notify(bot, seller)
+        await sync_and_notify(bot, seller, full_enrich=True)  # ручная проверка — точные цены
     except Exception:
         pass
     async with Session() as s:

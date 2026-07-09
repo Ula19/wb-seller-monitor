@@ -168,14 +168,14 @@ class WBClient:
         return None
 
     async def fetch_seller_catalog(
-        self, supplier_id: int, b2b: bool = True, subjects: set[int] | None = None
+        self, supplier_id: int, subjects: set[int] | None = None
     ) -> list[NormProduct]:
-        """Все товары продавца: листаем страницы пока есть данные.
+        """Каталог продавца БЕЗ куки: цена = витрина (`shelf_price`), дешёвый триггер.
 
-        b2b=True — подменяем цену каталога на бизнес-цену из detail (нужна валидная кука).
-        b2b=False — розница: из detail берём розничную базу «без кошелька» (RETAIL_PARAMS),
-        «с кошельком −6%» считает reporting. subjects — оставляем только эти предметы
-        (по умолчанию — смартфоны).
+        Фильтр по предмету — на стороне WB (`xsubject`), поэтому у крупных продавцов не
+        листаем тысячи лишних товаров (ХОБОТ: 1 страница вместо 57). Точную «нашу» цену
+        навешивает `enrich_prices` по триггеру/sweep'у отдельно. subjects — какие
+        предметы оставить (по умолчанию — смартфоны).
         """
         subjects = subjects or {SMARTPHONE_SUBJECT_ID}
         products: list[NormProduct] = []
@@ -189,6 +189,8 @@ class WBClient:
                 "supplier": supplier_id,
                 "page": page,
             }
+            if subjects:  # WB фильтрует по предмету на сервере — тянем только нужное
+                params["xsubject"] = ";".join(map(str, sorted(subjects)))
             r = await self._get(CATALOG_URL, params=params)
             if r is None or r.status_code != 200:
                 break
@@ -205,20 +207,20 @@ class WBClient:
             products.extend(normalize(p, supplier_id) for p in items)
             if len(items) < 100:
                 break
-        if subjects:
+        if subjects:  # страховка, если WB проигнорит xsubject
             products = [p for p in products if p.subject_id in subjects]
-        if products:
-            await self._apply_detail_prices(products, B2B_PARAMS if b2b else RETAIL_PARAMS)
         return products
 
-    async def _apply_detail_prices(self, products: list[NormProduct], base_params: dict) -> None:
-        """Заменяет цены каталога на цены из detail (батчи по 100).
+    async def enrich_prices(self, products: list[NormProduct], b2b: bool) -> set[int]:
+        """Навешивает «нашу» цену из detail (батчи по 100) поверх витринной.
 
-        base_params: B2B_PARAMS — бизнес-цена аккаунта, RETAIL_PARAMS — розничная
-        база «без кошелька». WBAAS пускает __internal только на браузерный набор
-        заголовков (без них — 403, даже с валидной кукой). IP не проверяет —
-        куку можно минтить дома, ходить через прокси.
+        b2b=True — бизнес-цена аккаунта (B2B_PARAMS); b2b=False — розничная база
+        «без кошелька» (RETAIL_PARAMS). WBAAS пускает __internal только на браузерный
+        набор заголовков (без них — 403, даже с валидной кукой). IP не проверяет —
+        куку можно минтить дома, ходить через прокси. Зовётся по триггеру (падение
+        витрины) или в sweep — не каждый цикл, чтобы не держать куку на критпути.
         """
+        base_params = B2B_PARAMS if b2b else RETAIL_PARAMS
         prices: dict[int, int] = {}
         deliv: dict[int, tuple] = {}
         saw_response = False  # получили ли хоть один HTTP-ответ (не сетевой обрыв)
@@ -267,6 +269,7 @@ class WBClient:
         else:
             self.b2b_fail_streak = 0
         log.info("detail цены применены: %d/%d", len(prices), len(products))
+        return set(prices)  # nm с реально полученной ценой — остальным monitor сохранит прежнюю
 
     async def resolve_seller_slug(self, slug: str) -> int | None:
         """supplier_id по slug-ссылке /seller/<slug> (для SEO-адресов без числа)."""

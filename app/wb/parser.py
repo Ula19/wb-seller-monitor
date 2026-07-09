@@ -8,13 +8,14 @@ class NormProduct:
     nm_id: int
     name: str
     brand: str | None
-    price: int | None  # рубли
+    price: int | None  # рубли; «наша» цена (бизнес/розн. detail-база), enrich по триггеру
     stock: int
     pics: int
     supplier_id: int
     delivery_hours: int | None = None  # time1+time2, для даты доставки
     from_seller: bool | None = None  # True=склад продавца, False=склад WB
     subject_id: int | None = None  # предмет WB (категория): смартфоны=515 и т.д.
+    shelf_price: int | None = None  # каталожная витрина (без куки) — дешёвый триггер
 
     @property
     def url(self) -> str:
@@ -66,17 +67,19 @@ def _delivery(p: dict) -> tuple[int | None, bool | None]:
 
 def normalize(p: dict, supplier_id: int) -> NormProduct:
     hours, from_seller = _delivery(p)
+    catalog_price = _price(p)
     return NormProduct(
         nm_id=int(p["id"]),
         name=(p.get("name") or "").strip(),
         brand=p.get("brand"),
-        price=_price(p),
+        price=catalog_price,  # дефолт = витрина; enrich перезапишет на «нашу» цену
         stock=_stock(p),
         pics=int(p.get("pics") or 0),
         supplier_id=supplier_id,
         delivery_hours=hours,
         from_seller=from_seller,
         subject_id=int(p["subjectId"]) if p.get("subjectId") is not None else None,
+        shelf_price=catalog_price,
     )
 
 

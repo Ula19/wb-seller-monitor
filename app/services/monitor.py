@@ -36,19 +36,47 @@ def detect_changes(old_price, old_stock, p):
     return events
 
 
-async def sync_seller(seller: models.Seller, *, silent_seed: bool = False):
-    """Тянет каталог, обновляет БД. Возвращает (все_товары, новые, изменения).
+def _shelf_dropped(old_shelf, new_shelf) -> bool:
+    """Витрина (каталожная цена) упала ≥ порога — триггер для enrich точной цены."""
+    if not old_shelf or not new_shelf or new_shelf >= old_shelf:
+        return False
+    return (old_shelf - new_shelf) / old_shelf * 100 >= settings.price_drop_threshold_pct
 
-    silent_seed=True — первичная загрузка при добавлении магазина:
-    товары помечаются известными, новинки/изменения не формируются.
+
+async def sync_seller(
+    seller: models.Seller, *, silent_seed: bool = False, full_enrich: bool = False
+):
+    """Тянет каталог (без куки), навешивает точную цену по триггеру/sweep, обновляет БД.
+
+    Возвращает (все_товары, новые, изменения). Фаза 1: каталог → витринная цена
+    (`shelf_price`) + сток по всем. Фаза 2: `enrich_prices` (detail с кукой) только там,
+    где витрина упала (триггер) ИЛИ для всех при full_enrich (sweep/сид). Товары без
+    свежей detail-цены сохраняют прежнюю «нашу» цену — не затираем витринной.
+    silent_seed=True — первичная загрузка: товары помечаются известными, не шумим.
     """
-    fetched = await wb_client.fetch_seller_catalog(seller.supplier_id, seller.b2b)
+    fetched = await wb_client.fetch_seller_catalog(seller.supplier_id)
     new = []
     changes = []
+    priced: set[int] = set()
+    full = full_enrich or silent_seed  # сид/ре-синк всегда обогащаем целиком
     if fetched:
         async with Session() as s:
             rows = await repo.get_products(s, seller.supplier_id)
-            existing = {r.nm_id: (r.price, r.stock) for r in rows}
+            existing = {r.nm_id: r for r in rows}
+            to_enrich = [
+                p for p in fetched
+                if full
+                or p.nm_id not in existing
+                or _shelf_dropped(existing[p.nm_id].shelf_price, p.shelf_price)
+            ]
+            if to_enrich:
+                priced = await wb_client.enrich_prices(to_enrich, seller.b2b)
+            # без свежей detail-цены — сохраняем прежнюю «нашу» (в p.price сейчас витрина)
+            for p in fetched:
+                if p.nm_id not in priced:
+                    old = existing.get(p.nm_id)
+                    if old is not None and old.price is not None:
+                        p.price = old.price
             seen: set[int] = set()
             for p in fetched:
                 seen.add(p.nm_id)
@@ -56,7 +84,7 @@ async def sync_seller(seller: models.Seller, *, silent_seed: bool = False):
                 if old is None:
                     new.append(p)
                 elif not silent_seed:
-                    ev = detect_changes(old[0], old[1], p)
+                    ev = detect_changes(old.price, old.stock, p)
                     if ev:
                         changes.append((p, ev))
                 await repo.upsert_product(s, p)
@@ -71,8 +99,8 @@ async def sync_seller(seller: models.Seller, *, silent_seed: bool = False):
         if silent_seed:
             new = []
     log.info(
-        "sync продавца %s: товаров %d, новых %d, изменений %d",
-        seller.supplier_id, len(fetched), len(new), len(changes),
+        "sync продавца %s: товаров %d, обогащено %d, новых %d, изменений %d",
+        seller.supplier_id, len(fetched), len(priced), len(new), len(changes),
     )
     return fetched, new, changes
 
@@ -111,9 +139,9 @@ async def notify_seller(bot, seller, new, changes) -> None:
         await broadcast_change(bot, user_ids, seller, p, events)
 
 
-async def sync_and_notify(bot, seller) -> list:
+async def sync_and_notify(bot, seller, full_enrich: bool = False) -> list:
     """Синхронизирует магазин и сразу рассылает новинки/изменения."""
-    fetched, new, changes = await sync_seller(seller)
+    fetched, new, changes = await sync_seller(seller, full_enrich=full_enrich)
     await notify_seller(bot, seller, new, changes)
     return fetched
 
@@ -161,8 +189,12 @@ COOKIE_ALERT = (
 
 
 async def _check_cookie_health(bot) -> None:
-    """Если b2b-цены не приходят несколько раз подряд — кука протухла, шумим всем."""
-    if wb_client.b2b_fail_streak >= 5 and not wb_client.cookie_alerted:
+    """Если detail-цены не приходят несколько раз подряд — кука протухла, шумим всем.
+
+    Порог низкий: enrich теперь редкий, но sweep дёргает detail по всем магазинам за
+    проход — при мёртвой куке счётчик быстро наберёт несколько провалов.
+    """
+    if wb_client.b2b_fail_streak >= 3 and not wb_client.cookie_alerted:
         wb_client.cookie_alerted = True
         async with Session() as s:
             user_ids = await recipient_ids(s)
@@ -193,24 +225,47 @@ async def _work_window() -> tuple[int | None, int | None]:
     return start, end
 
 
+# only_fast -> (date, hour) последнего полного прохода: дедуп «раз в час» в памяти.
+# ponytail: in-memory; при рестарте максимум лишний sweep — безвредно.
+_last_sweep: dict[bool, tuple] = {}
+
+
+def _due_sweep(only_fast: bool, today, hour: int) -> bool:
+    """Пора ли полный проход с кукой: час в price_sweep_hours и ещё не делали в этот час.
+
+    Дедуп раздельно по джобам (быстрый/обычный делят магазины) — каждый метёт свою часть.
+    """
+    hours = {int(x) for x in settings.price_sweep_hours.split(",") if x.strip()}
+    if hour not in hours or _last_sweep.get(only_fast) == (today, hour):
+        return False
+    _last_sweep[only_fast] = (today, hour)
+    return True
+
+
 async def monitoring_job(bot, only_fast: bool = False) -> None:
     """Проход по магазинам: новинки + изменения цены/наличия.
 
     only_fast=True — быстрый джоб (раз в минуту) только по приоритетным магазинам;
     only_fast=False — обычный джоб по остальным. Так приоритетные не опрашиваются дважды.
+    Каждый цикл ходит только в каталог (без куки); detail с кукой — по триггеру внутри
+    sync_seller или полным проходом в часы price_sweep_hours (full_enrich).
     """
     start, end = await _work_window()
-    hour = datetime.now(ZoneInfo("Europe/Moscow")).hour
-    if not _within_work_hours(start, end, hour):
-        log.info("мониторинг пропущен: вне рабочих часов (%s–%s), сейчас %d", start, end, hour)
+    now = datetime.now(ZoneInfo("Europe/Moscow"))
+    if not _within_work_hours(start, end, now.hour):
+        log.info("мониторинг пропущен: вне рабочих часов (%s–%s), сейчас %d",
+                 start, end, now.hour)
         return
     async with Session() as s:
         sellers = await repo.list_sellers(s, fast=True if only_fast else False)
     tag = "быстрый" if only_fast else "обычный"
+    full = _due_sweep(only_fast, now.date(), now.hour)
+    if full:
+        log.info("мониторинг (%s): полный проход с кукой (sweep %d:00 МСК)", tag, now.hour)
     log.info("мониторинг (%s): старт, магазинов %d", tag, len(sellers))
     for seller in sellers:
         try:
-            await sync_and_notify(bot, seller)
+            await sync_and_notify(bot, seller, full_enrich=full)
         except Exception as e:
             log.exception("синхронизация %s упала: %s", seller.supplier_id, e)
     if not only_fast:  # проверку куки гоняем в обычном джобе, не каждую минуту
@@ -260,4 +315,13 @@ if __name__ == "__main__":  # self-check разбора часов и рабоч
     assert "price" in kinds(detect_changes(1000, 5, SimpleNamespace(price=980, stock=5)))   # −2%
     assert "price" not in kinds(detect_changes(1000, 5, SimpleNamespace(price=995, stock=5)))  # −0.5%
     assert "price" not in kinds(detect_changes(1000, 5, SimpleNamespace(price=1200, stock=5)))  # рост
+    # _shelf_dropped: витрина упала ≥1% → триггер enrich; рост/<порога/нет старой → нет
+    assert _shelf_dropped(1000, 980)          # −2%
+    assert not _shelf_dropped(1000, 995)      # −0.5%
+    assert not _shelf_dropped(1000, 1200)     # рост
+    assert not _shelf_dropped(None, 980)      # первый заход — старой витрины нет
+    # _due_sweep: час из списка срабатывает один раз, повтор в тот же час — нет
+    settings.price_sweep_hours = "10,12,15,18"
+    assert _due_sweep(False, "2026-07-09", 10) and not _due_sweep(False, "2026-07-09", 10)
+    assert not _due_sweep(False, "2026-07-09", 11)  # 11:00 не в списке
     print("ok")

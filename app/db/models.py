@@ -52,7 +52,8 @@ class Product(Base):
     nm_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     name: Mapped[str | None] = mapped_column(String(512), nullable=True)
     brand: Mapped[str | None] = mapped_column(String(256), nullable=True)
-    price: Mapped[int | None] = mapped_column(Integer, nullable=True)  # рубли
+    price: Mapped[int | None] = mapped_column(Integer, nullable=True)  # «наша» цена (detail)
+    shelf_price: Mapped[int | None] = mapped_column(Integer, nullable=True)  # витрина (каталог)
     stock: Mapped[int | None] = mapped_column(Integer, nullable=True)
     pics: Mapped[int | None] = mapped_column(Integer, nullable=True)
     delivery_hours: Mapped[int | None] = mapped_column(Integer, nullable=True)

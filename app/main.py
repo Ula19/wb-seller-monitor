@@ -32,6 +32,9 @@ async def on_startup() -> None:
             "ALTER TABLE products ADD COLUMN IF NOT EXISTS subject_id INTEGER"
         ))
         await conn.execute(text(
+            "ALTER TABLE products ADD COLUMN IF NOT EXISTS shelf_price INTEGER"
+        ))
+        await conn.execute(text(
             "ALTER TABLE sellers ADD COLUMN IF NOT EXISTS is_fast BOOLEAN DEFAULT FALSE"
         ))
         await conn.execute(text(
