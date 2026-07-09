@@ -69,7 +69,10 @@ class WBClient:
         self._proxy_idx = 0
         if self._proxies:
             log.info("WB-клиент: прокси %d шт., текущий %s", len(self._proxies), self._current_proxy())
-        self._session = self._build_session()
+        # проксированная сессия — только для detail (__internal); каталог/CDN ходят напрямую
+        # (публичны, работают с любого IP), чтобы флаки-прокси не ронял каждый цикл.
+        self._session = self._make_session(self._current_proxy())
+        self._direct_session = self._make_session(None)
         self._lock = asyncio.Lock()
         self._last = 0.0
         self.b2b_fail_streak = 0  # подряд провалов b2b (0 цен при наличии товаров)
@@ -78,8 +81,7 @@ class WBClient:
     def _current_proxy(self) -> str | None:
         return self._proxies[self._proxy_idx] if self._proxies else None
 
-    def _build_session(self) -> AsyncSession:
-        proxy = self._current_proxy()
+    def _make_session(self, proxy: str | None) -> AsyncSession:
         proxies = {"http": proxy, "https": proxy} if proxy else None
         return AsyncSession(
             headers=HEADERS, cookies=self._cookies, impersonate=IMPERSONATE,
@@ -92,9 +94,8 @@ class WBClient:
             return False
         self._proxy_idx = (self._proxy_idx + 1) % len(self._proxies)
         old = self._session
-        # ponytail: monitoring почти последователен (2 джоба, max_instances=1) — гонкой
-        # за self._session пренебрегаем; если станет проблемой — лок вокруг свопа.
-        self._session = self._build_session()
+        # ротация касается только проксированной сессии; direct-сессия каталога неизменна.
+        self._session = self._make_session(self._current_proxy())
         try:
             await old.close()
         except Exception:
@@ -105,19 +106,25 @@ class WBClient:
     async def set_cookie(self, raw: str) -> int:
         """Заменяет куку и пересоздаёт сессию без рестарта. Возвращает число полей."""
         self._cookies = _parse_cookie(raw) if raw else None
-        old = self._session
-        self._session = self._build_session()
+        old = (self._session, self._direct_session)
+        self._session = self._make_session(self._current_proxy())
+        self._direct_session = self._make_session(None)
         self.b2b_fail_streak = 0
         self.cookie_alerted = False
-        try:
-            await old.close()
-        except Exception:
-            pass
+        for s in old:
+            try:
+                await s.close()
+            except Exception:
+                pass
         log.info("WB-клиент: кука обновлена (%d полей)", len(self._cookies or {}))
         return len(self._cookies or {})
 
     async def close(self) -> None:
-        await self._session.close()
+        for s in (self._session, self._direct_session):
+            try:
+                await s.close()
+            except Exception:
+                pass
 
     async def _throttle(self) -> None:
         """Не чаще одного запроса раз в request_min_delay + jitter секунд."""
@@ -132,11 +139,13 @@ class WBClient:
                 await asyncio.sleep(wait)
             self._last = loop.time()
 
-    async def _get(self, url, *, params=None, headers=None, retries=4):
+    async def _get(self, url, *, params=None, headers=None, retries=4, session=None):
+        sess = session or self._session
+        proxied = session is None  # ротация прокси имеет смысл только для проксированной сессии
         for attempt in range(retries):
             await self._throttle()
             try:
-                r = await self._session.get(url, params=params, headers=headers)
+                r = await sess.get(url, params=params, headers=headers)
             except Exception as e:
                 log.warning("WB сетевая ошибка %s: %s", url, e)
                 await asyncio.sleep(2**attempt)
@@ -146,7 +155,8 @@ class WBClient:
             if r.status_code == 403:
                 # WAF/бан по IP. Если есть запасные прокси — пробуем следующий и ретраим;
                 # иначе отступаем сразу (ретраи на том же IP бесполезны).
-                if await self._rotate_proxy():
+                if proxied and await self._rotate_proxy():
+                    sess = self._session  # переключились на новый прокси
                     log.warning("WB %s -> 403, пробую следующий прокси", url)
                     continue
                 log.warning("WB %s -> 403 (WAF/бан), пропуск без ретраев", url)
@@ -191,7 +201,7 @@ class WBClient:
             }
             if subjects:  # WB фильтрует по предмету на сервере — тянем только нужное
                 params["xsubject"] = ";".join(map(str, sorted(subjects)))
-            r = await self._get(CATALOG_URL, params=params)
+            r = await self._get(CATALOG_URL, params=params, session=self._direct_session)
             if r is None or r.status_code != 200:
                 break
             try:
@@ -273,7 +283,7 @@ class WBClient:
 
     async def resolve_seller_slug(self, slug: str) -> int | None:
         """supplier_id по slug-ссылке /seller/<slug> (для SEO-адресов без числа)."""
-        r = await self._get(SHOP_BY_SLUG_URL.format(slug))
+        r = await self._get(SHOP_BY_SLUG_URL.format(slug), session=self._direct_session)
         if r and r.status_code == 200:
             try:
                 return int(r.json()["supplierID"])
@@ -282,7 +292,7 @@ class WBClient:
         return None
 
     async def fetch_supplier_info(self, supplier_id: int) -> dict | None:
-        r = await self._get(SUPPLIER_INFO_URL.format(supplier_id))
+        r = await self._get(SUPPLIER_INFO_URL.format(supplier_id), session=self._direct_session)
         if r and r.status_code == 200:
             try:
                 return r.json()
