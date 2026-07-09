@@ -1,5 +1,6 @@
 """Логика мониторинга: синхронизация магазинов, детект изменений, рассылка, отчёты."""
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -13,6 +14,13 @@ from app.services import reporting
 from app.wb.client import wb_client
 
 log = logging.getLogger(__name__)
+
+# Один общий лок на «проход»: мониторинг, ручная проверка и ре-синк куки не идут
+# параллельно. Иначе две корутины синхронят один магазин из разных Session → свежая
+# цена затирается старой, а параллельный не-silent проход шлёт ложное «цена снизилась»,
+# которое silent-ресинк как раз призван заглушить.
+# ponytail: грубый лок на весь проход; при долгом ре-синке приоритетные ждут (коалесятся).
+_pass_lock = asyncio.Lock()
 
 
 async def recipient_ids(s) -> list[int]:
@@ -174,11 +182,12 @@ async def silent_resync_all() -> None:
     """
     async with Session() as s:
         sellers = await repo.list_sellers(s)
-    for seller in sellers:
-        try:
-            await sync_seller(seller, silent_seed=True)
-        except Exception as e:
-            log.warning("тихий ре-синк %s упал: %s", seller.supplier_id, e)
+    async with _pass_lock:  # не пересекаемся с джобами мониторинга (ложные алерты/затирание)
+        for seller in sellers:
+            try:
+                await sync_seller(seller, silent_seed=True)
+            except Exception as e:
+                log.warning("тихий ре-синк %s упал: %s", seller.supplier_id, e)
 
 
 COOKIE_ALERT = (
@@ -268,13 +277,14 @@ async def monitoring_job(bot, only_fast: bool = False) -> None:
         log.info("мониторинг (%s): полный проход с кукой (sweep, интервал %d мин)",
                  tag, settings.price_sweep_interval_minutes)
     log.info("мониторинг (%s): старт, магазинов %d", tag, len(sellers))
-    for seller in sellers:
-        try:
-            await sync_and_notify(bot, seller, full_enrich=full)
-        except Exception as e:
-            log.exception("синхронизация %s упала: %s", seller.supplier_id, e)
-    if not only_fast:  # проверку куки гоняем в обычном джобе, не каждую минуту
-        await _check_cookie_health(bot)
+    async with _pass_lock:  # не пересекаемся с другим проходом/ре-синком куки
+        for seller in sellers:
+            try:
+                await sync_and_notify(bot, seller, full_enrich=full)
+            except Exception as e:
+                log.exception("синхронизация %s упала: %s", seller.supplier_id, e)
+        if not only_fast:  # проверку куки гоняем в обычном джобе, не каждую минуту
+            await _check_cookie_health(bot)
     log.info("мониторинг (%s): завершён", tag)
 
 

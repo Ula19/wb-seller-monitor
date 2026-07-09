@@ -6,7 +6,7 @@ from app.config import settings
 from app.db import repo
 from app.db.base import Session
 from app.emoji import esc, tge
-from app.services.monitor import send_report_to, sync_and_notify
+from app.services.monitor import _pass_lock, send_report_to, sync_and_notify
 
 HTML = "HTML"
 
@@ -74,7 +74,8 @@ async def run_checknow_one(bot, user_id: int, supplier_id: int) -> bool:
     if not seller:
         return False
     try:
-        await sync_and_notify(bot, seller, full_enrich=True)  # ручная проверка — точные цены
+        async with _pass_lock:  # не пересекаемся с джобами/ре-синком
+            await sync_and_notify(bot, seller, full_enrich=True)  # ручная проверка — точные цены
     except Exception:
         pass
     async with Session() as s:
