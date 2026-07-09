@@ -225,20 +225,24 @@ async def _work_window() -> tuple[int | None, int | None]:
     return start, end
 
 
-# only_fast -> (date, hour) последнего полного прохода: дедуп «раз в час» в памяти.
-# ponytail: in-memory; при рестарте максимум лишний sweep — безвредно.
-_last_sweep: dict[bool, tuple] = {}
+# only_fast -> время последнего полного прохода (МСК): интервальный дедуп в памяти.
+# ponytail: in-memory; при рестарте первый цикл сделает sweep — безвредно (заодно освежит).
+_last_sweep: dict[bool, datetime] = {}
 
 
-def _due_sweep(only_fast: bool, today, hour: int) -> bool:
-    """Пора ли полный проход с кукой: час в price_sweep_hours и ещё не делали в этот час.
+def _due_sweep(only_fast: bool, now: datetime) -> bool:
+    """Пора ли полный проход с кукой: прошло ≥ price_sweep_interval_minutes с прошлого.
 
     Дедуп раздельно по джобам (быстрый/обычный делят магазины) — каждый метёт свою часть.
+    Гранулярность ограничена интервалом джоба (напр. обычный раз в 10 мин). 0 = выключено.
     """
-    hours = {int(x) for x in settings.price_sweep_hours.split(",") if x.strip()}
-    if hour not in hours or _last_sweep.get(only_fast) == (today, hour):
+    interval = settings.price_sweep_interval_minutes
+    if interval <= 0:
         return False
-    _last_sweep[only_fast] = (today, hour)
+    last = _last_sweep.get(only_fast)
+    if last is not None and (now - last).total_seconds() < interval * 60:
+        return False
+    _last_sweep[only_fast] = now
     return True
 
 
@@ -259,9 +263,10 @@ async def monitoring_job(bot, only_fast: bool = False) -> None:
     async with Session() as s:
         sellers = await repo.list_sellers(s, fast=True if only_fast else False)
     tag = "быстрый" if only_fast else "обычный"
-    full = _due_sweep(only_fast, now.date(), now.hour)
+    full = _due_sweep(only_fast, now)
     if full:
-        log.info("мониторинг (%s): полный проход с кукой (sweep %d:00 МСК)", tag, now.hour)
+        log.info("мониторинг (%s): полный проход с кукой (sweep, интервал %d мин)",
+                 tag, settings.price_sweep_interval_minutes)
     log.info("мониторинг (%s): старт, магазинов %d", tag, len(sellers))
     for seller in sellers:
         try:
@@ -320,8 +325,13 @@ if __name__ == "__main__":  # self-check разбора часов и рабоч
     assert not _shelf_dropped(1000, 995)      # −0.5%
     assert not _shelf_dropped(1000, 1200)     # рост
     assert not _shelf_dropped(None, 980)      # первый заход — старой витрины нет
-    # _due_sweep: час из списка срабатывает один раз, повтор в тот же час — нет
-    settings.price_sweep_hours = "10,12,15,18"
-    assert _due_sweep(False, "2026-07-09", 10) and not _due_sweep(False, "2026-07-09", 10)
-    assert not _due_sweep(False, "2026-07-09", 11)  # 11:00 не в списке
+    # _due_sweep: первый заход — да; до истечения интервала — нет; после — снова да; 0 — выкл
+    settings.price_sweep_interval_minutes = 15
+    _last_sweep.clear()
+    t0 = datetime(2026, 7, 9, 10, 0)
+    assert _due_sweep(False, t0)                            # первый заход
+    assert not _due_sweep(False, t0.replace(minute=10))    # +10 мин < 15
+    assert _due_sweep(False, t0.replace(minute=20))        # +20 мин ≥ 15
+    settings.price_sweep_interval_minutes = 0
+    assert not _due_sweep(True, t0)                         # выключено
     print("ok")
