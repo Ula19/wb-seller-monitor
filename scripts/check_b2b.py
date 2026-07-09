@@ -28,7 +28,7 @@ PARAMS = {
 
 async def main():
     print("кука активна:", bool(settings.wb_cookie), "| прокси:", wb_client._current_proxy())
-    # те же браузерные заголовки, что шлёт бот в _apply_b2b_prices (без них WBAAS даёт 403)
+    # те же браузерные заголовки, что шлёт бот в _apply_detail_prices (без них WBAAS даёт 403)
     headers = {
         "Accept": "*/*",
         "Referer": f"https://www.wildberries.ru/catalog/{NMS[0]}/detail.aspx",

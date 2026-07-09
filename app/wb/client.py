@@ -34,6 +34,14 @@ B2B_PARAMS = {
     "hide_vflags": 4294967296, "hide_dflags": 131072, "hide_dtype": "11;13;14;15",
     "b2b": "true", "mdg": 3, "mtype": 257, "lang": "ru", "ab_testing": "false",
 }
+# Розница: detail без b2b/mdg + udg=82 отдаёт розничную базу «без кошелька» —
+# ту же цену, что видит браузер на карточке (b2b=true/mdg=3 дают бизнес-цену).
+# Цена «с кошельком» = база − WB_WALLET_DISCOUNT_PCT (считается в reporting).
+RETAIL_PARAMS = {
+    "appType": 1, "curr": "rub", "dest": -446112, "spp": 30,
+    "hide_vflags": 4294967296, "hide_dtype": 15, "udg": 82,
+    "mtype": 257, "lang": "ru", "ab_testing": "false",
+}
 
 
 def _parse_cookie(raw: str) -> dict[str, str]:
@@ -165,8 +173,9 @@ class WBClient:
         """Все товары продавца: листаем страницы пока есть данные.
 
         b2b=True — подменяем цену каталога на бизнес-цену из detail (нужна валидная кука).
-        b2b=False — розница: цена каталога как есть (= витрина покупателя без кошелька),
-        куки не нужны. subjects — оставляем только эти предметы (по умолчанию — смартфоны).
+        b2b=False — розница: из detail берём розничную базу «без кошелька» (RETAIL_PARAMS),
+        «с кошельком −6%» считает reporting. subjects — оставляем только эти предметы
+        (по умолчанию — смартфоны).
         """
         subjects = subjects or {SMARTPHONE_SUBJECT_ID}
         products: list[NormProduct] = []
@@ -198,18 +207,17 @@ class WBClient:
                 break
         if subjects:
             products = [p for p in products if p.subject_id in subjects]
-        # Розница: цена каталога = витрина обычного покупателя без кошелька (проверено
-        # на аккаунте без WB Кошелька, 4/4 до рубля) — detail не зовём, лишних запросов нет.
-        # «Цена с кошельком −6%» — чисто отображение, считается в reporting.
-        if b2b and products:
-            await self._apply_b2b_prices(products)
+        if products:
+            await self._apply_detail_prices(products, B2B_PARAMS if b2b else RETAIL_PARAMS)
         return products
 
-    async def _apply_b2b_prices(self, products: list[NormProduct]) -> None:
-        """Заменяет розничные цены на бизнес-цены (b2b detail, батчи по 100).
+    async def _apply_detail_prices(self, products: list[NormProduct], base_params: dict) -> None:
+        """Заменяет цены каталога на цены из detail (батчи по 100).
 
-        WBAAS пускает __internal только на браузерный набор заголовков (без них — 403,
-        даже с валидной кукой). IP не проверяет — куку можно минтить дома, ходить через прокси.
+        base_params: B2B_PARAMS — бизнес-цена аккаунта, RETAIL_PARAMS — розничная
+        база «без кошелька». WBAAS пускает __internal только на браузерный набор
+        заголовков (без них — 403, даже с валидной кукой). IP не проверяет —
+        куку можно минтить дома, ходить через прокси.
         """
         prices: dict[int, int] = {}
         deliv: dict[int, tuple] = {}
@@ -217,7 +225,7 @@ class WBClient:
         nm_ids = [p.nm_id for p in products]
         for i in range(0, len(nm_ids), 100):
             chunk = nm_ids[i:i + 100]
-            params = {**B2B_PARAMS, "nm": ";".join(map(str, chunk))}
+            params = {**base_params, "nm": ";".join(map(str, chunk))}
             headers = {
                 "Accept": "*/*",
                 "Referer": f"https://www.wildberries.ru/catalog/{chunk[0]}/detail.aspx",
@@ -258,7 +266,7 @@ class WBClient:
                 log.warning("b2b: все запросы легли по сети (прокси), счётчик куки не трогаю")
         else:
             self.b2b_fail_streak = 0
-        log.info("b2b цены применены: %d/%d", len(prices), len(products))
+        log.info("detail цены применены: %d/%d", len(prices), len(products))
 
     async def resolve_seller_slug(self, slug: str) -> int | None:
         """supplier_id по slug-ссылке /seller/<slug> (для SEO-адресов без числа)."""
