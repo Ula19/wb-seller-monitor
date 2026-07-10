@@ -34,14 +34,8 @@ B2B_PARAMS = {
     "hide_vflags": 4294967296, "hide_dflags": 131072, "hide_dtype": "11;13;14;15",
     "b2b": "true", "mdg": 3, "mtype": 257, "lang": "ru", "ab_testing": "false",
 }
-# Розница: detail без b2b/mdg + udg=82 отдаёт розничную базу «без кошелька» —
-# ту же цену, что видит браузер на карточке (b2b=true/mdg=3 дают бизнес-цену).
-# Цена «с кошельком» = база − WB_WALLET_DISCOUNT_PCT (считается в reporting).
-RETAIL_PARAMS = {
-    "appType": 1, "curr": "rub", "dest": -446112, "spp": 30,
-    "hide_vflags": 4294967296, "hide_dtype": 15, "udg": 82,
-    "mtype": 257, "lang": "ru", "ab_testing": "false",
-}
+# Розница detail НЕ нужна: каталог без куки уже даёт точную розничную цену (СПП у WB
+# стандартная, не персональная — аноним == аккаунт, проверено 4/4). enrich только для b2b.
 
 
 def _parse_cookie(raw: str) -> dict[str, str]:
@@ -221,16 +215,16 @@ class WBClient:
             products = [p for p in products if p.subject_id in subjects]
         return products
 
-    async def enrich_prices(self, products: list[NormProduct], b2b: bool) -> set[int]:
-        """Навешивает «нашу» цену из detail (батчи по 100) поверх витринной.
+    async def enrich_prices(self, products: list[NormProduct]) -> set[int]:
+        """Навешивает БИЗНЕС-цену из detail (батчи по 100) поверх каталожной.
 
-        b2b=True — бизнес-цена аккаунта (B2B_PARAMS); b2b=False — розничная база
-        «без кошелька» (RETAIL_PARAMS). WBAAS пускает __internal только на браузерный
-        набор заголовков (без них — 403, даже с валидной кукой). IP не проверяет —
-        куку можно минтить дома, ходить через прокси. Зовётся по триггеру (падение
-        витрины) или в sweep — не каждый цикл, чтобы не держать куку на критпути.
+        Только для b2b-магазинов: бизнес-цена (B2B_PARAMS) видна лишь с кукой и реально
+        отличается от розницы. Рознице detail не нужен — каталог уже даёт её цену.
+        WBAAS пускает __internal только на браузерный набор заголовков (без них — 403,
+        даже с валидной кукой). IP не проверяет. Зовётся по триггеру/в sweep — не каждый
+        цикл, чтобы не держать куку на критпути.
         """
-        base_params = B2B_PARAMS if b2b else RETAIL_PARAMS
+        base_params = B2B_PARAMS
         prices: dict[int, int] = {}
         deliv: dict[int, tuple] = {}
         saw_response = False  # получили ли хоть один HTTP-ответ (не сетевой обрыв)

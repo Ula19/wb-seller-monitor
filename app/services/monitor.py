@@ -54,12 +54,12 @@ def _shelf_dropped(old_shelf, new_shelf) -> bool:
 async def sync_seller(
     seller: models.Seller, *, silent_seed: bool = False, full_enrich: bool = False
 ):
-    """Тянет каталог (без куки), навешивает точную цену по триггеру/sweep, обновляет БД.
+    """Тянет каталог (без куки), обновляет БД. Возвращает (все_товары, новые, изменения).
 
-    Возвращает (все_товары, новые, изменения). Фаза 1: каталог → витринная цена
-    (`shelf_price`) + сток по всем. Фаза 2: `enrich_prices` (detail с кукой) только там,
-    где витрина упала (триггер) ИЛИ для всех при full_enrich (sweep/сид). Товары без
-    свежей detail-цены сохраняют прежнюю «нашу» цену — не затираем витринной.
+    Розница (`b2b=False`): каталог уже даёт точную цену — куку не трогаем вовсе.
+    Бизнес (`b2b=True`): поверх каталога навешиваем бизнес-цену из detail (`enrich_prices`,
+    с кукой) там, где витрина упала (триггер) ИЛИ для всех при full_enrich (sweep/сид);
+    товары без свежей бизнес-цены сохраняют прежнюю. Сток/наличие — всегда из каталога.
     silent_seed=True — первичная загрузка: товары помечаются известными, не шумим.
     """
     fetched = await wb_client.fetch_seller_catalog(seller.supplier_id)
@@ -71,20 +71,23 @@ async def sync_seller(
         async with Session() as s:
             rows = await repo.get_products(s, seller.supplier_id)
             existing = {r.nm_id: r for r in rows}
-            to_enrich = [
-                p for p in fetched
-                if full
-                or p.nm_id not in existing
-                or _shelf_dropped(existing[p.nm_id].shelf_price, p.shelf_price)
-            ]
-            if to_enrich:
-                priced = await wb_client.enrich_prices(to_enrich, seller.b2b)
-            # без свежей detail-цены — сохраняем прежнюю «нашу» (в p.price сейчас витрина)
-            for p in fetched:
-                if p.nm_id not in priced:
-                    old = existing.get(p.nm_id)
-                    if old is not None and old.price is not None:
-                        p.price = old.price
+            # Розница: каталог уже даёт точную цену (p.price = shelf_price из normalize) —
+            # detail с кукой НЕ нужен. Бизнес-цена видна только с кукой → enrich по триггеру.
+            if seller.b2b:
+                to_enrich = [
+                    p for p in fetched
+                    if full
+                    or p.nm_id not in existing
+                    or _shelf_dropped(existing[p.nm_id].shelf_price, p.shelf_price)
+                ]
+                if to_enrich:
+                    priced = await wb_client.enrich_prices(to_enrich)
+                # без свежей бизнес-цены — сохраняем прежнюю (в p.price сейчас витрина)
+                for p in fetched:
+                    if p.nm_id not in priced:
+                        old = existing.get(p.nm_id)
+                        if old is not None and old.price is not None:
+                            p.price = old.price
             seen: set[int] = set()
             for p in fetched:
                 seen.add(p.nm_id)
