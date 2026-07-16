@@ -142,6 +142,7 @@ def new_caption(seller_name: str, p, b2b: bool = True) -> str:
         *_wallet_line(p, b2b),
         *_stale_line(p, b2b),
         f"Наша цена: {fmt_our(p.price)}",
+        f"Остаток: {fmt_stock(p.stock)}",
         *_wh_delivery_lines(p),
     ]
     return "\n".join(lines)
@@ -168,7 +169,9 @@ def change_caption(seller_name: str, p, events, b2b: bool = True) -> str:
             else:
                 lines.append(f"{tge('stock')} Закончился (был остаток {old})")
     lines += [*_wallet_line(p, b2b), *_stale_line(p, b2b),
-              f"Наша цена: {fmt_our(p.price)}", *_wh_delivery_lines(p)]
+              f"Наша цена: {fmt_our(p.price)}",
+              f"Остаток: {fmt_stock(p.stock)}",
+              *_wh_delivery_lines(p)]
     return "\n".join(lines)
 
 
@@ -338,6 +341,8 @@ if __name__ == "__main__":  # self-check уведомлений и группи�
     assert wallet_price(46306) == 43527, wallet_price(46306)
     nc = new_caption("Магазин", p, b2b=False)
     assert "123" in nc and "С кошельком" in nc, nc
+    assert "Остаток: 5" in nc, nc  # остаток в уведомлении о новинке
+    assert "Остаток: 5" in change_caption("М", p, [("price", 1000, 900)], b2b=False)
     assert "С кошельком" not in new_caption("Магазин", p, b2b=True)  # b2b — без кошелька
     ch = change_caption("Магазин", p, [("price", 1000, 1200)], b2b=False)
     assert "1 000 ₽ → 1 200 ₽" in ch and "▲ 200 ₽" in ch, ch
