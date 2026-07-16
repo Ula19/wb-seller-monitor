@@ -27,7 +27,8 @@ PARAMS = {
 
 
 async def main():
-    print("кука активна:", bool(settings.wb_cookie), "| прокси:", wb_client._current_proxy())
+    slot = wb_client._proxy_slots()[0]  # b2b ходит через прокси-слот, как в enrich_prices
+    print("кука активна:", bool(settings.wb_cookie), "| прокси:", slot.proxy or "нет (напрямую)")
     # те же браузерные заголовки, что шлёт бот в _apply_detail_prices (без них WBAAS даёт 403)
     headers = {
         "Accept": "*/*",
@@ -40,7 +41,7 @@ async def main():
         "x-spa-version": settings.wb_spa_version,
     }
     try:
-        r = await wb_client._session.get(URL, params=PARAMS, headers=headers)
+        r = await slot.session.get(URL, params=PARAMS, headers=headers)
     except Exception as e:
         print("СЕТЕВАЯ ОШИБКА (прокси/таймаут, НЕ кука):", e)
         await wb_client.close(); return

@@ -1,12 +1,20 @@
 from aiogram import Router
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, Message
 
 from app.bot import views
 from app.emoji import tge
 
 router = Router()
+
+
+# catch-all для колбэков без хендлера (кнопки из старых сообщений после апдейта,
+# напр. удалённая «⚡ Ежеминутные»): без ответа у пользователя ~30с крутится спиннер.
+# router common подключается ПОСЛЕДНИМ — сюда падает только неопознанное.
+@router.callback_query()
+async def stale_callback(cb: CallbackQuery):
+    await cb.answer("Кнопка устарела — откройте меню заново (/start)", show_alert=True)
 
 
 @router.message(CommandStart())

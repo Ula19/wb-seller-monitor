@@ -19,7 +19,7 @@ from app.db import repo
 from app.db.base import Session
 from app.emoji import esc, tge
 from app.services import reporting
-from app.services.monitor import silent_resync_all, sync_seller
+from app.services.monitor import _pass_lock, silent_resync_all, sync_seller
 from app.wb.client import wb_client
 
 log = logging.getLogger(__name__)
@@ -401,40 +401,6 @@ async def nav_bc_run(cb: CallbackQuery, state: FSMContext):
     await cb.bot.send_document(cb.from_user.id, doc, caption=caption)
 
 
-FAST_HINT = (
-    f"{tge('clock')} Приоритетные магазины (⚡) проверяются раз в минуту, "
-    "остальные — реже. Жми магазин, чтобы вкл/выкл:"
-)
-
-
-@router.callback_query(kb.Nav.filter(F.to == "fast_sellers"))
-async def nav_fast_sellers(cb: CallbackQuery):
-    if await _deny_if_not_admin(cb):
-        return
-    async with Session() as s:
-        sellers = await repo.list_sellers(s)
-    if not sellers:
-        await cb.answer("Список магазинов пуст", show_alert=True)
-        return
-    await _edit(cb, FAST_HINT, kb.sellers_fast_list(sellers))
-    await cb.answer()
-
-
-@router.callback_query(kb.SellerCB.filter(F.action == "fast"))
-async def toggle_fast(cb: CallbackQuery, callback_data: kb.SellerCB):
-    if await _deny_if_not_admin(cb):
-        return
-    async with Session() as s:
-        sl = await repo.get_seller(s, callback_data.sid)
-        new_val = not sl.is_fast if sl else False
-        if sl:
-            await repo.set_seller_fast(s, callback_data.sid, new_val)
-            await s.commit()
-        sellers = await repo.list_sellers(s)
-    await _edit(cb, FAST_HINT, kb.sellers_fast_list(sellers))
-    await cb.answer("⚡ Приоритет включён" if new_val else "Приоритет снят")
-
-
 PRICE_HINT = (
     f"{tge('clock')} Режим цены: 🏢 бизнес-цена (нужна кука) / 👤 розница. "
     "Жми магазин, чтобы переключить:"
@@ -529,7 +495,10 @@ def _start_seed(status, seller, name, sid) -> None:
     """Фоновая первичная загрузка ассортимента (у крупных — до 10+ мин)."""
     async def _seed():
         try:
-            fetched, _, _ = await sync_seller(seller, silent_seed=True)
+            # под _pass_lock: иначе минутный джоб видит магазин раньше, чем сид
+            # пометил товары известными, и рассылает ВЕСЬ ассортимент как «новинки»
+            async with _pass_lock:
+                fetched, _, _ = await sync_seller(seller, silent_seed=True)
             await status.edit_text(
                 f"{tge('ok')} Магазин «{esc(name or sid)}» загружен. Товаров: {len(fetched)}.",
                 parse_mode="HTML",

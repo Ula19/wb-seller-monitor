@@ -8,14 +8,15 @@ class NormProduct:
     nm_id: int
     name: str
     brand: str | None
-    price: int | None  # рубли; «наша» цена (бизнес/розн. detail-база), enrich по триггеру
+    price: int | None  # рубли; «наша» цена: розница = каталог, b2b = detail с кукой
     stock: int
     pics: int
     supplier_id: int
     delivery_hours: int | None = None  # time1+time2, для даты доставки
     from_seller: bool | None = None  # True=склад продавца, False=склад WB
     subject_id: int | None = None  # предмет WB (категория): смартфоны=515 и т.д.
-    shelf_price: int | None = None  # каталожная витрина (без куки) — дешёвый триггер
+    shelf_price: int | None = None  # каталожная витрина (без куки); у b2b ≠ price
+    price_stale: bool = False  # b2b: detail не ответил — price старая, не подтверждена
 
     @property
     def url(self) -> str:

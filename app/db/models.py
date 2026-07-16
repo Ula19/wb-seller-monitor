@@ -33,8 +33,6 @@ class Seller(Base):
     last_check_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    # приоритетный магазин: опрашивается отдельным быстрым джобом (раз в минуту)
-    is_fast: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     # режим цены: True — бизнес-цена (b2b, нужна кука), False — розничная
     b2b: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
 

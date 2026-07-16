@@ -19,7 +19,7 @@ log = logging.getLogger(__name__)
 # параллельно. Иначе две корутины синхронят один магазин из разных Session → свежая
 # цена затирается старой, а параллельный не-silent проход шлёт ложное «цена снизилась»,
 # которое silent-ресинк как раз призван заглушить.
-# ponytail: грубый лок на весь проход; при долгом ре-синке приоритетные ждут (коалесятся).
+# ponytail: грубый лок на весь проход; при долгом ре-синке очередной цикл ждёт (коалесится).
 _pass_lock = asyncio.Lock()
 
 
@@ -44,50 +44,42 @@ def detect_changes(old_price, old_stock, p):
     return events
 
 
-def _shelf_dropped(old_shelf, new_shelf) -> bool:
-    """Витрина (каталожная цена) упала ≥ порога — триггер для enrich точной цены."""
-    if not old_shelf or not new_shelf or new_shelf >= old_shelf:
-        return False
-    return (old_shelf - new_shelf) / old_shelf * 100 >= settings.price_drop_threshold_pct
-
-
 async def sync_seller(
-    seller: models.Seller, *, silent_seed: bool = False, full_enrich: bool = False
+    seller: models.Seller, *, silent_seed: bool = False, slot=None
 ):
     """Тянет каталог (без куки), обновляет БД. Возвращает (все_товары, новые, изменения).
 
     Розница (`b2b=False`): каталог уже даёт точную цену — куку не трогаем вовсе.
-    Бизнес (`b2b=True`): поверх каталога навешиваем бизнес-цену из detail (`enrich_prices`,
-    с кукой) там, где витрина упала (триггер) ИЛИ для всех при full_enrich (sweep/сид);
-    товары без свежей бизнес-цены сохраняют прежнюю. Сток/наличие — всегда из каталога.
+    Бизнес (`b2b=True`): каждый вызов навешиваем бизнес-цену из detail (`enrich_prices`,
+    с кукой) на ВСЕ товары — без триггеров и sweep; товары без свежей бизнес-цены
+    сохраняют прежнюю и помечаются price_stale. Сток/наличие — всегда из каталога.
     silent_seed=True — первичная загрузка: товары помечаются известными, не шумим.
     """
-    fetched = await wb_client.fetch_seller_catalog(seller.supplier_id)
+    fetched = await wb_client.fetch_seller_catalog(seller.supplier_id, slot=slot)
     new = []
     changes = []
     priced: set[int] = set()
-    full = full_enrich or silent_seed  # сид/ре-синк всегда обогащаем целиком
     if fetched:
         async with Session() as s:
             rows = await repo.get_products(s, seller.supplier_id)
             existing = {r.nm_id: r for r in rows}
-            # Розница: каталог уже даёт точную цену (p.price = shelf_price из normalize) —
-            # detail с кукой НЕ нужен. Бизнес-цена видна только с кукой → enrich по триггеру.
+            # Розница: каталог уже даёт точную цену (p.price = shelf_price из normalize).
+            # Бизнес-цена видна только с кукой → detail на все товары каждый цикл.
             if seller.b2b:
-                to_enrich = [
-                    p for p in fetched
-                    if full
-                    or p.nm_id not in existing
-                    or _shelf_dropped(existing[p.nm_id].shelf_price, p.shelf_price)
-                ]
-                if to_enrich:
-                    priced = await wb_client.enrich_prices(to_enrich)
+                priced = await wb_client.enrich_prices(fetched)
                 # без свежей бизнес-цены — сохраняем прежнюю (в p.price сейчас витрина)
+                # и помечаем: цена не подтверждена (кука мертва/detail упал)
                 for p in fetched:
                     if p.nm_id not in priced:
+                        p.price_stale = True
                         old = existing.get(p.nm_id)
                         if old is not None and old.price is not None:
                             p.price = old.price
+                        elif old is None:
+                            # новинка без подтверждённой цены: НЕ сохраняем витрину как
+                            # b2b-цену — иначе следующий удачный enrich даст ложное
+                            # «цена снизилась» (бизнес-цена ниже витрины)
+                            p.price = None
             seen: set[int] = set()
             for p in fetched:
                 seen.add(p.nm_id)
@@ -150,9 +142,9 @@ async def notify_seller(bot, seller, new, changes) -> None:
         await broadcast_change(bot, user_ids, seller, p, events)
 
 
-async def sync_and_notify(bot, seller, full_enrich: bool = False) -> list:
+async def sync_and_notify(bot, seller, slot=None) -> list:
     """Синхронизирует магазин и сразу рассылает новинки/изменения."""
-    fetched, new, changes = await sync_seller(seller, full_enrich=full_enrich)
+    fetched, new, changes = await sync_seller(seller, slot=slot)
     await notify_seller(bot, seller, new, changes)
     return fetched
 
@@ -203,8 +195,7 @@ COOKIE_ALERT = (
 async def _check_cookie_health(bot) -> None:
     """Если detail-цены не приходят несколько раз подряд — кука протухла, шумим всем.
 
-    Порог низкий: enrich теперь редкий, но sweep дёргает detail по всем магазинам за
-    проход — при мёртвой куке счётчик быстро наберёт несколько провалов.
+    b2b дёргает detail каждый цикл — при мёртвой куке порог 3 набирается за ~3 мин.
     """
     if wb_client.b2b_fail_streak >= 3 and not wb_client.cookie_alerted:
         wb_client.cookie_alerted = True
@@ -237,35 +228,19 @@ async def _work_window() -> tuple[int | None, int | None]:
     return start, end
 
 
-# only_fast -> время последнего полного прохода (МСК): интервальный дедуп в памяти.
-# ponytail: in-memory; при рестарте первый цикл сделает sweep — безвредно (заодно освежит).
-_last_sweep: dict[bool, datetime] = {}
+# счётчик проходов: сдвигает раскладку магазин→слот, чтобы забаненный слот
+# не морил одни и те же магазины каждый цикл
+_pass_no = 0
 
 
-def _due_sweep(only_fast: bool, now: datetime) -> bool:
-    """Пора ли полный проход с кукой: прошло ≥ price_sweep_interval_minutes с прошлого.
+async def monitoring_job(bot) -> None:
+    """Единый проход по ВСЕМ магазинам раз в monitor_interval_seconds.
 
-    Дедуп раздельно по джобам (быстрый/обычный делят магазины) — каждый метёт свою часть.
-    Гранулярность ограничена интервалом джоба (напр. обычный раз в 10 мин). 0 = выключено.
+    Каждый магазин каждый цикл: каталог без куки (розница = готовая цена),
+    b2b — плюс detail с кукой на все товары внутри sync_seller. Никаких
+    приоритетов/триггеров/sweep — все магазины равны, всё свежее каждую минуту.
     """
-    interval = settings.price_sweep_interval_minutes
-    if interval <= 0:
-        return False
-    last = _last_sweep.get(only_fast)
-    if last is not None and (now - last).total_seconds() < interval * 60:
-        return False
-    _last_sweep[only_fast] = now
-    return True
-
-
-async def monitoring_job(bot, only_fast: bool = False) -> None:
-    """Проход по магазинам: новинки + изменения цены/наличия.
-
-    only_fast=True — быстрый джоб (раз в минуту) только по приоритетным магазинам;
-    only_fast=False — обычный джоб по остальным. Так приоритетные не опрашиваются дважды.
-    Каждый цикл ходит только в каталог (без куки); detail с кукой — по триггеру внутри
-    sync_seller или полным проходом в часы price_sweep_hours (full_enrich).
-    """
+    global _pass_no
     start, end = await _work_window()
     now = datetime.now(ZoneInfo("Europe/Moscow"))
     if not _within_work_hours(start, end, now.hour):
@@ -273,22 +248,28 @@ async def monitoring_job(bot, only_fast: bool = False) -> None:
                  start, end, now.hour)
         return
     async with Session() as s:
-        sellers = await repo.list_sellers(s, fast=True if only_fast else False)
-    tag = "быстрый" if only_fast else "обычный"
-    full = _due_sweep(only_fast, now)
-    if full:
-        log.info("мониторинг (%s): полный проход с кукой (sweep, интервал %d мин)",
-                 tag, settings.price_sweep_interval_minutes)
-    log.info("мониторинг (%s): старт, магазинов %d", tag, len(sellers))
-    async with _pass_lock:  # не пересекаемся с другим проходом/ре-синком куки
-        for seller in sellers:
+        sellers = await repo.list_sellers(s)
+    log.info("мониторинг: старт, магазинов %d", len(sellers))
+
+    async def _run_bucket(slot, bucket):
+        for seller in bucket:
             try:
-                await sync_and_notify(bot, seller, full_enrich=full)
+                await sync_and_notify(bot, seller, slot=slot)
             except Exception as e:
                 log.exception("синхронизация %s упала: %s", seller.supplier_id, e)
-        if not only_fast:  # проверку куки гоняем в обычном джобе, не каждую минуту
-            await _check_cookie_health(bot)
-    log.info("мониторинг (%s): завершён", tag)
+
+    async with _pass_lock:  # весь проход не пересекается с ре-синком куки/ручной проверкой
+        # слоты берём ВНУТРИ лока (снаружи снапшот мог бы устареть, пока ждём лок).
+        # Ротация между проходами: при 429/бане одного IP страдают разные магазины.
+        off = _pass_no % len(wb_client.slots)
+        _pass_no += 1
+        slots = wb_client.slots[off:] + wb_client.slots[:off]
+        # магазины раскидываем по слотам round-robin: слоты идут параллельно, внутри
+        # слота — последовательно (свой троттлинг). Даёт реальный минутный цикл.
+        buckets = [sellers[i::len(slots)] for i in range(len(slots))]
+        await asyncio.gather(*(_run_bucket(sl, b) for sl, b in zip(slots, buckets)))
+        await _check_cookie_health(bot)
+    log.info("мониторинг: завершён")
 
 
 async def report_job(bot) -> None:
@@ -333,18 +314,8 @@ if __name__ == "__main__":  # self-check разбора часов и рабоч
     assert "price" in kinds(detect_changes(1000, 5, SimpleNamespace(price=980, stock=5)))   # −2%
     assert "price" not in kinds(detect_changes(1000, 5, SimpleNamespace(price=995, stock=5)))  # −0.5%
     assert "price" not in kinds(detect_changes(1000, 5, SimpleNamespace(price=1200, stock=5)))  # рост
-    # _shelf_dropped: витрина упала ≥1% → триггер enrich; рост/<порога/нет старой → нет
-    assert _shelf_dropped(1000, 980)          # −2%
-    assert not _shelf_dropped(1000, 995)      # −0.5%
-    assert not _shelf_dropped(1000, 1200)     # рост
-    assert not _shelf_dropped(None, 980)      # первый заход — старой витрины нет
-    # _due_sweep: первый заход — да; до истечения интервала — нет; после — снова да; 0 — выкл
-    settings.price_sweep_interval_minutes = 15
-    _last_sweep.clear()
-    t0 = datetime(2026, 7, 9, 10, 0)
-    assert _due_sweep(False, t0)                            # первый заход
-    assert not _due_sweep(False, t0.replace(minute=10))    # +10 мин < 15
-    assert _due_sweep(False, t0.replace(minute=20))        # +20 мин ≥ 15
-    settings.price_sweep_interval_minutes = 0
-    assert not _due_sweep(True, t0)                         # выключено
+    # ротация слотов: сдвиг покрывает все позиции и возвращается к исходной
+    slots3 = ["a", "b", "c"]
+    rotations = {tuple(slots3[o % 3:] + slots3[:o % 3]) for o in range(6)}
+    assert len(rotations) == 3 and ("a", "b", "c") in rotations
     print("ok")

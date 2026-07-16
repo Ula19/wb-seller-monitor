@@ -7,7 +7,7 @@ from app.bot.utils import parse_seller_slug, parse_supplier_id
 from app.config import settings
 from app.db import repo
 from app.db.base import Session
-from app.services.monitor import sync_seller
+from app.services.monitor import _pass_lock, sync_seller
 from app.wb.client import wb_client
 
 router = Router()
@@ -48,7 +48,8 @@ async def addseller(m: Message):
         seller = await repo.get_seller(s, sid)
     status = await m.answer(f"⏳ Добавляю «{name or sid}», загружаю текущий ассортимент...")
     try:
-        fetched, _, _ = await sync_seller(seller, silent_seed=True)
+        async with _pass_lock:  # не пересекаемся с минутным джобом (флуд «новинок»)
+            fetched, _, _ = await sync_seller(seller, silent_seed=True)
         await status.edit_text(f"✅ Магазин «{name or sid}» добавлен. Товаров: {len(fetched)}.")
     except Exception as e:
         await status.edit_text(f"⚠️ Магазин добавлен, но первичная загрузка не удалась: {e}")

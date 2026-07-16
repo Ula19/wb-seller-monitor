@@ -54,26 +54,51 @@ def _parse_proxies(raw: str) -> list[str]:
     return [x.strip() for x in (raw or "").split(",") if x.strip()]
 
 
+class _Slot:
+    """Канал к WB: своя сессия (свой IP/прокси) + СВОЙ троттлинг.
+
+    Троттлинг пер-слот, а не общий, — иначе параллельный проход по слотам выродится
+    в очередь на едином локе. proxy=None — прямой IP сервера.
+    """
+    __slots__ = ("session", "proxy", "lock", "last")
+
+    def __init__(self, session: AsyncSession, proxy: str | None) -> None:
+        self.session = session
+        self.proxy = proxy
+        self.lock = asyncio.Lock()
+        self.last = 0.0
+
+
 class WBClient:
     def __init__(self) -> None:
         self._cookies = _parse_cookie(settings.wb_cookie) if settings.wb_cookie else None
         if self._cookies:
             log.info("WB-клиент: использую куку аккаунта (%d полей)", len(self._cookies))
         self._proxies = _parse_proxies(settings.wb_proxies)
-        self._proxy_idx = 0
-        if self._proxies:
-            log.info("WB-клиент: прокси %d шт., текущий %s", len(self._proxies), self._current_proxy())
-        # проксированная сессия — только для detail (__internal); каталог/CDN ходят напрямую
-        # (публичны, работают с любого IP), чтобы флаки-прокси не ронял каждый цикл.
-        self._session = self._make_session(self._current_proxy())
-        self._direct_session = self._make_session(None)
-        self._lock = asyncio.Lock()
-        self._last = 0.0
+        # Пул слотов: прямой IP + по слоту на каждый прокси. Каталог (розница) раскидываем
+        # по слотам параллельно; enrich (b2b) ходит через прокси-слоты. Свой троттлинг у
+        # каждого → реальный минутный цикл, а 429 на одном IP не валит остальные.
+        self._slots = self._make_slots()
+        self._enrich_rr = 0  # round-robin по прокси-слотам для b2b enrich
+        log.info("WB-клиент: слотов %d (прямой + прокси %d)", len(self._slots), len(self._proxies))
         self.b2b_fail_streak = 0  # подряд провалов b2b (0 цен при наличии товаров)
         self.cookie_alerted = False  # уже предупредили владельца о протухшей куке
 
-    def _current_proxy(self) -> str | None:
-        return self._proxies[self._proxy_idx] if self._proxies else None
+    def _make_slots(self) -> list[_Slot]:
+        slots = [_Slot(self._make_session(None), None)]  # прямой IP сервера
+        slots += [_Slot(self._make_session(px), px) for px in self._proxies]
+        return slots
+
+    @property
+    def slots(self) -> list[_Slot]:
+        return self._slots
+
+    @property
+    def _direct_slot(self) -> _Slot:
+        return self._slots[0]
+
+    def _proxy_slots(self) -> list[_Slot]:
+        return self._slots[1:] or self._slots  # нет прокси → падаем на прямой
 
     def _make_session(self, proxy: str | None) -> AsyncSession:
         proxies = {"http": proxy, "https": proxy} if proxy else None
@@ -82,78 +107,65 @@ class WBClient:
             timeout=20, proxies=proxies,
         )
 
-    async def _rotate_proxy(self) -> bool:
-        """На 403 переключаемся на следующий прокси из списка. False — переключать некуда."""
-        if len(self._proxies) < 2:
-            return False
-        self._proxy_idx = (self._proxy_idx + 1) % len(self._proxies)
-        old = self._session
-        # ротация касается только проксированной сессии; direct-сессия каталога неизменна.
-        self._session = self._make_session(self._current_proxy())
-        try:
-            await old.close()
-        except Exception:
-            pass
-        log.warning("WB: переключаюсь на прокси %s", self._current_proxy())
-        return True
-
     async def set_cookie(self, raw: str) -> int:
-        """Заменяет куку и пересоздаёт сессию без рестарта. Возвращает число полей."""
+        """Заменяет куку и пересоздаёт сессии слотов без рестарта. Возвращает число полей.
+
+        ВАЖНО: мутируем session В СУЩЕСТВУЮЩИХ _Slot, а не пересоздаём слоты —
+        активный проход держит снапшот слот-объектов, и подмена списка оставила бы
+        его на закрытых сессиях (ретраи по мёртвой сессии на каждый магазин).
+        _get перечитывает slot.session на каждой попытке — подхватит новую сразу.
+        """
         self._cookies = _parse_cookie(raw) if raw else None
-        old = (self._session, self._direct_session)
-        self._session = self._make_session(self._current_proxy())
-        self._direct_session = self._make_session(None)
-        self.b2b_fail_streak = 0
-        self.cookie_alerted = False
-        for s in old:
+        for sl in self._slots:
+            old = sl.session
+            sl.session = self._make_session(sl.proxy)
             try:
-                await s.close()
+                await old.close()
             except Exception:
                 pass
+        self.b2b_fail_streak = 0
+        self.cookie_alerted = False
         log.info("WB-клиент: кука обновлена (%d полей)", len(self._cookies or {}))
         return len(self._cookies or {})
 
     async def close(self) -> None:
-        for s in (self._session, self._direct_session):
+        for sl in self._slots:
             try:
-                await s.close()
+                await sl.session.close()
             except Exception:
                 pass
 
-    async def _throttle(self) -> None:
-        """Не чаще одного запроса раз в request_min_delay + jitter секунд."""
-        async with self._lock:
+    async def _throttle(self, slot: _Slot) -> None:
+        """Один запрос раз в request_min_delay + jitter — ПЕР-СЛОТ (свой IP)."""
+        async with slot.lock:
             loop = asyncio.get_event_loop()
             wait = (
                 settings.request_min_delay
                 + random.uniform(0, settings.request_jitter)
-                - (loop.time() - self._last)
+                - (loop.time() - slot.last)
             )
             if wait > 0:
                 await asyncio.sleep(wait)
-            self._last = loop.time()
+            slot.last = loop.time()
 
-    async def _get(self, url, *, params=None, headers=None, retries=4, session=None):
-        sess = session or self._session
-        proxied = session is None  # ротация прокси имеет смысл только для проксированной сессии
+    async def _get(self, url, *, params=None, headers=None, retries=4, slot=None):
+        slot = slot or self._direct_slot
+        who = slot.proxy or "direct"
         for attempt in range(retries):
-            await self._throttle()
+            await self._throttle(slot)
             try:
-                r = await sess.get(url, params=params, headers=headers)
+                r = await slot.session.get(url, params=params, headers=headers)
             except Exception as e:
-                log.warning("WB сетевая ошибка %s: %s", url, e)
+                log.warning("WB сетевая ошибка %s (%s): %s", url, who, e)
                 await asyncio.sleep(2**attempt)
                 continue
             if r.status_code == 200:
                 return r
             if r.status_code == 403:
-                # WAF/бан по IP. Если есть запасные прокси — пробуем следующий и ретраим;
-                # иначе отступаем сразу (ретраи на том же IP бесполезны).
-                if proxied and await self._rotate_proxy():
-                    sess = self._session  # переключились на новый прокси
-                    log.warning("WB %s -> 403, пробую следующий прокси", url)
-                    continue
-                log.warning("WB %s -> 403 (WAF/бан), пропуск без ретраев", url)
+                # ponytail: 403 = этот IP забанен WAF. Кросс-слот failover не делаем —
+                # слоты и так бьют разных продавцов параллельно, следующий цикл повторит.
+                # Вернуть failover, если b2b снова станет активным и критичным.
+                log.warning("WB %s -> 403 (WAF/бан) слот=%s, пропуск без ретраев", url, who)
                 return r  # отдаём 403, а не None: None теперь значит только «сеть легла»
             if r.status_code == 429 or r.status_code >= 500:
                 retry_after = r.headers.get("X-Ratelimit-Retry") or r.headers.get(
@@ -164,7 +176,7 @@ class WBClient:
                     if retry_after and str(retry_after).isdigit()
                     else (2**attempt) + random.uniform(0, 1)
                 )
-                log.warning("WB %s -> %s, пауза %.1fс", url, r.status_code, delay)
+                log.warning("WB %s -> %s слот=%s, пауза %.1fс", url, r.status_code, who, delay)
                 await asyncio.sleep(delay)
                 continue
             # 404 и прочее — возвращаем как есть (пагинация/перебор хостов разберутся)
@@ -172,16 +184,17 @@ class WBClient:
         return None
 
     async def fetch_seller_catalog(
-        self, supplier_id: int, subjects: set[int] | None = None
+        self, supplier_id: int, subjects: set[int] | None = None, slot: "_Slot | None" = None
     ) -> list[NormProduct]:
-        """Каталог продавца БЕЗ куки: цена = витрина (`shelf_price`), дешёвый триггер.
+        """Каталог продавца БЕЗ куки: цена и сток витрины (`shelf_price`).
 
         Фильтр по предмету — на стороне WB (`xsubject`), поэтому у крупных продавцов не
-        листаем тысячи лишних товаров (ХОБОТ: 1 страница вместо 57). Точную «нашу» цену
-        навешивает `enrich_prices` по триггеру/sweep'у отдельно. subjects — какие
-        предметы оставить (по умолчанию — смартфоны).
+        листаем тысячи лишних товаров (ХОБОТ: 1 страница вместо 57). Для розницы это и
+        есть точная цена; b2b-магазинам поверх навешивает бизнес-цену `enrich_prices`.
+        subjects — какие предметы оставить (по умолчанию — смартфоны).
         """
         subjects = subjects or {SMARTPHONE_SUBJECT_ID}
+        slot = slot or self._direct_slot
         products: list[NormProduct] = []
         for page in range(1, settings.max_pages + 1):
             params = {
@@ -195,9 +208,15 @@ class WBClient:
             }
             if subjects:  # WB фильтрует по предмету на сервере — тянем только нужное
                 params["xsubject"] = ";".join(map(str, sorted(subjects)))
-            r = await self._get(CATALOG_URL, params=params, session=self._direct_session)
+            r = await self._get(CATALOG_URL, params=params, slot=slot)
             if r is None or r.status_code != 200:
-                break
+                # ошибка/бан на ЛЮБОЙ странице → отдаём пусто («магазин пропущен»),
+                # а не частичный список: иначе deactivate_missing погасит хвост
+                # ассортимента, который просто не долистали. Следующий цикл повторит.
+                st = r.status_code if r is not None else "сеть легла"
+                log.warning("каталог %s слот=%s: страница %d → %s, магазин пропущен",
+                            supplier_id, slot.proxy or "direct", page, st)
+                return []
             try:
                 data = r.json()
             except Exception:
@@ -221,13 +240,17 @@ class WBClient:
         Только для b2b-магазинов: бизнес-цена (B2B_PARAMS) видна лишь с кукой и реально
         отличается от розницы. Рознице detail не нужен — каталог уже даёт её цену.
         WBAAS пускает __internal только на браузерный набор заголовков (без них — 403,
-        даже с валидной кукой). IP не проверяет. Зовётся по триггеру/в sweep — не каждый
-        цикл, чтобы не держать куку на критпути.
+        даже с валидной кукой). IP не проверяет. Зовётся КАЖДЫЙ цикл на все товары
+        b2b-магазина (статик-резидентные прокси; забанят/кука протухнет — вернём
+        триггерную схему из git).
         """
         base_params = B2B_PARAMS
+        pslots = self._proxy_slots()
+        slot = pslots[self._enrich_rr % len(pslots)]  # round-robin по прокси-слотам
+        self._enrich_rr += 1
         prices: dict[int, int] = {}
         deliv: dict[int, tuple] = {}
-        saw_response = False  # получили ли хоть один HTTP-ответ (не сетевой обрыв)
+        saw_response = False  # был ли хоть один 200-ответ (403/429/обрыв — не про куку)
         nm_ids = [p.nm_id for p in products]
         for i in range(0, len(nm_ids), 100):
             chunk = nm_ids[i:i + 100]
@@ -242,12 +265,12 @@ class WBClient:
                 "deviceid": settings.wb_device_id,
                 "x-spa-version": settings.wb_spa_version,
             }
-            r = await self._get(B2B_DETAIL_URL, params=params, headers=headers)
-            if r is None:
-                continue  # сеть легла (прокси оборвал) — не признак протухшей куки
-            saw_response = True
-            if r.status_code != 200:
+            r = await self._get(B2B_DETAIL_URL, params=params, headers=headers, slot=slot)
+            if r is None or r.status_code != 200:
+                # обрыв сети или 403/429 (WAF/бан IP) — НЕ признак протухшей куки:
+                # streak копим только по 200-ответам без цен
                 continue
+            saw_response = True
             try:
                 items = r.json().get("products") or []
             except Exception:
@@ -269,7 +292,7 @@ class WBClient:
             if saw_response:
                 self.b2b_fail_streak += 1
             else:
-                log.warning("b2b: все запросы легли по сети (прокси), счётчик куки не трогаю")
+                log.warning("b2b: ни одного 200 (сеть/бан IP), счётчик куки не трогаю")
         else:
             self.b2b_fail_streak = 0
         log.info("detail цены применены: %d/%d", len(prices), len(products))
@@ -277,7 +300,7 @@ class WBClient:
 
     async def resolve_seller_slug(self, slug: str) -> int | None:
         """supplier_id по slug-ссылке /seller/<slug> (для SEO-адресов без числа)."""
-        r = await self._get(SHOP_BY_SLUG_URL.format(slug), session=self._direct_session)
+        r = await self._get(SHOP_BY_SLUG_URL.format(slug), slot=self._direct_slot)
         if r and r.status_code == 200:
             try:
                 return int(r.json()["supplierID"])
@@ -286,7 +309,7 @@ class WBClient:
         return None
 
     async def fetch_supplier_info(self, supplier_id: int) -> dict | None:
-        r = await self._get(SUPPLIER_INFO_URL.format(supplier_id), session=self._direct_session)
+        r = await self._get(SUPPLIER_INFO_URL.format(supplier_id), slot=self._direct_slot)
         if r and r.status_code == 200:
             try:
                 return r.json()
@@ -295,7 +318,7 @@ class WBClient:
         return None
 
 
-# единый экземпляр на всё приложение (общий троттлинг для планировщика и хендлеров)
+# единый экземпляр на всё приложение (пул слотов: прямой IP + прокси, троттлинг пер-слот)
 wb_client = WBClient()
 
 

@@ -34,8 +34,9 @@ async def on_startup() -> None:
         await conn.execute(text(
             "ALTER TABLE products ADD COLUMN IF NOT EXISTS shelf_price INTEGER"
         ))
+        # is_fast упразднён: все магазины мониторятся ежеминутно единым джобом
         await conn.execute(text(
-            "ALTER TABLE sellers ADD COLUMN IF NOT EXISTS is_fast BOOLEAN DEFAULT FALSE"
+            "ALTER TABLE sellers DROP COLUMN IF EXISTS is_fast"
         ))
         await conn.execute(text(
             "ALTER TABLE sellers ADD COLUMN IF NOT EXISTS b2b BOOLEAN DEFAULT TRUE"
@@ -47,7 +48,7 @@ async def on_startup() -> None:
     if saved:
         await wb_client.set_cookie(saved)
     proxy_state = (
-        f"вкл ({len(wb_client._proxies)} шт., {wb_client._current_proxy()})"
+        f"вкл ({len(wb_client._proxies)} шт.)"
         if wb_client._proxies else "выкл (напрямую)"
     )
     log.info("Старт: владелец %s, разрешённых пользователей %d, прокси WB: %s",
@@ -71,20 +72,12 @@ async def main() -> None:
     dp.include_router(common.router)
 
     scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
-    scheduler.add_job(
+    scheduler.add_job(  # единый джоб: ВСЕ магазины каждые monitor_interval_seconds
         monitoring_job,
         "interval",
-        minutes=settings.monitor_interval_minutes,
-        args=[bot, False],
-        max_instances=1,
-        coalesce=True,
-    )
-    scheduler.add_job(  # быстрый джоб только по приоритетным магазинам
-        monitoring_job,
-        "interval",
-        minutes=settings.fast_monitor_interval_minutes,
-        args=[bot, True],
-        max_instances=1,
+        seconds=settings.monitor_interval_seconds,
+        args=[bot],
+        max_instances=1,  # проход дольше интервала → следующий запуск коалесится
         coalesce=True,
     )
     scheduler.add_job(report_job, "cron", minute=0, args=[bot], max_instances=1)

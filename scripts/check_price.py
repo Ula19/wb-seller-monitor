@@ -20,7 +20,8 @@ async def main():
         "appType": 1, "curr": "rub", "dest": settings.wb_dest,
         "sort": "popular", "spp": settings.wb_spp, "supplier": SUP, "page": 1,
     }
-    r = await wb_client._session.get(CATALOG_URL, params=params)
+    # каталог публичный — прямой слот, как fetch_seller_catalog по умолчанию
+    r = await wb_client._direct_slot.session.get(CATALOG_URL, params=params)
     print("статус:", r.status_code)
     if r.status_code == 200:
         for p in r.json().get("products", []):

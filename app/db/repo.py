@@ -55,20 +55,9 @@ async def get_seller(s, supplier_id: int) -> models.Seller | None:
     return await s.get(models.Seller, supplier_id)
 
 
-async def list_sellers(s, fast: bool | None = None) -> list[models.Seller]:
-    q = select(models.Seller).order_by(models.Seller.added_at)
-    if fast is not None:  # None — все, True — только приоритетные, False — только обычные
-        q = q.where(models.Seller.is_fast == fast)
-    res = await s.execute(q)
+async def list_sellers(s) -> list[models.Seller]:
+    res = await s.execute(select(models.Seller).order_by(models.Seller.added_at))
     return list(res.scalars().all())
-
-
-async def set_seller_fast(s, supplier_id: int, value: bool) -> bool:
-    sl = await s.get(models.Seller, supplier_id)
-    if sl:
-        sl.is_fast = value
-        return True
-    return False
 
 
 async def set_seller_b2b(s, supplier_id: int, value: bool) -> bool:

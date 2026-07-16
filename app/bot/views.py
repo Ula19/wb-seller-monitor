@@ -75,7 +75,7 @@ async def run_checknow_one(bot, user_id: int, supplier_id: int) -> bool:
         return False
     try:
         async with _pass_lock:  # не пересекаемся с джобами/ре-синком
-            await sync_and_notify(bot, seller, full_enrich=True)  # ручная проверка — точные цены
+            await sync_and_notify(bot, seller)  # b2b и так обогащается целиком каждый вызов
     except Exception:
         pass
     async with Session() as s:
