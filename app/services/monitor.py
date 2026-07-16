@@ -250,11 +250,15 @@ async def monitoring_job(bot) -> None:
     async with Session() as s:
         sellers = await repo.list_sellers(s)
     log.info("мониторинг: старт, магазинов %d", len(sellers))
+    t0 = asyncio.get_event_loop().time()
+    skipped: list[int] = []  # магазины с пустым каталогом (429/бан/сеть) в этом проходе
 
     async def _run_bucket(slot, bucket):
         for seller in bucket:
             try:
-                await sync_and_notify(bot, seller, slot=slot)
+                fetched = await sync_and_notify(bot, seller, slot=slot)
+                if not fetched:
+                    skipped.append(seller.supplier_id)
             except Exception as e:
                 log.exception("синхронизация %s упала: %s", seller.supplier_id, e)
 
@@ -269,7 +273,9 @@ async def monitoring_job(bot) -> None:
         buckets = [sellers[i::len(slots)] for i in range(len(slots))]
         await asyncio.gather(*(_run_bucket(sl, b) for sl, b in zip(slots, buckets)))
         await _check_cookie_health(bot)
-    log.info("мониторинг: завершён")
+    took = asyncio.get_event_loop().time() - t0
+    log.info("мониторинг: завершён за %.1fс, магазинов %d, пропущено %d%s",
+             took, len(sellers), len(skipped), f" {skipped}" if skipped else "")
 
 
 async def report_job(bot) -> None:

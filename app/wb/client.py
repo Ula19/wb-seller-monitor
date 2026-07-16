@@ -213,7 +213,8 @@ class WBClient:
                 # ошибка/бан на ЛЮБОЙ странице → отдаём пусто («магазин пропущен»),
                 # а не частичный список: иначе deactivate_missing погасит хвост
                 # ассортимента, который просто не долистали. Следующий цикл повторит.
-                st = r.status_code if r is not None else "сеть легла"
+                # None = _get исчерпал ретраи (4×429 подряд или сетевые обрывы).
+                st = r.status_code if r is not None else "ретраи исчерпаны (429/сеть)"
                 log.warning("каталог %s слот=%s: страница %d → %s, магазин пропущен",
                             supplier_id, slot.proxy or "direct", page, st)
                 return []
