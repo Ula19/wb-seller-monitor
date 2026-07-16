@@ -199,6 +199,9 @@ class WBClient:
         subjects = subjects or {SMARTPHONE_SUBJECT_ID}
         slot = slot or self._direct_slot
         products: list[NormProduct] = []
+        # limit=300 (дефолт WB — 100): магазины до 300 позиций влезают в ОДНУ страницу.
+        # Меньше запросов → меньше 429; проверено вживую (182 товара одной страницей).
+        page_limit = 300
         for page in range(1, settings.max_pages + 1):
             params = {
                 "appType": 1,
@@ -208,6 +211,7 @@ class WBClient:
                 "spp": settings.wb_spp,
                 "supplier": supplier_id,
                 "page": page,
+                "limit": page_limit,
             }
             if subjects:  # WB фильтрует по предмету на сервере — тянем только нужное
                 params["xsubject"] = ";".join(map(str, sorted(subjects)))
@@ -232,7 +236,7 @@ class WBClient:
                 import json
                 log.info("RAW первый товар: %s", json.dumps(items[0], ensure_ascii=False))
             products.extend(normalize(p, supplier_id) for p in items)
-            if len(items) < 100:
+            if len(items) < page_limit:
                 break
         if subjects:  # страховка, если WB проигнорит xsubject
             products = [p for p in products if p.subject_id in subjects]
