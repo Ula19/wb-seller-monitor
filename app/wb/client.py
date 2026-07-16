@@ -81,6 +81,7 @@ class WBClient:
         # каждого → реальный минутный цикл, а 429 на одном IP не валит остальные.
         self._slots = self._make_slots()
         self._enrich_rr = 0  # round-robin по прокси-слотам для b2b enrich
+        self._slot_rr = 0  # round-robin по всем слотам для внеплановых запросов
         log.info("WB-клиент: слотов %d (прямой + прокси %d)", len(self._slots), len(self._proxies))
         self.b2b_fail_streak = 0  # подряд провалов b2b (0 цен при наличии товаров)
         self.cookie_alerted = False  # уже предупредили владельца о протухшей куке
@@ -100,6 +101,12 @@ class WBClient:
 
     def _proxy_slots(self) -> list[_Slot]:
         return self._slots[1:] or self._slots  # нет прокси → падаем на прямой
+
+    def _next_slot(self) -> _Slot:
+        """Round-robin по ВСЕМ слотам — для запросов вне минутного прохода
+        (ручная проверка, сид, ре-синк), чтобы не долбить только direct."""
+        self._slot_rr += 1
+        return self._slots[self._slot_rr % len(self._slots)]
 
     def _make_session(self, proxy: str | None) -> AsyncSession:
         proxies = {"http": proxy, "https": proxy} if proxy else None
@@ -197,7 +204,7 @@ class WBClient:
         subjects — какие предметы оставить (по умолчанию — смартфоны).
         """
         subjects = subjects or {SMARTPHONE_SUBJECT_ID}
-        slot = slot or self._direct_slot
+        slot = slot or self._next_slot()  # без слота (ручная/сид/ре-синк) — по кругу
         products: list[NormProduct] = []
         # limit=300 (дефолт WB — 100): магазины до 300 позиций влезают в ОДНУ страницу.
         # Меньше запросов → меньше 429; проверено вживую (182 товара одной страницей).
