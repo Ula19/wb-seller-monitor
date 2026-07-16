@@ -60,13 +60,14 @@ class _Slot:
     Троттлинг пер-слот, а не общий, — иначе параллельный проход по слотам выродится
     в очередь на едином локе. proxy=None — прямой IP сервера.
     """
-    __slots__ = ("session", "proxy", "lock", "last")
+    __slots__ = ("session", "proxy", "lock", "last", "err429")
 
     def __init__(self, session: AsyncSession, proxy: str | None) -> None:
         self.session = session
         self.proxy = proxy
         self.lock = asyncio.Lock()
         self.last = 0.0
+        self.err429 = 0  # счётчик 429 за текущий проход (сбрасывает monitoring_job)
 
 
 class WBClient:
@@ -168,6 +169,8 @@ class WBClient:
                 log.warning("WB %s -> 403 (WAF/бан) слот=%s, пропуск без ретраев", url, who)
                 return r  # отдаём 403, а не None: None теперь значит только «сеть легла»
             if r.status_code == 429 or r.status_code >= 500:
+                if r.status_code == 429:
+                    slot.err429 += 1  # пер-слот статистика для сводки прохода
                 retry_after = r.headers.get("X-Ratelimit-Retry") or r.headers.get(
                     "Retry-After"
                 )

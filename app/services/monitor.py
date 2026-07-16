@@ -251,9 +251,9 @@ async def monitoring_job(bot) -> None:
         sellers = await repo.list_sellers(s)
     log.info("мониторинг: старт, магазинов %d", len(sellers))
     t0 = asyncio.get_event_loop().time()
-    skipped: list[int] = []  # магазины с пустым каталогом (429/бан/сеть) в этом проходе
 
-    async def _run_bucket(slot, bucket):
+    async def _run_bucket(slot, bucket) -> list[int]:
+        skipped = []  # магазины этого слота с пустым каталогом (429/бан/сеть)
         for seller in bucket:
             try:
                 fetched = await sync_and_notify(bot, seller, slot=slot)
@@ -261,6 +261,7 @@ async def monitoring_job(bot) -> None:
                     skipped.append(seller.supplier_id)
             except Exception as e:
                 log.exception("синхронизация %s упала: %s", seller.supplier_id, e)
+        return skipped
 
     async with _pass_lock:  # весь проход не пересекается с ре-синком куки/ручной проверкой
         # слоты берём ВНУТРИ лока (снаружи снапшот мог бы устареть, пока ждём лок).
@@ -268,14 +269,21 @@ async def monitoring_job(bot) -> None:
         off = _pass_no % len(wb_client.slots)
         _pass_no += 1
         slots = wb_client.slots[off:] + wb_client.slots[:off]
+        for sl in slots:
+            sl.err429 = 0  # пер-слот счётчик 429 на этот проход
         # магазины раскидываем по слотам round-robin: слоты идут параллельно, внутри
         # слота — последовательно (свой троттлинг). Даёт реальный минутный цикл.
         buckets = [sellers[i::len(slots)] for i in range(len(slots))]
-        await asyncio.gather(*(_run_bucket(sl, b) for sl, b in zip(slots, buckets)))
+        by_slot = await asyncio.gather(*(_run_bucket(sl, b) for sl, b in zip(slots, buckets)))
         await _check_cookie_health(bot)
     took = asyncio.get_event_loop().time() - t0
-    log.info("мониторинг: завершён за %.1fс, магазинов %d, пропущено %d%s",
-             took, len(sellers), len(skipped), f" {skipped}" if skipped else "")
+    skipped = [sid for sk in by_slot for sid in sk]
+    per_slot = "; ".join(
+        f"{sl.proxy or 'direct'}: 429×{sl.err429}, пропустил {len(sk)}"
+        for sl, sk in zip(slots, by_slot)
+    )
+    log.info("мониторинг: завершён за %.1fс, магазинов %d, пропущено %d%s | %s",
+             took, len(sellers), len(skipped), f" {skipped}" if skipped else "", per_slot)
 
 
 async def report_job(bot) -> None:
