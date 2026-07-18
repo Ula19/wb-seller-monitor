@@ -76,19 +76,25 @@ class WBClient:
         if self._cookies:
             log.info("WB-клиент: использую куку аккаунта (%d полей)", len(self._cookies))
         self._proxies = _parse_proxies(settings.wb_proxies)
-        # Пул слотов: прямой IP + по слоту на каждый прокси. Каталог (розница) раскидываем
-        # по слотам параллельно; enrich (b2b) ходит через прокси-слоты. Свой троттлинг у
-        # каждого → реальный минутный цикл, а 429 на одном IP не валит остальные.
+        self._dc_proxies = _parse_proxies(settings.wb_dc_proxies)
+        # Пул слотов: прямой IP + резидентные + датацентровые. Каталог раскидываем по
+        # ВСЕМ слотам параллельно; enrich (b2b, __internal) — только через резидентные
+        # (датацентровые IP __internal режет 498-заглушкой). Свой троттлинг у каждого →
+        # реальный минутный цикл, а 429 на одном IP не валит остальные.
         self._slots = self._make_slots()
         self._enrich_rr = 0  # round-robin по прокси-слотам для b2b enrich
         self._slot_rr = 0  # round-robin по всем слотам для внеплановых запросов
-        log.info("WB-клиент: слотов %d (прямой + прокси %d)", len(self._slots), len(self._proxies))
+        log.info("WB-клиент: слотов %d (прямой + резидентных %d + датацентровых %d)",
+                 len(self._slots), len(self._proxies), len(self._dc_proxies))
         self.b2b_fail_streak = 0  # подряд провалов b2b (0 цен при наличии товаров)
         self.cookie_alerted = False  # уже предупредили владельца о протухшей куке
 
     def _make_slots(self) -> list[_Slot]:
+        # порядок фиксирован: [direct] + резидентные + датацентровые —
+        # _proxy_slots() по нему выделяет резидентные для b2b (__internal)
         slots = [_Slot(self._make_session(None), None)]  # прямой IP сервера
         slots += [_Slot(self._make_session(px), px) for px in self._proxies]
+        slots += [_Slot(self._make_session(px), px) for px in self._dc_proxies]
         return slots
 
     @property
@@ -100,7 +106,8 @@ class WBClient:
         return self._slots[0]
 
     def _proxy_slots(self) -> list[_Slot]:
-        return self._slots[1:] or self._slots  # нет прокси → падаем на прямой
+        """Слоты для b2b (__internal): только резидентные — датацентровые там 498."""
+        return self._slots[1:1 + len(self._proxies)] or self._slots  # нет резидентных → прямой
 
     def _next_slot(self) -> _Slot:
         """Round-robin по ВСЕМ слотам — для запросов вне минутного прохода
