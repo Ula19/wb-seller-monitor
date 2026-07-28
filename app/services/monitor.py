@@ -211,19 +211,16 @@ async def _work_window() -> tuple[int | None, int | None]:
     return start, end
 
 
-# счётчик проходов: сдвигает раскладку магазин→слот, чтобы забаненный слот
-# не морил одни и те же магазины каждый цикл
-_pass_no = 0
-
-
 async def monitoring_job(bot) -> None:
     """Единый проход по ВСЕМ магазинам раз в monitor_interval_seconds.
 
     Каждый магазин каждый цикл: каталог без куки (розница = готовая цена),
     b2b — плюс detail с кукой на все товары внутри sync_seller. Никаких
     приоритетов/триггеров/sweep — все магазины равны, всё свежее каждую минуту.
+    Слоты разбирают ОБЩУЮ очередь магазинов (work-stealing): кто освободился —
+    берёт следующего; завязший в 429 слот возьмёт меньше, его хвост подстрахуют
+    свободные. Статическая раскладка/ротация не нужны — очередь балансирует сама.
     """
-    global _pass_no
     start, end = await _work_window()
     now = datetime.now(ZoneInfo("Europe/Moscow"))
     if not _within_work_hours(start, end, now.hour):
@@ -235,35 +232,32 @@ async def monitoring_job(bot) -> None:
     log.info("мониторинг: старт, магазинов %d", len(sellers))
     t0 = asyncio.get_event_loop().time()
 
-    async def _run_bucket(slot, bucket) -> list[int]:
-        skipped = []  # магазины этого слота с пустым каталогом (429/бан/сеть)
-        for seller in bucket:
+    async def _worker(slot, queue) -> tuple[int, list[int]]:
+        served, skipped = 0, []  # skipped: пустой каталог (429/бан/сеть)
+        # общий итератор безопасен: asyncio переключает корутины только на await,
+        # между next() и первым await вклиниться некому
+        for seller in queue:
+            served += 1
             try:
                 fetched = await sync_and_notify(bot, seller, slot=slot)
                 if not fetched:
                     skipped.append(seller.supplier_id)
             except Exception as e:
                 log.exception("синхронизация %s упала: %s", seller.supplier_id, e)
-        return skipped
+        return served, skipped
 
     async with _pass_lock:  # весь проход не пересекается с ручной проверкой/сидом
-        # слоты берём ВНУТРИ лока (снаружи снапшот мог бы устареть, пока ждём лок).
-        # Ротация между проходами: при 429/бане одного IP страдают разные магазины.
-        off = _pass_no % len(wb_client.slots)
-        _pass_no += 1
-        slots = wb_client.slots[off:] + wb_client.slots[:off]
+        slots = wb_client.slots  # снапшот внутри лока (снаружи мог бы устареть)
         for sl in slots:
             sl.err429 = 0  # пер-слот счётчик 429 на этот проход
-        # магазины раскидываем по слотам round-robin: слоты идут параллельно, внутри
-        # слота — последовательно (свой троттлинг). Даёт реальный минутный цикл.
-        buckets = [sellers[i::len(slots)] for i in range(len(slots))]
-        by_slot = await asyncio.gather(*(_run_bucket(sl, b) for sl, b in zip(slots, buckets)))
+        queue = iter(sellers)  # общая очередь: слоты растаскивают по мере готовности
+        results = await asyncio.gather(*(_worker(sl, queue) for sl in slots))
         await _check_cookie_health(bot)
     took = asyncio.get_event_loop().time() - t0
-    skipped = [sid for sk in by_slot for sid in sk]
+    skipped = [sid for _, sk in results for sid in sk]
     per_slot = "; ".join(
-        f"{sl.proxy or 'direct'}: 429×{sl.err429}, пропустил {len(sk)}"
-        for sl, sk in zip(slots, by_slot)
+        f"{sl.proxy or 'direct'}: 429×{sl.err429}, обслужил {srv}, пропустил {len(sk)}"
+        for sl, (srv, sk) in zip(slots, results)
     )
     log.info("мониторинг: завершён за %.1fс, магазинов %d, пропущено %d%s | %s",
              took, len(sellers), len(skipped), f" {skipped}" if skipped else "", per_slot)
@@ -311,8 +305,19 @@ if __name__ == "__main__":  # self-check разбора часов и рабоч
     assert "price" in kinds(detect_changes(1000, 5, SimpleNamespace(price=980, stock=5)))   # −2%
     assert "price" not in kinds(detect_changes(1000, 5, SimpleNamespace(price=995, stock=5)))  # −0.5%
     assert "price" not in kinds(detect_changes(1000, 5, SimpleNamespace(price=1200, stock=5)))  # рост
-    # ротация слотов: сдвиг покрывает все позиции и возвращается к исходной
-    slots3 = ["a", "b", "c"]
-    rotations = {tuple(slots3[o % 3:] + slots3[:o % 3]) for o in range(6)}
-    assert len(rotations) == 3 and ("a", "b", "c") in rotations
+    # work-stealing: общий итератор — каждый магазин обслужен РОВНО одним воркером,
+    # медленный воркер берёт меньше, быстрый подстраховывает его хвост
+    async def _ws_demo():
+        served = {"fast": [], "slow": []}
+        queue = iter(range(10))
+        async def worker(name, delay):
+            for item in queue:
+                served[name].append(item)
+                await asyncio.sleep(delay)
+        await asyncio.gather(worker("fast", 0), worker("slow", 0.02))
+        return served
+    served = asyncio.run(_ws_demo())
+    got = sorted(served["fast"] + served["slow"])
+    assert got == list(range(10)), got                      # все и без дублей
+    assert len(served["fast"]) > len(served["slow"]), served  # быстрый взял больше
     print("ok")
