@@ -13,6 +13,8 @@ import os
 import sys
 
 from app.config import settings
+from app.db import repo
+from app.db.base import Session
 from app.wb.client import wb_client
 
 NMS = sys.argv[1:] or ["1166248655"]
@@ -27,8 +29,16 @@ PARAMS = {
 
 
 async def main():
+    # АКТУАЛЬНАЯ кука живёт в БД (кладёт кнопка «🔑 Куки»); .env — лишь древний сид.
+    # Бот подхватывает её в on_startup, скрипт — отдельный процесс, делаем то же сами.
+    saved = None
+    async with Session() as s:
+        saved = await repo.get_setting(s, "wb_cookie")
+    if saved:
+        await wb_client.set_cookie(saved)
     slot = wb_client._proxy_slots()[0]  # b2b ходит через прокси-слот, как в enrich_prices
-    print("кука активна:", bool(settings.wb_cookie), "| прокси:", slot.proxy or "нет (напрямую)")
+    print("кука:", "из БД (актуальная)" if saved else "из .env (может быть протухшей!)",
+          "| прокси:", slot.proxy or "нет (напрямую)")
     # те же браузерные заголовки, что шлёт бот в _apply_detail_prices (без них WBAAS даёт 403)
     headers = {
         "Accept": "*/*",
