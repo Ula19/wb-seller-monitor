@@ -65,7 +65,7 @@ async def sync_seller(
             # Розница: каталог уже даёт точную цену (p.price = shelf_price из normalize).
             # Бизнес-цена видна только с кукой → detail на все товары каждый цикл.
             if seller.b2b:
-                priced = await wb_client.enrich_prices(fetched)
+                priced = await wb_client.enrich_prices(fetched, slot=slot)
                 # без свежей бизнес-цены — сохраняем прежнюю (в p.price сейчас витрина)
                 # и помечаем: цена не подтверждена (кука мертва/detail упал)
                 for p in fetched:

@@ -76,25 +76,19 @@ class WBClient:
         if self._cookies:
             log.info("WB-клиент: использую куку аккаунта (%d полей)", len(self._cookies))
         self._proxies = _parse_proxies(settings.wb_proxies)
-        self._dc_proxies = _parse_proxies(settings.wb_dc_proxies)
-        # Пул слотов: прямой IP + резидентные + датацентровые. Каталог раскидываем по
-        # ВСЕМ слотам параллельно; enrich (b2b, __internal) — только через резидентные
-        # (датацентровые IP __internal режет 498-заглушкой). Свой троттлинг у каждого →
-        # реальный минутный цикл, а 429 на одном IP не валит остальные.
+        # Пул равнозначных слотов: прямой IP + по слоту на прокси. Слот магазина
+        # обслуживает и каталог, и b2b-detail (__internal пускает любой класс IP при
+        # живой куке — проверено 2026-07-17). Свой троттлинг у каждого → реальный
+        # минутный цикл, а 429 на одном IP не валит остальные.
         self._slots = self._make_slots()
-        self._enrich_rr = 0  # round-robin по прокси-слотам для b2b enrich
-        self._slot_rr = 0  # round-robin по всем слотам для внеплановых запросов
-        log.info("WB-клиент: слотов %d (прямой + резидентных %d + датацентровых %d)",
-                 len(self._slots), len(self._proxies), len(self._dc_proxies))
+        self._slot_rr = 0  # round-robin по слотам для запросов вне минутного прохода
+        log.info("WB-клиент: слотов %d (прямой + прокси %d)", len(self._slots), len(self._proxies))
         self.b2b_fail_streak = 0  # подряд провалов b2b (0 цен при наличии товаров)
         self.cookie_alerted = False  # уже предупредили владельца о протухшей куке
 
     def _make_slots(self) -> list[_Slot]:
-        # порядок фиксирован: [direct] + резидентные + датацентровые —
-        # _proxy_slots() по нему выделяет резидентные для b2b (__internal)
         slots = [_Slot(self._make_session(None), None)]  # прямой IP сервера
         slots += [_Slot(self._make_session(px), px) for px in self._proxies]
-        slots += [_Slot(self._make_session(px), px) for px in self._dc_proxies]
         return slots
 
     @property
@@ -104,10 +98,6 @@ class WBClient:
     @property
     def _direct_slot(self) -> _Slot:
         return self._slots[0]
-
-    def _proxy_slots(self) -> list[_Slot]:
-        """Слоты для b2b (__internal): только резидентные — датацентровые там 498."""
-        return self._slots[1:1 + len(self._proxies)] or self._slots  # нет резидентных → прямой
 
     def _next_slot(self) -> _Slot:
         """Round-robin по ВСЕМ слотам — для запросов вне минутного прохода
@@ -258,20 +248,18 @@ class WBClient:
             products = [p for p in products if p.subject_id in subjects]
         return products
 
-    async def enrich_prices(self, products: list[NormProduct]) -> set[int]:
+    async def enrich_prices(self, products: list[NormProduct], slot: "_Slot | None" = None) -> set[int]:
         """Навешивает БИЗНЕС-цену из detail (батчи по 100) поверх каталожной.
 
         Только для b2b-магазинов: бизнес-цена (B2B_PARAMS) видна лишь с кукой и реально
         отличается от розницы. Рознице detail не нужен — каталог уже даёт её цену.
         WBAAS пускает __internal только на браузерный набор заголовков (без них — 403,
-        даже с валидной кукой). IP не проверяет. Зовётся КАЖДЫЙ цикл на все товары
-        b2b-магазина (статик-резидентные прокси; забанят/кука протухнет — вернём
-        триггерную схему из git).
+        даже с валидной кукой) + живую куку (протухла → 498); класс IP не важен.
+        Зовётся КАЖДЫЙ цикл на все товары b2b-магазина тем же слотом, что и каталог
+        (кука протухнет/забанят — вернём триггерную схему из git).
         """
         base_params = B2B_PARAMS
-        pslots = self._proxy_slots()
-        slot = pslots[self._enrich_rr % len(pslots)]  # round-robin по прокси-слотам
-        self._enrich_rr += 1
+        slot = slot or self._next_slot()
         prices: dict[int, int] = {}
         deliv: dict[int, tuple] = {}
         saw_response = False  # был ли ответ, говорящий о состоянии куки (200 или 498)

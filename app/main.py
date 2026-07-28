@@ -47,7 +47,7 @@ async def on_startup() -> None:
         saved = await repo.get_setting(s, "wb_cookie")
     if saved:
         await wb_client.set_cookie(saved)
-    n_px = len(wb_client._proxies) + len(wb_client._dc_proxies)
+    n_px = len(wb_client._proxies)
     proxy_state = f"вкл ({n_px} шт.)" if n_px else "выкл (напрямую)"
     log.info("Старт: владелец %s, разрешённых пользователей %d, прокси WB: %s",
              settings.owner_id, len(access.allowed), proxy_state)

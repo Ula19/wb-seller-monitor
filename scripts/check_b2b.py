@@ -36,7 +36,7 @@ async def main():
         saved = await repo.get_setting(s, "wb_cookie")
     if saved:
         await wb_client.set_cookie(saved)
-    slot = wb_client._proxy_slots()[0]  # b2b ходит через прокси-слот, как в enrich_prices
+    slot = wb_client._next_slot()  # любой слот: класс IP для __internal не важен
     print("кука:", "из БД (актуальная)" if saved else "из .env (может быть протухшей!)",
           "| прокси:", slot.proxy or "нет (напрямую)")
     # те же браузерные заголовки, что шлёт бот в _apply_detail_prices (без них WBAAS даёт 403)
