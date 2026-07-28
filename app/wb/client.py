@@ -111,7 +111,7 @@ class WBClient:
 
     def _next_slot(self) -> _Slot:
         """Round-robin по ВСЕМ слотам — для запросов вне минутного прохода
-        (ручная проверка, сид, ре-синк), чтобы не долбить только direct."""
+        (ручная проверка, сид нового магазина), чтобы не долбить только direct."""
         self._slot_rr += 1
         return self._slots[self._slot_rr % len(self._slots)]
 
@@ -213,7 +213,7 @@ class WBClient:
         subjects — какие предметы оставить (по умолчанию — смартфоны).
         """
         subjects = subjects or {SMARTPHONE_SUBJECT_ID}
-        slot = slot or self._next_slot()  # без слота (ручная/сид/ре-синк) — по кругу
+        slot = slot or self._next_slot()  # без слота (ручная проверка/сид) — по кругу
         products: list[NormProduct] = []
         # limit=300 (дефолт WB — 100): магазины до 300 позиций влезают в ОДНУ страницу.
         # Меньше запросов → меньше 429; проверено вживую (182 товара одной страницей).

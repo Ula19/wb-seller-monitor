@@ -19,7 +19,7 @@ from app.db import repo
 from app.db.base import Session
 from app.emoji import esc, tge
 from app.services import reporting
-from app.services.monitor import _pass_lock, silent_resync_all, sync_seller
+from app.services.monitor import _pass_lock, sync_seller
 from app.wb.client import wb_client
 
 log = logging.getLogger(__name__)
@@ -114,13 +114,11 @@ async def cookie_input(m: Message, state: FSMContext):
     async with Session() as s:
         await repo.set_setting(s, "wb_cookie", raw)
         await s.commit()
-    status = await m.answer(
-        f"{tge('ok')} Кука обновлена ({n} полей). Обновляю цены, подожди...",
+    # ре-синк не нужен: минутный цикл через ≤60с сам подтянет цены с новой кукой,
+    # а реальное снижение за время протухшей куки честно алертнёт (не глушим)
+    await m.answer(
+        f"{tge('ok')} Кука обновлена ({n} полей). Цены подтянутся ближайшим циклом.",
         parse_mode="HTML",
-    )
-    await silent_resync_all()
-    await status.edit_text(
-        f"{tge('ok')} Кука обновлена ({n} полей). Цены обновлены.", parse_mode="HTML"
     )
 
 

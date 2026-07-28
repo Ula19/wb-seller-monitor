@@ -74,7 +74,7 @@ async def run_checknow_one(bot, user_id: int, supplier_id: int) -> bool:
     if not seller:
         return False
     try:
-        async with _pass_lock:  # не пересекаемся с джобами/ре-синком
+        async with _pass_lock:  # не пересекаемся с джобами/сидом
             await sync_and_notify(bot, seller)  # b2b и так обогащается целиком каждый вызов
     except Exception:
         pass
