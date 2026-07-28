@@ -274,7 +274,7 @@ class WBClient:
         self._enrich_rr += 1
         prices: dict[int, int] = {}
         deliv: dict[int, tuple] = {}
-        saw_response = False  # был ли хоть один 200-ответ (403/429/обрыв — не про куку)
+        saw_response = False  # был ли ответ, говорящий о состоянии куки (200 или 498)
         nm_ids = [p.nm_id for p in products]
         for i in range(0, len(nm_ids), 100):
             chunk = nm_ids[i:i + 100]
@@ -291,10 +291,16 @@ class WBClient:
             }
             r = await self._get(B2B_DETAIL_URL, params=params, headers=headers,
                                 cookies=self._cookies, slot=slot)
-            if r is None or r.status_code != 200:
-                # обрыв сети или 403/429 (WAF/бан IP) — НЕ признак протухшей куки:
-                # streak копим только по 200-ответам без цен
+            if r is None:
+                continue  # сеть легла — не про куку
+            if r.status_code == 498:
+                # 498 = WBAAS-заглушка на НЕВАЛИДНУЮ куку (проверено 2026-07-17:
+                # протухшая кука → 498 на любом IP; живая → 200 даже с датацентрового).
+                # Это и есть главный маркер «кука протухла» — копим streak.
+                saw_response = True
                 continue
+            if r.status_code != 200:
+                continue  # 403/429 (WAF/темп/бан IP) — не про куку
             saw_response = True
             try:
                 items = r.json().get("products") or []
