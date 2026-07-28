@@ -51,7 +51,9 @@ async def main():
         "x-spa-version": settings.wb_spa_version,
     }
     try:
-        r = await slot.session.get(URL, params=PARAMS, headers=headers)
+        # кука per-request, как в боевом enrich_prices (в сессиях куки больше нет)
+        r = await slot.session.get(URL, params=PARAMS, headers=headers,
+                                   cookies=wb_client._cookies)
     except Exception as e:
         print("СЕТЕВАЯ ОШИБКА (прокси/таймаут, НЕ кука):", e)
         await wb_client.close(); return

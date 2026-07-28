@@ -116,10 +116,12 @@ class WBClient:
         return self._slots[self._slot_rr % len(self._slots)]
 
     def _make_session(self, proxy: str | None) -> AsyncSession:
+        # БЕЗ куки в сессии: каталог WB персонализируется — со свежей бизнес-кукой
+        # он отдаёт b2b-цены вместо розницы (ловили ложные «цена снизилась» у розницы).
+        # Кука передаётся точечно per-request только в enrich_prices (__internal).
         proxies = {"http": proxy, "https": proxy} if proxy else None
         return AsyncSession(
-            headers=HEADERS, cookies=self._cookies, impersonate=IMPERSONATE,
-            timeout=20, proxies=proxies,
+            headers=HEADERS, impersonate=IMPERSONATE, timeout=20, proxies=proxies,
         )
 
     async def set_cookie(self, raw: str) -> int:
@@ -163,13 +165,13 @@ class WBClient:
                 await asyncio.sleep(wait)
             slot.last = loop.time()
 
-    async def _get(self, url, *, params=None, headers=None, retries=4, slot=None):
+    async def _get(self, url, *, params=None, headers=None, cookies=None, retries=4, slot=None):
         slot = slot or self._direct_slot
         who = slot.proxy or "direct"
         for attempt in range(retries):
             await self._throttle(slot)
             try:
-                r = await slot.session.get(url, params=params, headers=headers)
+                r = await slot.session.get(url, params=params, headers=headers, cookies=cookies)
             except Exception as e:
                 log.warning("WB сетевая ошибка %s (%s): %s", url, who, e)
                 await asyncio.sleep(2**attempt)
@@ -287,7 +289,8 @@ class WBClient:
                 "deviceid": settings.wb_device_id,
                 "x-spa-version": settings.wb_spa_version,
             }
-            r = await self._get(B2B_DETAIL_URL, params=params, headers=headers, slot=slot)
+            r = await self._get(B2B_DETAIL_URL, params=params, headers=headers,
+                                cookies=self._cookies, slot=slot)
             if r is None or r.status_code != 200:
                 # обрыв сети или 403/429 (WAF/бан IP) — НЕ признак протухшей куки:
                 # streak копим только по 200-ответам без цен
