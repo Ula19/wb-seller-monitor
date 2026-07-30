@@ -232,8 +232,11 @@ async def monitoring_job(bot) -> None:
     log.info("мониторинг: старт, магазинов %d", len(sellers))
     t0 = asyncio.get_event_loop().time()
 
-    async def _worker(slot, queue) -> tuple[int, list[int]]:
-        served, skipped = 0, []  # skipped: пустой каталог (429/бан/сеть)
+    failed: list = []   # (seller, слот-неудачник): каталог пуст после всех ретраев
+    skipped: list[int] = []  # не достучались и повтором — пропуск до следующего цикла
+
+    async def _worker(slot, queue) -> int:
+        served = 0
         # общий итератор безопасен: asyncio переключает корутины только на await,
         # между next() и первым await вклиниться некому
         for seller in queue:
@@ -241,26 +244,50 @@ async def monitoring_job(bot) -> None:
             try:
                 fetched = await sync_and_notify(bot, seller, slot=slot)
                 if not fetched:
-                    skipped.append(seller.supplier_id)
+                    failed.append((seller, slot))
             except Exception as e:
                 log.exception("синхронизация %s упала: %s", seller.supplier_id, e)
-        return served, skipped
+        return served
+
+    async def _retry(seller, slot) -> None:
+        try:
+            fetched = await sync_and_notify(bot, seller, slot=slot)
+            if not fetched:
+                skipped.append(seller.supplier_id)
+        except Exception as e:
+            log.exception("повтор %s упал: %s", seller.supplier_id, e)
+            skipped.append(seller.supplier_id)
 
     async with _pass_lock:  # весь проход не пересекается с ручной проверкой/сидом
         slots = wb_client.slots  # снапшот внутри лока (снаружи мог бы устареть)
         for sl in slots:
             sl.err429 = 0  # пер-слот счётчик 429 на этот проход
         queue = iter(sellers)  # общая очередь: слоты растаскивают по мере готовности
-        results = await asyncio.gather(*(_worker(sl, queue) for sl in slots))
+        served_by = await asyncio.gather(*(_worker(sl, queue) for sl in slots))
+        if failed:
+            # ОДИН повтор ДРУГИМ IP (слот-неудачник шанса лишается). Второй раз не
+            # пробуем: если WB зажал магазин для двух разных IP — долбиться
+            # остальными нет смысла, следующий цикл через минуту повторит.
+            if len(slots) > 1:
+                retries = [
+                    _retry(seller, [s for s in slots if s is not bad][i % (len(slots) - 1)])
+                    for i, (seller, bad) in enumerate(failed)
+                ]
+            else:  # слот один — повторить можно только им же
+                retries = [_retry(s, b) for s, b in failed]
+            await asyncio.gather(*retries)
         await _check_cookie_health(bot)
     took = asyncio.get_event_loop().time() - t0
-    skipped = [sid for _, sk in results for sid in sk]
+    saved = len(failed) - len(skipped)  # спас повтор другим IP
+    fails_by = {id(sl): 0 for sl in slots}
+    for _, bad in failed:
+        fails_by[id(bad)] += 1
     per_slot = "; ".join(
-        f"{sl.proxy or 'direct'}: 429×{sl.err429}, обслужил {srv}, пропустил {len(sk)}"
-        for sl, (srv, sk) in zip(slots, results)
+        f"{sl.proxy or 'direct'}: 429×{sl.err429}, обслужил {srv}, не смог {fails_by[id(sl)]}"
+        for sl, srv in zip(slots, served_by)
     )
-    log.info("мониторинг: завершён за %.1fс, магазинов %d, пропущено %d%s | %s",
-             took, len(sellers), len(skipped), f" {skipped}" if skipped else "", per_slot)
+    log.info("мониторинг: завершён за %.1fс, магазинов %d, пропущено %d%s, повтор спас %d | %s",
+             took, len(sellers), len(skipped), f" {skipped}" if skipped else "", saved, per_slot)
 
 
 async def report_job(bot) -> None:
