@@ -21,7 +21,8 @@ log = logging.getLogger(__name__)
 IMPERSONATE = "safari18_0"
 HEADERS = {"Accept-Language": "ru-RU,ru;q=0.9"}
 
-CATALOG_URL = "https://catalog.wb.ru/sellers/v4/catalog"
+CATALOG_URL = "https://www.wildberries.ru/__internal/catalog/sellers/v4/catalog"
+CATALOG_PAGE_LIMIT = 300
 SMARTPHONE_SUBJECT_ID = 515  # WB-предмет «Смартфоны» — по умолчанию мониторим только их
 SUPPLIER_INFO_URL = "https://static-basket-01.wbbasket.ru/vol0/data/supplier-by-id/{}.json"
 # slug -> supplier_id: страница /seller/<slug> — SPA, ID отдаёт «конструктор магазинов»
@@ -52,6 +53,19 @@ def _parse_cookie(raw: str) -> dict[str, str]:
 def _parse_proxies(raw: str) -> list[str]:
     """'socks5h://h:p, http://h2:p2' -> список прокси. Пусто = без прокси (прямое соединение)."""
     return [x.strip() for x in (raw or "").split(",") if x.strip()]
+
+
+def _browser_headers(referer: str) -> dict[str, str]:
+    return {
+        "Accept": "*/*",
+        "Referer": referer,
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Dest": "empty",
+        "x-requested-with": "XMLHttpRequest",
+        "deviceid": settings.wb_device_id,
+        "x-spa-version": settings.wb_spa_version,
+    }
 
 
 class _Slot:
@@ -106,12 +120,13 @@ class WBClient:
         return self._slots[self._slot_rr % len(self._slots)]
 
     def _make_session(self, proxy: str | None) -> AsyncSession:
-        # БЕЗ куки в сессии: каталог WB персонализируется — со свежей бизнес-кукой
-        # он отдаёт b2b-цены вместо розницы (ловили ложные «цена снизилась» у розницы).
-        # Кука передаётся точечно per-request только в enrich_prices (__internal).
+        # Куки задаём на каждый запрос: каталог получает только токен WBAAS,
+        # detail — полную бизнес-куку. В общей сессии их не храним.
         proxies = {"http": proxy, "https": proxy} if proxy else None
         return AsyncSession(
             headers=HEADERS, impersonate=IMPERSONATE, timeout=20, proxies=proxies,
+            # Не сохраняем бизнес-куки из detail в общую сессию каталога.
+            discard_cookies=True,
         )
 
     async def set_cookie(self, raw: str) -> int:
@@ -169,10 +184,9 @@ class WBClient:
             if r.status_code == 200:
                 return r
             if r.status_code == 403:
-                # ponytail: 403 = этот IP забанен WAF. Кросс-слот failover не делаем —
-                # слоты и так бьют разных продавцов параллельно, следующий цикл повторит.
-                # Вернуть failover, если b2b снова станет активным и критичным.
-                log.warning("WB %s -> 403 (WAF/бан) слот=%s, пропуск без ретраев", url, who)
+                # 403 означает отказ в доступе, точная причина из статуса не видна.
+                # Повтор другим слотом делает monitoring_job после основной очереди.
+                log.warning("WB %s -> 403 (доступ отклонён) слот=%s, пропуск без ретраев", url, who)
                 return r  # отдаём 403, а не None: None теперь значит только «сеть легла»
             if r.status_code == 429 or r.status_code >= 500:
                 if r.status_code == 429:
@@ -192,10 +206,32 @@ class WBClient:
             return r
         return None
 
+    async def fetch_catalog_page(
+        self, supplier_id: int, page: int = 1, *, subjects: set[int] | None = None, slot=None
+    ):
+        """Одна страница каталога без авторизации бизнес-аккаунта."""
+        if supplier_id <= 0 or page <= 0:
+            raise ValueError("ID продавца и номер страницы должны быть положительными")
+        params = {
+            "appType": 1, "curr": "rub", "dest": settings.wb_dest,
+            "sort": "popular", "spp": settings.wb_spp, "supplier": supplier_id,
+            "page": page, "limit": CATALOG_PAGE_LIMIT,
+        }
+        subjects = subjects or {SMARTPHONE_SUBJECT_ID}
+        params["xsubject"] = ";".join(map(str, sorted(subjects)))
+        # Передаём только токен защиты WBAAS, без куки бизнес-аккаунта.
+        token = (self._cookies or {}).get("x_wbaas_token")
+        cookies = {"x_wbaas_token": token} if token else None
+        return await self._get(
+            CATALOG_URL, params=params,
+            headers=_browser_headers(f"https://www.wildberries.ru/seller/{supplier_id}"),
+            cookies=cookies, slot=slot,
+        )
+
     async def fetch_seller_catalog(
         self, supplier_id: int, subjects: set[int] | None = None, slot: "_Slot | None" = None
     ) -> list[NormProduct]:
-        """Каталог продавца БЕЗ куки: цена и сток витрины (`shelf_price`).
+        """Каталог без куки бизнес-аккаунта: цена и сток витрины (`shelf_price`).
 
         Фильтр по предмету — на стороне WB (`xsubject`), поэтому у крупных продавцов не
         листаем тысячи лишних товаров (ХОБОТ: 1 страница вместо 57). Для розницы это и
@@ -207,21 +243,9 @@ class WBClient:
         products: list[NormProduct] = []
         # limit=300 (дефолт WB — 100): магазины до 300 позиций влезают в ОДНУ страницу.
         # Меньше запросов → меньше 429; проверено вживую (182 товара одной страницей).
-        page_limit = 300
+        page_limit = CATALOG_PAGE_LIMIT
         for page in range(1, settings.max_pages + 1):
-            params = {
-                "appType": 1,
-                "curr": "rub",
-                "dest": settings.wb_dest,
-                "sort": "popular",
-                "spp": settings.wb_spp,
-                "supplier": supplier_id,
-                "page": page,
-                "limit": page_limit,
-            }
-            if subjects:  # WB фильтрует по предмету на сервере — тянем только нужное
-                params["xsubject"] = ";".join(map(str, sorted(subjects)))
-            r = await self._get(CATALOG_URL, params=params, slot=slot)
+            r = await self.fetch_catalog_page(supplier_id, page, subjects=subjects, slot=slot)
             if r is None or r.status_code != 200:
                 # ошибка/бан на ЛЮБОЙ странице → отдаём пусто («магазин пропущен»),
                 # а не частичный список: иначе deactivate_missing погасит хвост
@@ -267,16 +291,7 @@ class WBClient:
         for i in range(0, len(nm_ids), 100):
             chunk = nm_ids[i:i + 100]
             params = {**base_params, "nm": ";".join(map(str, chunk))}
-            headers = {
-                "Accept": "*/*",
-                "Referer": f"https://www.wildberries.ru/catalog/{chunk[0]}/detail.aspx",
-                "Sec-Fetch-Site": "same-origin",
-                "Sec-Fetch-Mode": "cors",
-                "Sec-Fetch-Dest": "empty",
-                "x-requested-with": "XMLHttpRequest",
-                "deviceid": settings.wb_device_id,
-                "x-spa-version": settings.wb_spa_version,
-            }
+            headers = _browser_headers(f"https://www.wildberries.ru/catalog/{chunk[0]}/detail.aspx")
             r = await self._get(B2B_DETAIL_URL, params=params, headers=headers,
                                 cookies=self._cookies, slot=slot)
             if r is None:
@@ -339,5 +354,3 @@ class WBClient:
 
 # единый экземпляр на всё приложение (пул слотов: прямой IP + прокси, троттлинг пер-слот)
 wb_client = WBClient()
-
-
