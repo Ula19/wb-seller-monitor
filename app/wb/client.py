@@ -173,12 +173,18 @@ class WBClient:
     async def _get(self, url, *, params=None, headers=None, cookies=None, retries=4, slot=None):
         slot = slot or self._direct_slot
         who = slot.proxy or "direct"
+        context = ""
+        if params and "supplier" in params:
+            context = f" магазин={params['supplier']} страница={params.get('page')}"
+        last_failure = "нет попыток"
         for attempt in range(retries):
             await self._throttle(slot)
             try:
                 r = await slot.session.get(url, params=params, headers=headers, cookies=cookies)
             except Exception as e:
-                log.warning("WB сетевая ошибка %s (%s): %s", url, who, e)
+                last_failure = f"сеть: {type(e).__name__}"
+                log.warning("WB сетевая ошибка %s%s слот=%s попытка=%d/%d: %s",
+                            url, context, who, attempt + 1, retries, last_failure)
                 await asyncio.sleep(2**attempt)
                 continue
             if r.status_code == 200:
@@ -186,25 +192,65 @@ class WBClient:
             if r.status_code == 403:
                 # 403 означает отказ в доступе, точная причина из статуса не видна.
                 # Повтор другим слотом делает monitoring_job после основной очереди.
-                log.warning("WB %s -> 403 (доступ отклонён) слот=%s, пропуск без ретраев", url, who)
+                log.warning("WB %s%s -> 403 (доступ отклонён) слот=%s, пропуск без ретраев",
+                            url, context, who)
                 return r  # отдаём 403, а не None: None теперь значит только «сеть легла»
             if r.status_code == 429 or r.status_code >= 500:
+                last_failure = f"HTTP {r.status_code}"
                 if r.status_code == 429:
                     slot.err429 += 1  # пер-слот статистика для сводки прохода
-                retry_after = r.headers.get("X-Ratelimit-Retry") or r.headers.get(
-                    "Retry-After"
-                )
-                delay = (
-                    float(retry_after)
-                    if retry_after and str(retry_after).isdigit()
-                    else (2**attempt) + random.uniform(0, 1)
-                )
-                log.warning("WB %s -> %s слот=%s, пауза %.1fс", url, r.status_code, who, delay)
+                delay = self._retry_delay(r, attempt)
+                log.warning("WB %s%s -> %s слот=%s попытка=%d/%d, пауза %.1fс",
+                            url, context, r.status_code, who, attempt + 1, retries, delay)
                 await asyncio.sleep(delay)
                 continue
             # 404 и прочее — возвращаем как есть (пагинация/перебор хостов разберутся)
             return r
+        log.warning("WB %s%s слот=%s: ретраи исчерпаны, последняя причина: %s",
+                    url, context, who, last_failure)
         return None
+
+    @staticmethod
+    def _retry_delay(response, attempt: int) -> float:
+        retry_after = response.headers.get("X-Ratelimit-Retry") or response.headers.get("Retry-After")
+        if retry_after and str(retry_after).isdigit():
+            return float(retry_after)
+        return (2**attempt) + random.uniform(0, 1)
+
+    @staticmethod
+    def _log_catalog_failure(supplier_id, page, slot, response) -> None:
+        if response is None:
+            reason = "ретраи исчерпаны; последняя причина указана в строке WB выше"
+        else:
+            reasons = {
+                403: "доступ отклонён",
+                498: "WBAAS требует проверку доступа; проверь токен",
+                429: "лимит запросов",
+            }
+            reason = f"HTTP {response.status_code}: {reasons.get(response.status_code, 'ошибка ответа WB')}"
+            reason += (f", server={response.headers.get('server')}, "
+                       f"тип={response.headers.get('content-type')}, байт={len(response.content)}")
+        log.warning("каталог %s слот=%s: страница %d, магазин пропущен, причина: %s",
+                    supplier_id, slot.proxy or "direct", page, reason)
+
+    @staticmethod
+    def _catalog_items(response, supplier_id, page, slot) -> list | None:
+        try:
+            data = response.json()
+            items = data.get("products") or (data.get("data") or {}).get("products") or []
+            if not isinstance(items, list):
+                raise ValueError("products должен быть списком")
+        except (ValueError, TypeError, AttributeError) as e:
+            log.warning("каталог %s слот=%s: страница %d, магазин пропущен, "
+                        "причина: неверный JSON/формат (%s), HTTP=%s, тип=%s, байт=%d",
+                        supplier_id, slot.proxy or "direct", page, type(e).__name__,
+                        response.status_code, response.headers.get("content-type"), len(response.content))
+            return None
+        if not items and page == 1:
+            log.warning("каталог %s слот=%s: страница 1, причина пустой выдачи: "
+                        "HTTP 200, WB не вернул товары для заданного фильтра",
+                        supplier_id, slot.proxy or "direct")
+        return items
 
     async def fetch_catalog_page(
         self, supplier_id: int, page: int = 1, *, subjects: set[int] | None = None, slot=None
@@ -251,15 +297,11 @@ class WBClient:
                 # а не частичный список: иначе deactivate_missing погасит хвост
                 # ассортимента, который просто не долистали. Следующий цикл повторит.
                 # None = _get исчерпал ретраи (4×429 подряд или сетевые обрывы).
-                st = r.status_code if r is not None else "ретраи исчерпаны (429/сеть)"
-                log.warning("каталог %s слот=%s: страница %d → %s, магазин пропущен",
-                            supplier_id, slot.proxy or "direct", page, st)
+                self._log_catalog_failure(supplier_id, page, slot, r)
                 return []
-            try:
-                data = r.json()
-            except Exception:
-                break
-            items = data.get("products") or (data.get("data") or {}).get("products") or []
+            items = self._catalog_items(r, supplier_id, page, slot)
+            if items is None:
+                return []  # Не сохраняем частичный каталог после ошибки JSON.
             if not items:
                 break
             if settings.debug_raw and page == 1:
@@ -269,7 +311,12 @@ class WBClient:
             if len(items) < page_limit:
                 break
         if subjects:  # страховка, если WB проигнорит xsubject
+            before_filter = len(products)
             products = [p for p in products if p.subject_id in subjects]
+            if before_filter and not products:
+                log.warning("каталог %s слот=%s: причина пустой выдачи: все %d товаров "
+                            "исключены фильтром subject_id=%s",
+                            supplier_id, slot.proxy or "direct", before_filter, sorted(subjects))
         return products
 
     async def enrich_prices(self, products: list[NormProduct], slot: "_Slot | None" = None) -> set[int]:
