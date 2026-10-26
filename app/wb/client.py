@@ -377,6 +377,7 @@ class WBClient:
         prices: dict[int, int] = {}
         deliv: dict[int, tuple] = {}
         saw_response = False  # был ли ответ, говорящий о состоянии куки (200 или 498)
+        statuses: list[str] = []  # коды ответов по чанкам — для лога (498 = кука мертва)
         nm_ids = [p.nm_id for p in products]
         for i in range(0, len(nm_ids), 100):
             chunk = nm_ids[i:i + 100]
@@ -384,6 +385,7 @@ class WBClient:
             headers = _browser_headers(f"https://www.wildberries.ru/catalog/{chunk[0]}/detail.aspx")
             r = await self._get(B2B_DETAIL_URL, params=params, headers=headers,
                                 cookies=self._cookies, slot=slot)
+            statuses.append("сеть" if r is None else str(r.status_code))
             if r is None:
                 continue  # сеть легла — не про куку
             if r.status_code == 498:
@@ -419,7 +421,8 @@ class WBClient:
                 log.warning("b2b: ни одного 200 (сеть/бан IP), счётчик куки не трогаю")
         else:
             self.b2b_fail_streak = 0
-        log.info("detail цены применены: %d/%d", len(prices), len(products))
+        log.info("detail цены применены: %d/%d (ответы %s, слот %s)", len(prices), len(products),
+                 ",".join(statuses) or "-", slot.proxy or "direct")
         return set(prices)  # nm с реально полученной ценой — остальным monitor сохранит прежнюю
 
     async def resolve_seller_slug(self, slug: str) -> int | None:
