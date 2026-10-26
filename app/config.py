@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     # обнови WB_SPA_VERSION (актуальную видно в заголовке x-spa-version в DevTools);
     # deviceid привязан к браузеру, где минтишь куку, обычно менять не нужно.
     wb_device_id: str = "site_a5d186ace2fe4386952d1652f6a28303"
-    wb_spa_version: str = "14.16.0"
+    wb_spa_version: str = "14.30.0"
     # каталог ходит в мобильное API (api-ios) — там нет WBAAS-куки, нужен только
     # x-guardium-token из приложения WB (живёт ~3 дня, IP не проверяет).
     # Актуальный обновляется кнопкой «Куки», здесь — стартовый seed.

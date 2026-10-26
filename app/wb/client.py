@@ -32,7 +32,8 @@ SUPPLIER_INFO_URL = "https://static-basket-01.wbbasket.ru/vol0/data/supplier-by-
 SHOP_BY_SLUG_URL = "https://static-basket-01.wbcontent.net/vol0/constructor-api/shops/v3/{}.json"
 
 # B2B-цены: detail через прокси основного домена (card.wb.ru напрямую даёт 403).
-B2B_DETAIL_URL = "https://www.wildberries.ru/__internal/card/cards/v4/detail"
+# с 2026-10 сайт ходит через u-card; старый card/ отвечает 403
+B2B_DETAIL_URL = "https://www.wildberries.ru/__internal/u-card/cards/v4/detail"
 B2B_PARAMS = {
     "appType": 1, "curr": "rub", "dest": -446112, "spp": 30,
     "hide_vflags": 4294967296, "hide_dflags": 131072, "hide_dtype": "11;13;14;15",
