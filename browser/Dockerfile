@@ -1,11 +1,10 @@
 FROM python:3.12-slim
 
-# Настоящий Google Chrome (не chromium/headless) + виртуальный экран и VNC
+# Chromium из Debian (Google Chrome под Linux ARM не существует, а сервер — aarch64) —
+# обычный, НЕ headless, на виртуальном экране + VNC для разового входа
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        wget ca-certificates xvfb x11vnc tzdata fonts-noto-color-emoji \
-    && wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
-    && apt-get install -y --no-install-recommends ./google-chrome-stable_current_amd64.deb \
-    && rm google-chrome-stable_current_amd64.deb && rm -rf /var/lib/apt/lists/*
+        chromium xvfb x11vnc tzdata fonts-liberation fonts-dejavu-core fonts-noto-color-emoji \
+    && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir curl_cffi==0.15.0
 
 WORKDIR /app

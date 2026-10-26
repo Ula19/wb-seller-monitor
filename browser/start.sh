@@ -10,7 +10,7 @@ x11vnc -display :99 -forever -shared -rfbport 5900 -passwd "${VNC_PASSWORD:?}" -
 # Chrome упал — поднимаем заново (профиль на volume, сессия не теряется).
 # --no-sandbox: в контейнере под root без него не стартует; странице это не видно.
 (while true; do
-  google-chrome --no-sandbox --user-data-dir=/data/profile \
+  chromium --no-sandbox --user-data-dir=/data/profile \
     --proxy-server="$BROWSER_PROXY" --remote-debugging-port=9222 \
     --no-first-run --no-default-browser-check --password-store=basic \
     --lang=ru-RU --window-size=1366,768 "https://www.wildberries.ru/" >/data/chrome.log 2>&1 || true
