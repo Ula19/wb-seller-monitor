@@ -146,6 +146,16 @@ class WBClient:
         self._slot_rr += 1
         return self._slots[self._slot_rr % len(self._slots)]
 
+    def _b2b_slot(self, slot: "_Slot | None") -> _Slot:
+        """Слот для b2b-detail: www-домен режет IP датацентра (Hetzner → 403, 2026-10-26),
+        поэтому при наличии прокси direct не берём — вместо него прокси по кругу."""
+        slot = slot or self._next_slot()
+        proxy_slots = self._slots[1:]
+        if slot.proxy is None and proxy_slots:
+            self._slot_rr += 1
+            slot = proxy_slots[self._slot_rr % len(proxy_slots)]
+        return slot
+
     def _make_session(self, proxy: str | None) -> AsyncSession:
         # Куку задаём на каждый запрос и только для detail (каталог — на guardium).
         # В общей сессии её не храним.
@@ -363,7 +373,7 @@ class WBClient:
         (кука протухнет/забанят — вернём триггерную схему из git).
         """
         base_params = B2B_PARAMS
-        slot = slot or self._next_slot()
+        slot = self._b2b_slot(slot)
         prices: dict[int, int] = {}
         deliv: dict[int, tuple] = {}
         saw_response = False  # был ли ответ, говорящий о состоянии куки (200 или 498)
