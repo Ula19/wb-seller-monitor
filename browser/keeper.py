@@ -135,10 +135,14 @@ async def check(hdrs: dict) -> str:
             DETAIL_URL, params={**B2B_PARAMS, "nm": ";".join(map(str, nms))},
             headers={**hdrs, "referer": f"https://www.wildberries.ru/catalog/{nms[0]}/detail.aspx"},
         )
-        priced = 0
+        got = {}
         if r.status_code == 200:
-            priced = sum(product_price(p) is not None for p in r.json().get("products") or [])
-        return out + f", detail {r.status_code} (цены {priced}/{len(nms)})"
+            got = {p["id"]: product_price(p) for p in r.json().get("products") or []}
+            got = {k: v for k, v in got.items() if v is not None}
+        # цена одного товара — утром сверить с сайтом: бизнес она или розница
+        nm = next((n for n in nms if n in got), None)
+        one = f", nm {nm} = {got[nm] // 100} ₽" if nm else ""
+        return out + f", detail {r.status_code} (цены {len(got)}/{len(nms)}{one})"
 
 
 def token_of(hdrs: dict) -> str | None:
