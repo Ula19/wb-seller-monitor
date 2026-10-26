@@ -1,0 +1,25 @@
+# Эксперимент: живой Chrome сам держит сессию WB, keeper проверяет его куки.
+# Запуск:  docker compose -f docker-compose.browser.yml up -d --build
+# Лог:     docker compose -f docker-compose.browser.yml logs -f
+# Нужно в .env: BROWSER_PROXY=http://host:port (без логина — Chrome не умеет креды
+# в флаге) и VNC_PASSWORD (до 8 символов). Отдельный проект — бота и БД не трогает.
+name: wbbrowser
+
+services:
+  browser:
+    build: ./browser
+    hostname: wbbrowser  # постоянный, иначе Chrome считает профиль «занятым другим ПК»
+    environment:
+      BROWSER_PROXY: ${BROWSER_PROXY:?BROWSER_PROXY не задан в .env}
+      VNC_PASSWORD: ${VNC_PASSWORD:?VNC_PASSWORD не задан в .env}
+      KEEPER_INTERVAL: ${KEEPER_INTERVAL:-600}
+      TZ: Europe/Moscow
+    ports:
+      - "127.0.0.1:5900:5900"  # VNC только через ssh-туннель, наружу не торчит
+    shm_size: 1gb
+    volumes:
+      - browser_data:/data  # профиль Chrome (сессия WB), cookie.txt, keeper.log
+    restart: unless-stopped
+
+volumes:
+  browser_data:
