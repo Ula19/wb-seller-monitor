@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     # параметры запросов к WB
     wb_dest: int = -1257786
     wb_spp: int = 30
-    # Кука WB: x_wbaas_token для каталога, полная строка для b2b-цен.
+    # Кука WB: полная строка для b2b-цен (каталогу не нужна, он на guardium).
     # Актуальную строку можно обновить через кнопку «Куки».
     wb_cookie: str = ""
     # пул слотов: прямой IP + по слоту на каждый прокси отсюда (запятая-разделитель,
@@ -26,6 +26,13 @@ class Settings(BaseSettings):
     # deviceid привязан к браузеру, где минтишь куку, обычно менять не нужно.
     wb_device_id: str = "site_a5d186ace2fe4386952d1652f6a28303"
     wb_spa_version: str = "14.16.0"
+    # каталог ходит в мобильное API (api-ios) — там нет WBAAS-куки, нужен только
+    # x-guardium-token из приложения WB (живёт ~3 дня, IP не проверяет).
+    # Актуальный обновляется кнопкой «Куки», здесь — стартовый seed.
+    # deviceid и UA — с того телефона, где снят guardium.
+    wb_guardium: str = ""
+    wb_ios_device_id: str = "A412BA68B34F45B28D783F5AF464537E"
+    wb_ios_ua: str = "Wildberries/7.7.9001 (RU.WILDBERRIES.MOBILEAPP; build:24083938; iOS 27.0.1) Alamofire/5.9.1"
     # режим цены по умолчанию для магазинов, добавленных командой /addseller
     # (в UI режим выбирается кнопками). True — бизнес (нужна кука), False — розница.
     wb_b2b: bool = True

@@ -2,6 +2,8 @@
 
 import asyncio
 import logging
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
@@ -20,7 +22,7 @@ from app.db.base import Session
 from app.emoji import esc, tge
 from app.services import reporting
 from app.services.monitor import _pass_lock, sync_seller
-from app.wb.client import wb_client
+from app.wb.client import guardium_expires_at, wb_client
 
 log = logging.getLogger(__name__)
 router = Router()
@@ -94,7 +96,10 @@ async def rb_cookie(m: Message, state: FSMContext):
         "2. F12 → вкладка <b>Network</b> (Сеть), обнови страницу.\n"
         "3. Кликни любой запрос → <b>Headers</b> → <b>Request Headers</b> → "
         "скопируй целиком строку <code>Cookie:</code> (без слова Cookie).\n"
-        "4. Пришли её одним сообщением сюда.",
+        "4. Пришли её одним сообщением сюда.\n\n"
+        "Сюда же присылай <b>guardium</b> из приложения WB (заголовок "
+        "<code>x-guardium-token</code>, начинается с <code>1.1000.</code>) — "
+        "на нём живёт каталог, обновлять раз в ~3 дня.",
         reply_markup=kb.cancel_kb(),
         parse_mode="HTML",
     )
@@ -103,6 +108,16 @@ async def rb_cookie(m: Message, state: FSMContext):
 @router.message(SetCookie.waiting)
 async def cookie_input(m: Message, state: FSMContext):
     raw = (m.text or "").strip()
+    if raw.startswith("1.1000.") and guardium_expires_at(raw):
+        await state.clear()
+        wb_client.set_guardium(raw)
+        async with Session() as s:
+            await repo.set_setting(s, "wb_guardium", raw)
+            await s.commit()
+        exp = datetime.fromtimestamp(guardium_expires_at(raw), ZoneInfo("Europe/Moscow"))
+        await m.answer(f"{tge('ok')} Guardium обновлён, действует до {exp:%d.%m %H:%M} МСК.",
+                       parse_mode="HTML")
+        return
     if "=" not in raw or len(raw) < 20:
         await m.answer(
             "Это не похоже на строку Cookie. Пришли ещё раз или нажмите Отмена.",

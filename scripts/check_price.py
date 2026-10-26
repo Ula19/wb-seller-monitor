@@ -10,19 +10,18 @@ import sys
 
 from app.db import repo
 from app.db.base import Session, engine
-from app.wb.client import CATALOG_URL, wb_client
+from app.wb.client import CATALOG_URL, guardium_expires_at, wb_client
 
 SUP = int(sys.argv[1]) if len(sys.argv) > 1 else 250110041
 
 
-async def load_saved_cookie():
+async def load_saved_guardium():
     async with Session() as s:
-        saved = await repo.get_setting(s, "wb_cookie")
+        saved = await repo.get_setting(s, "wb_guardium")
     if saved:
-        await wb_client.set_cookie(saved)
-    token = (wb_client._cookies or {}).get("x_wbaas_token")
-    print("кука:", "из БД" if saved else "из .env")
-    print("токен WBAAS:", "есть" if token else "нет")
+        wb_client.set_guardium(saved)
+    print("guardium:", "из БД" if saved else "из .env",
+          "| истекает:", guardium_expires_at(wb_client.guardium) or "не разобран")
 
 
 def show_response(r):
@@ -40,7 +39,7 @@ def show_response(r):
             print(p["id"], "|", p.get("name"), "|", json.dumps(price, ensure_ascii=False))
     else:
         if r.status_code == 498:
-            print("WBAAS отклонил запрос; проверь свежесть токена и доступ с IP сервера.")
+            print("guardium протух или не задан — обнови кнопкой «Куки».")
         print("тело:", repr(r.text[:300]))
 
 
@@ -48,7 +47,7 @@ async def main():
     try:
         if SUP <= 0:
             raise ValueError("ID продавца должен быть положительным")
-        await load_saved_cookie()
+        await load_saved_guardium()
         print("URL:", CATALOG_URL)
         response = await wb_client.fetch_catalog_page(SUP, slot=wb_client._direct_slot)
         show_response(response)

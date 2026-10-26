@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import time
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
@@ -11,7 +12,7 @@ from app.config import settings
 from app.db import models, repo
 from app.db.base import Session
 from app.services import reporting
-from app.wb.client import wb_client
+from app.wb.client import guardium_expires_at, wb_client
 
 log = logging.getLogger(__name__)
 
@@ -175,6 +176,30 @@ COOKIE_ALERT = (
 )
 
 
+GUARDIUM_WARN_HOURS = 6  # за сколько часов до конца guardium предупредить
+
+
+def _guardium_problem() -> str | None:
+    """Текст алерта, если guardium мёртв или скоро протухнет, иначе None."""
+    if wb_client.guardium_fail_streak >= 3:
+        return "каталог отвечает 498 — guardium протух, магазины не проверяются"
+    exp = guardium_expires_at(wb_client.guardium)
+    if exp and exp - time.time() < GUARDIUM_WARN_HOURS * 3600:
+        left = datetime.fromtimestamp(exp, ZoneInfo("Europe/Moscow")).strftime("%d.%m %H:%M")
+        return f"guardium истекает {left} МСК"
+    return None
+
+
+async def _alert_all(bot, text: str) -> None:
+    async with Session() as s:
+        user_ids = await recipient_ids(s)
+    for uid in user_ids:
+        try:
+            await bot.send_message(uid, text, parse_mode="HTML")
+        except Exception as e:
+            log.warning("алерт не доставлен %s: %s", uid, e)
+
+
 async def _check_cookie_health(bot) -> None:
     """Если detail-цены не приходят несколько раз подряд — кука протухла, шумим всем.
 
@@ -182,15 +207,15 @@ async def _check_cookie_health(bot) -> None:
     """
     if wb_client.b2b_fail_streak >= 3 and not wb_client.cookie_alerted:
         wb_client.cookie_alerted = True
-        async with Session() as s:
-            user_ids = await recipient_ids(s)
-        for uid in user_ids:
-            try:
-                await bot.send_message(uid, COOKIE_ALERT, parse_mode="HTML")
-            except Exception as e:
-                log.warning("алерт о куке не доставлен %s: %s", uid, e)
+        await _alert_all(bot, COOKIE_ALERT)
     elif wb_client.b2b_fail_streak == 0:
         wb_client.cookie_alerted = False
+    # guardium (каталог): шумим один раз, флаг сбрасывает set_guardium
+    problem = _guardium_problem()
+    if problem and not wb_client.guardium_alerted:
+        wb_client.guardium_alerted = True
+        await _alert_all(bot, f"‼️ <b>GUARDIUM WB</b>: {problem}.\n"
+                              "👉 Сними новый из приложения и пришли кнопкой «🔑 Куки».")
 
 
 def _within_work_hours(start, end, hour) -> bool:

@@ -6,6 +6,7 @@ curl_cffi с имперсонацией Chrome — он подделывает T
 """
 
 import asyncio
+import base64
 import logging
 import random
 
@@ -21,7 +22,9 @@ log = logging.getLogger(__name__)
 IMPERSONATE = "safari18_0"
 HEADERS = {"Accept-Language": "ru-RU,ru;q=0.9"}
 
-CATALOG_URL = "https://www.wildberries.ru/__internal/catalog/sellers/v4/catalog"
+# Каталог — через мобильное API: там нет WBAAS-куки (x_wbaas_token протухал за часы),
+# пускает по x-guardium-token из приложения. Без guardium/с мёртвым — 498.
+CATALOG_URL = "https://api-ios.wildberries.ru/__internal/catalog/sellers/v4/catalog"
 CATALOG_PAGE_LIMIT = 300
 SMARTPHONE_SUBJECT_ID = 515  # WB-предмет «Смартфоны» — по умолчанию мониторим только их
 SUPPLIER_INFO_URL = "https://static-basket-01.wbbasket.ru/vol0/data/supplier-by-id/{}.json"
@@ -68,6 +71,26 @@ def _browser_headers(referer: str) -> dict[str, str]:
     }
 
 
+def _mobile_headers(guardium: str) -> dict[str, str]:
+    """Заголовки как у iOS-приложения WB (снято из HAR)."""
+    return {
+        "Accept": "*/*",
+        "User-Agent": settings.wb_ios_ua,
+        "deviceid": settings.wb_ios_device_id,
+        "x-guardium-token": guardium,
+    }
+
+
+def guardium_expires_at(token: str) -> int | None:
+    """Когда протухнет guardium (unix-время). Формат: 1.1000.<hex>.<base64>.<подпись>,
+    в base64 лежит '0|IP|UA|expiry|reusable|...'. Не разобрали — None."""
+    try:
+        payload = base64.b64decode(token.split(".")[3]).decode()
+        return int(payload.split("|")[3])
+    except (IndexError, ValueError, UnicodeDecodeError):
+        return None
+
+
 class _Slot:
     """Канал к WB: своя сессия (свой IP/прокси) + СВОЙ троттлинг.
 
@@ -99,6 +122,9 @@ class WBClient:
         log.info("WB-клиент: слотов %d (прямой + прокси %d)", len(self._slots), len(self._proxies))
         self.b2b_fail_streak = 0  # подряд провалов b2b (0 цен при наличии товаров)
         self.cookie_alerted = False  # уже предупредили владельца о протухшей куке
+        self.guardium = settings.wb_guardium.strip()
+        self.guardium_fail_streak = 0  # подряд 498 от каталога = guardium мёртв
+        self.guardium_alerted = False
 
     def _make_slots(self) -> list[_Slot]:
         slots = [_Slot(self._make_session(None), None)]  # прямой IP сервера
@@ -120,8 +146,8 @@ class WBClient:
         return self._slots[self._slot_rr % len(self._slots)]
 
     def _make_session(self, proxy: str | None) -> AsyncSession:
-        # Куки задаём на каждый запрос: каталог получает только токен WBAAS,
-        # detail — полную бизнес-куку. В общей сессии их не храним.
+        # Куку задаём на каждый запрос и только для detail (каталог — на guardium).
+        # В общей сессии её не храним.
         proxies = {"http": proxy, "https": proxy} if proxy else None
         return AsyncSession(
             headers=HEADERS, impersonate=IMPERSONATE, timeout=20, proxies=proxies,
@@ -149,6 +175,13 @@ class WBClient:
         self.cookie_alerted = False
         log.info("WB-клиент: кука обновлена (%d полей)", len(self._cookies or {}))
         return len(self._cookies or {})
+
+    def set_guardium(self, token: str) -> None:
+        """Новый guardium подхватывается следующим же запросом каталога."""
+        self.guardium = token.strip()
+        self.guardium_fail_streak = 0
+        self.guardium_alerted = False
+        log.info("WB-клиент: guardium обновлён, истекает %s", guardium_expires_at(self.guardium))
 
     async def close(self) -> None:
         for sl in self._slots:
@@ -224,7 +257,7 @@ class WBClient:
         else:
             reasons = {
                 403: "доступ отклонён",
-                498: "WBAAS требует проверку доступа; проверь токен",
+                498: "guardium протух или не задан; обнови кнопкой «Куки»",
                 429: "лимит запросов",
             }
             reason = f"HTTP {response.status_code}: {reasons.get(response.status_code, 'ошибка ответа WB')}"
@@ -255,24 +288,19 @@ class WBClient:
     async def fetch_catalog_page(
         self, supplier_id: int, page: int = 1, *, subjects: set[int] | None = None, slot=None
     ):
-        """Одна страница каталога без авторизации бизнес-аккаунта."""
+        """Одна страница каталога через мобильное API (guardium, без куки)."""
         if supplier_id <= 0 or page <= 0:
             raise ValueError("ID продавца и номер страницы должны быть положительными")
         params = {
-            "appType": 1, "curr": "rub", "dest": settings.wb_dest,
+            "appType": 64, "curr": "rub", "dest": settings.wb_dest,
             "sort": "popular", "spp": settings.wb_spp, "supplier": supplier_id,
             "page": page, "limit": CATALOG_PAGE_LIMIT,
         }
         subjects = subjects or {SMARTPHONE_SUBJECT_ID}
         params["xsubject"] = ";".join(map(str, sorted(subjects)))
-        # Передаём только токен защиты WBAAS, без куки бизнес-аккаунта.
-        token = (self._cookies or {}).get("x_wbaas_token")
-        cookies = {"x_wbaas_token": token} if token else None
-        return await self._get(
-            CATALOG_URL, params=params,
-            headers=_browser_headers(f"https://www.wildberries.ru/seller/{supplier_id}"),
-            cookies=cookies, slot=slot,
-        )
+        # Куку не передаём: каталог анонимный (иначе персонализируется в b2b-цены).
+        return await self._get(CATALOG_URL, params=params,
+                               headers=_mobile_headers(self.guardium), slot=slot)
 
     async def fetch_seller_catalog(
         self, supplier_id: int, subjects: set[int] | None = None, slot: "_Slot | None" = None
@@ -292,6 +320,10 @@ class WBClient:
         page_limit = CATALOG_PAGE_LIMIT
         for page in range(1, settings.max_pages + 1):
             r = await self.fetch_catalog_page(supplier_id, page, subjects=subjects, slot=slot)
+            if r is not None and r.status_code == 498:
+                self.guardium_fail_streak += 1  # guardium мёртв — алерт в monitor
+            elif r is not None and r.status_code == 200:
+                self.guardium_fail_streak = 0
             if r is None or r.status_code != 200:
                 # ошибка/бан на ЛЮБОЙ странице → отдаём пусто («магазин пропущен»),
                 # а не частичный список: иначе deactivate_missing погасит хвост
