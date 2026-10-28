@@ -46,8 +46,10 @@ python -m app.main
 - Эндпоинты WB неофициальные (версии путей вида `v4` периодически меняются).
 - Каталог запрашивается через мобильное API `api-ios.wildberries.ru/__internal/catalog/sellers/v4/catalog`
   с заголовком `x-guardium-token` из приложения WB (живёт ~3 дня, IP не проверяет).
-  Guardium присылается боту кнопкой «Куки»; за 6 ч до истечения и при `498` бот
-  предупреждает. Полная кука бизнес-аккаунта нужна только для detail. Проверка
+  Guardium присылается боту кнопкой «Токены»; за 6 ч до истечения и при `498` бот
+  предупреждает. Бизнес-цены — мобильный detail (`b2b=true`) с Bearer аккаунта
+  (заголовок `authorization`, срока нет), присылается той же кнопкой. Проверка
+  бизнес-цены: `docker compose exec bot env PYTHONPATH=/app python scripts/check_b2b.py <nm>`. Проверка
   одной страницы тем же запросом:
   `docker compose exec -T bot env PYTHONPATH=/app python scripts/check_price.py <ID>`.
 

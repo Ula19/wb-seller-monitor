@@ -1,48 +1,42 @@
-"""Проверить B2B-цену товара тем же запросом, что бот, — через КАЖДЫЙ слот (direct + прокси).
+"""Проверить бизнес-цену товара тем же запросом, что бот (мобильный detail + Bearer).
 
-Одна и та же кука на всех слотах: 200 где-то и 403 где-то → дело в IP; 403/498 везде →
-дело в куке. Запуск в контейнере:
+Сравнивает с Bearer и без: совпадают — у товара сейчас нет бизнес-скидки (или Bearer
+не бизнес-аккаунта); 401/403 — WB не принял Bearer; 498 — протух guardium. Запуск:
     docker compose exec bot env PYTHONPATH=/app python scripts/check_b2b.py [nm ...]
-Куку берёт из БД (кнопка «🔑 Куки»), как бот.
+Токены берёт из БД (кнопка «🔑 Токены»), как бот.
 """
 import asyncio
-import json
-import os
 import sys
 
+from app.config import settings
 from app.db import repo
 from app.db.base import Session, engine
-from app.wb.client import B2B_DETAIL_URL, B2B_PARAMS, _browser_headers, wb_client
+from app.wb.client import B2B_DETAIL_URL, B2B_PARAMS, _mobile_headers, bearer_user, wb_client
 
-NMS = sys.argv[1:] or ["835510459"]
+NMS = sys.argv[1:] or ["326308531"]
 
 
 async def main():
     async with Session() as s:
-        saved = await repo.get_setting(s, "wb_cookie")
-    if saved:
-        await wb_client.set_cookie(saved)
-    print("кука:", "из БД" if saved else "из .env (может быть протухшей!)",
-          "| полей:", len(wb_client._cookies or {}), "| URL:", B2B_DETAIL_URL)
-    params = {**B2B_PARAMS, "nm": ";".join(NMS)}
-    headers = _browser_headers(f"https://www.wildberries.ru/catalog/{NMS[0]}/detail.aspx")
-    for slot in wb_client.slots:
-        who = slot.proxy or "direct"
-        try:
-            r = await slot.session.get(B2B_DETAIL_URL, params=params, headers=headers,
-                                       cookies=wb_client._cookies)
-        except Exception as e:
-            print(f"{who}: СЕТЕВАЯ ОШИБКА {type(e).__name__}")
+        guardium = await repo.get_setting(s, "wb_guardium")
+        bearer = await repo.get_setting(s, "wb_bearer")
+    if guardium:
+        wb_client.set_guardium(guardium)
+    if bearer:
+        wb_client.set_bearer(bearer)
+    print("guardium:", "из БД" if guardium else "из .env",
+          "| Bearer:", f"аккаунт {bearer_user(wb_client.bearer)}" if wb_client.bearer else "НЕТ")
+    params = {**B2B_PARAMS, "dest": settings.wb_dest, "udg": settings.wb_b2b_udg, "nm": ";".join(NMS)}
+    base = _mobile_headers(wb_client.guardium)
+    for name, headers in (("с Bearer", {**base, "authorization": wb_client.bearer}), ("без Bearer", base)):
+        r = await wb_client._get(B2B_DETAIL_URL, params=params, headers=headers, slot=wb_client._direct_slot)
+        if r is None or r.status_code != 200:
+            print(f"{name}: {'сеть' if r is None else r.status_code}")
             continue
-        line = f"{who}: {r.status_code} server={r.headers.get('server')}"
-        if r.status_code == 200:
-            prods = r.json().get("products") or []
-            prices = [((p.get("sizes") or [{}])[0].get("price") or {}).get("product") for p in prods]
-            line += f" цены={prices}"
-        else:
-            line += f" тело={r.text[:80]!r}"
-        print(line)
-        await asyncio.sleep(2)
+        for p in r.json().get("products") or []:
+            price = next((sz["price"]["product"] // 100 for sz in p.get("sizes") or []
+                          if (sz.get("price") or {}).get("product")), None)
+            print(f"{name}: {p['id']} | {price} ₽ | {p.get('name', '')[:40]}")
     await wb_client.close()
     await engine.dispose()
 

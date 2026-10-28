@@ -33,7 +33,7 @@ class Seller(Base):
     last_check_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    # режим цены: True — бизнес-цена (b2b, нужна кука), False — розничная
+    # режим цены: True — бизнес-цена (b2b, нужен Bearer), False — розничная
     b2b: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
 
 
@@ -71,7 +71,7 @@ class Product(Base):
 
 
 class AppSetting(Base):
-    """Key-value рантайм-настройки (напр. актуальная WB-кука)."""
+    """Key-value рантайм-настройки (напр. актуальные токены WB)."""
 
     __tablename__ = "app_settings"
 

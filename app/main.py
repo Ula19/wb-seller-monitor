@@ -42,15 +42,14 @@ async def on_startup() -> None:
             "ALTER TABLE sellers ADD COLUMN IF NOT EXISTS b2b BOOLEAN DEFAULT TRUE"
         ))
     await access.load()
-    # актуальная кука живёт в БД (обновляется из Telegram); .env — лишь стартовый seed
-    async with Session() as s:
-        saved = await repo.get_setting(s, "wb_cookie")
-    if saved:
-        await wb_client.set_cookie(saved)
+    # актуальные токены живут в БД (обновляются из Telegram); .env — лишь стартовый seed
     async with Session() as s:
         saved_guardium = await repo.get_setting(s, "wb_guardium")
+        saved_bearer = await repo.get_setting(s, "wb_bearer")
     if saved_guardium:
         wb_client.set_guardium(saved_guardium)
+    if saved_bearer:
+        wb_client.set_bearer(saved_bearer)
     n_px = len(wb_client._proxies)
     proxy_state = f"вкл ({n_px} шт.)" if n_px else "выкл (напрямую)"
     log.info("Старт: владелец %s, разрешённых пользователей %d, прокси WB: %s",

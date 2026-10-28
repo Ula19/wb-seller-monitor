@@ -13,7 +13,8 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 RB_SELLERS = "🏪 Магазины"
 RB_USERS = "👥 Пользователи"
 RB_STATS = "📊 Статистика"
-RB_COOKIE = "🔑 Куки"
+RB_TOKENS = "🔑 Токены"
+RB_TOKENS_OLD = "🔑 Куки"  # старая кнопка у тех, кто не нажал /start после обновления
 RB_HOURS = "🕐 Часы отчётов"
 RB_WORK = "🌙 Часы работы"
 
@@ -102,7 +103,7 @@ def main_reply(is_admin: bool, is_owner: bool):
     b.button(text=RB_SELLERS)
     if is_admin:
         b.button(text=RB_STATS)
-        b.button(text=RB_COOKIE)
+        b.button(text=RB_TOKENS)
         b.button(text=RB_HOURS)
         b.button(text=RB_WORK)
     if is_owner:  # управление пользователями — только владелец

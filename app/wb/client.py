@@ -1,12 +1,14 @@
 """HTTP-клиент к внутреннему API WB с троттлингом и ретраями.
 
-ВАЖНО: WB режет запросы по TLS-фингерпринту (WAF "Angie"), поэтому обычные
-requests/httpx/aiohttp получают 403 независимо от заголовков. Используем
-curl_cffi с имперсонацией Chrome — он подделывает TLS/JA3 настоящего браузера.
+Каталог и бизнес-цены — через мобильное API (api-ios), как iOS-приложение WB:
+guardium (антибот, ~3 дня) + Bearer аккаунта (без срока) для бизнес-цен.
+curl_cffi с имперсонацией остался для статики (static-basket) — мобильному API
+TLS-отпечаток не важен.
 """
 
 import asyncio
 import base64
+import json
 import logging
 import random
 
@@ -17,8 +19,6 @@ from app.wb.parser import NormProduct, _delivery, _price, normalize
 
 log = logging.getLogger(__name__)
 
-# b2b-эндпоинт (__internal) пускает только «настоящий» браузерный отпечаток.
-# Safari 18 — подтверждённо рабочий (chrome отдаёт 403 на __internal).
 IMPERSONATE = "safari18_0"
 HEADERS = {"Accept-Language": "ru-RU,ru;q=0.9"}
 
@@ -31,45 +31,23 @@ SUPPLIER_INFO_URL = "https://static-basket-01.wbbasket.ru/vol0/data/supplier-by-
 # slug -> supplier_id: страница /seller/<slug> — SPA, ID отдаёт «конструктор магазинов»
 SHOP_BY_SLUG_URL = "https://static-basket-01.wbcontent.net/vol0/constructor-api/shops/v3/{}.json"
 
-# B2B-цены: detail через прокси основного домена (card.wb.ru напрямую даёт 403).
-# с 2026-10 сайт ходит через u-card; старый card/ отвечает 403
-B2B_DETAIL_URL = "https://www.wildberries.ru/__internal/u-card/cards/v4/detail"
+# Бизнес-цены: тот же detail, что шлёт приложение в бизнес-режиме (снято из HAR
+# 2026-10-28): b2b=true + mdg=3 + udg + Bearer аккаунта. Веб-путь (www/__internal
+# с кукой) умер: у x_wbaas_token бюджет ~10 запросов, потом 498.
+B2B_DETAIL_URL = "https://api-ios.wildberries.ru/__internal/card/cards/v4/detail"
 B2B_PARAMS = {
-    "appType": 1, "curr": "rub", "dest": -446112, "spp": 30,
-    "hide_vflags": 4294967296, "hide_dflags": 131072, "hide_dtype": "11;13;14;15",
-    "b2b": "true", "mdg": 3, "mtype": 257, "lang": "ru", "ab_testing": "false",
+    "appType": 64, "curr": "rub", "spp": 40, "lang": "ru", "locale": "ru",
+    "ab_testing": "false", "hide_dflags": 1048576, "hide_dtype": 11,
+    "hide_vflags": 35188667056128, "loyalty": 1, "uclusters": 1,
+    "b2b": "true", "mdg": 3,
 }
-# Розница detail НЕ нужна: каталог без куки уже даёт точную розничную цену (СПП у WB
+# Розница detail НЕ нужна: каталог уже даёт точную розничную цену (СПП у WB
 # стандартная, не персональная — аноним == аккаунт, проверено 4/4). enrich только для b2b.
-
-
-def _parse_cookie(raw: str) -> dict[str, str]:
-    """Строку 'k=v; k2=v2' из браузера превращаем в словарь для curl_cffi."""
-    out = {}
-    for part in raw.split(";"):
-        part = part.strip()
-        if "=" in part:
-            k, v = part.split("=", 1)
-            out[k.strip()] = v.strip()
-    return out
 
 
 def _parse_proxies(raw: str) -> list[str]:
     """'socks5h://h:p, http://h2:p2' -> список прокси. Пусто = без прокси (прямое соединение)."""
     return [x.strip() for x in (raw or "").split(",") if x.strip()]
-
-
-def _browser_headers(referer: str) -> dict[str, str]:
-    return {
-        "Accept": "*/*",
-        "Referer": referer,
-        "Sec-Fetch-Site": "same-origin",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Dest": "empty",
-        "x-requested-with": "XMLHttpRequest",
-        "deviceid": settings.wb_device_id,
-        "x-spa-version": settings.wb_spa_version,
-    }
 
 
 def _mobile_headers(guardium: str) -> dict[str, str]:
@@ -92,6 +70,16 @@ def guardium_expires_at(token: str) -> int | None:
         return None
 
 
+def bearer_user(token: str) -> str | None:
+    """ID аккаунта из Bearer (JWT: заголовок.payload.подпись). Не JWT — None."""
+    try:
+        payload = token.removeprefix("Bearer ").strip().split(".")[1]
+        data = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+        return str(data["user"])
+    except (IndexError, KeyError, ValueError, TypeError):
+        return None
+
+
 class _Slot:
     """Канал к WB: своя сессия (свой IP/прокси) + СВОЙ троттлинг.
 
@@ -110,19 +98,16 @@ class _Slot:
 
 class WBClient:
     def __init__(self) -> None:
-        self._cookies = _parse_cookie(settings.wb_cookie) if settings.wb_cookie else None
-        if self._cookies:
-            log.info("WB-клиент: использую куку аккаунта (%d полей)", len(self._cookies))
         self._proxies = _parse_proxies(settings.wb_proxies)
         # Пул равнозначных слотов: прямой IP + по слоту на прокси. Слот магазина
-        # обслуживает и каталог, и b2b-detail (__internal пускает любой класс IP при
-        # живой куке — проверено 2026-07-17). Свой троттлинг у каждого → реальный
+        # обслуживает и каталог, и b2b-detail. Свой троттлинг у каждого → реальный
         # минутный цикл, а 429 на одном IP не валит остальные.
         self._slots = self._make_slots()
         self._slot_rr = 0  # round-robin по слотам для запросов вне минутного прохода
         log.info("WB-клиент: слотов %d (прямой + прокси %d)", len(self._slots), len(self._proxies))
-        self.b2b_fail_streak = 0  # подряд провалов b2b (0 цен при наличии товаров)
-        self.cookie_alerted = False  # уже предупредили владельца о протухшей куке
+        self.bearer = settings.wb_bearer.strip()  # Bearer аккаунта для бизнес-цен
+        self.b2b_fail_streak = 0  # подряд провалов b2b (нет Bearer / 401 / 403)
+        self.bearer_alerted = False  # уже предупредили о негодном Bearer
         self.guardium = settings.wb_guardium.strip()
         self.guardium_fail_streak = 0  # подряд 498 от каталога = guardium мёртв
         self.guardium_alerted = False
@@ -146,46 +131,20 @@ class WBClient:
         self._slot_rr += 1
         return self._slots[self._slot_rr % len(self._slots)]
 
-    def _b2b_slot(self, slot: "_Slot | None") -> _Slot:
-        """Слот для b2b-detail: www-домен режет IP датацентра (Hetzner → 403, 2026-10-26),
-        поэтому при наличии прокси direct не берём — вместо него прокси по кругу."""
-        slot = slot or self._next_slot()
-        proxy_slots = self._slots[1:]
-        if slot.proxy is None and proxy_slots:
-            self._slot_rr += 1
-            slot = proxy_slots[self._slot_rr % len(proxy_slots)]
-        return slot
-
     def _make_session(self, proxy: str | None) -> AsyncSession:
-        # Куку задаём на каждый запрос и только для detail (каталог — на guardium).
-        # В общей сессии её не храним.
         proxies = {"http": proxy, "https": proxy} if proxy else None
         return AsyncSession(
             headers=HEADERS, impersonate=IMPERSONATE, timeout=20, proxies=proxies,
-            # Не сохраняем бизнес-куки из detail в общую сессию каталога.
-            discard_cookies=True,
+            discard_cookies=True,  # куки ответов WB нам не нужны, не копим их
         )
 
-    async def set_cookie(self, raw: str) -> int:
-        """Заменяет куку и пересоздаёт сессии слотов без рестарта. Возвращает число полей.
-
-        ВАЖНО: мутируем session В СУЩЕСТВУЮЩИХ _Slot, а не пересоздаём слоты —
-        активный проход держит снапшот слот-объектов, и подмена списка оставила бы
-        его на закрытых сессиях (ретраи по мёртвой сессии на каждый магазин).
-        _get перечитывает slot.session на каждой попытке — подхватит новую сразу.
-        """
-        self._cookies = _parse_cookie(raw) if raw else None
-        for sl in self._slots:
-            old = sl.session
-            sl.session = self._make_session(sl.proxy)
-            try:
-                await old.close()
-            except Exception:
-                pass
+    def set_bearer(self, token: str) -> None:
+        """Новый Bearer подхватывается следующим же запросом бизнес-цен."""
+        token = token.strip()
+        self.bearer = token if token.startswith("Bearer ") else f"Bearer {token}"
         self.b2b_fail_streak = 0
-        self.cookie_alerted = False
-        log.info("WB-клиент: кука обновлена (%d полей)", len(self._cookies or {}))
-        return len(self._cookies or {})
+        self.bearer_alerted = False
+        log.info("WB-клиент: Bearer обновлён")
 
     def set_guardium(self, token: str) -> None:
         """Новый guardium подхватывается следующим же запросом каталога."""
@@ -214,7 +173,7 @@ class WBClient:
                 await asyncio.sleep(wait)
             slot.last = loop.time()
 
-    async def _get(self, url, *, params=None, headers=None, cookies=None, retries=4, slot=None):
+    async def _get(self, url, *, params=None, headers=None, retries=4, slot=None):
         slot = slot or self._direct_slot
         who = slot.proxy or "direct"
         context = ""
@@ -224,7 +183,7 @@ class WBClient:
         for attempt in range(retries):
             await self._throttle(slot)
             try:
-                r = await slot.session.get(url, params=params, headers=headers, cookies=cookies)
+                r = await slot.session.get(url, params=params, headers=headers)
             except Exception as e:
                 last_failure = f"сеть: {type(e).__name__}"
                 log.warning("WB сетевая ошибка %s%s слот=%s попытка=%d/%d: %s",
@@ -268,7 +227,7 @@ class WBClient:
         else:
             reasons = {
                 403: "доступ отклонён",
-                498: "guardium протух или не задан; обнови кнопкой «Куки»",
+                498: "guardium протух или не задан; обнови кнопкой «Токены»",
                 429: "лимит запросов",
             }
             reason = f"HTTP {response.status_code}: {reasons.get(response.status_code, 'ошибка ответа WB')}"
@@ -309,14 +268,14 @@ class WBClient:
         }
         subjects = subjects or {SMARTPHONE_SUBJECT_ID}
         params["xsubject"] = ";".join(map(str, sorted(subjects)))
-        # Куку не передаём: каталог анонимный (иначе персонализируется в b2b-цены).
+        # Bearer не передаём: каталог анонимный (это и есть розница).
         return await self._get(CATALOG_URL, params=params,
                                headers=_mobile_headers(self.guardium), slot=slot)
 
     async def fetch_seller_catalog(
         self, supplier_id: int, subjects: set[int] | None = None, slot: "_Slot | None" = None
     ) -> list[NormProduct]:
-        """Каталог без куки бизнес-аккаунта: цена и сток витрины (`shelf_price`).
+        """Анонимный каталог (guardium): цена и сток витрины (`shelf_price`).
 
         Фильтр по предмету — на стороне WB (`xsubject`), поэтому у крупных продавцов не
         листаем тысячи лишних товаров (ХОБОТ: 1 страница вместо 57). Для розницы это и
@@ -363,40 +322,33 @@ class WBClient:
         return products
 
     async def enrich_prices(self, products: list[NormProduct], slot: "_Slot | None" = None) -> set[int]:
-        """Навешивает БИЗНЕС-цену из detail (батчи по 100) поверх каталожной.
+        """Навешивает БИЗНЕС-цену из мобильного detail (батчи по 100) поверх каталожной.
 
-        Только для b2b-магазинов: бизнес-цена (B2B_PARAMS) видна лишь с кукой и реально
-        отличается от розницы. Рознице detail не нужен — каталог уже даёт её цену.
-        WBAAS пускает __internal только на браузерный набор заголовков (без них — 403,
-        даже с валидной кукой) + живую куку (протухла → 498); класс IP не важен.
-        Зовётся КАЖДЫЙ цикл на все товары b2b-магазина тем же слотом, что и каталог
-        (кука протухнет/забанят — вернём триггерную схему из git).
+        Только для b2b-магазинов: бизнес-цена видна лишь с Bearer аккаунта (b2b=true).
+        Рознице detail не нужен — каталог уже даёт её цену. Зовётся КАЖДЫЙ цикл на все
+        товары b2b-магазина тем же слотом, что и каталог.
+        Без Bearer не ходим вовсе: detail без него отдаёт розницу, а её нельзя выдавать
+        за бизнес-цену — товары получат «цена не подтверждена».
         """
-        base_params = B2B_PARAMS
-        slot = self._b2b_slot(slot)
+        nm_ids = [p.nm_id for p in products]
+        if not self.bearer:
+            if products:
+                self.b2b_fail_streak += 1
+                log.warning("b2b: Bearer не задан — бизнес-цены пропущены (%d товаров)", len(products))
+            return set()
+        slot = slot or self._next_slot()
+        headers = {**_mobile_headers(self.guardium), "authorization": self.bearer}
         prices: dict[int, int] = {}
         deliv: dict[int, tuple] = {}
-        saw_response = False  # был ли ответ, говорящий о состоянии куки (200 или 498)
-        statuses: list[str] = []  # коды ответов по чанкам — для лога (498 = кука мертва)
-        nm_ids = [p.nm_id for p in products]
+        statuses: list[str] = []  # коды ответов по чанкам — для лога
         for i in range(0, len(nm_ids), 100):
             chunk = nm_ids[i:i + 100]
-            params = {**base_params, "nm": ";".join(map(str, chunk))}
-            headers = _browser_headers(f"https://www.wildberries.ru/catalog/{chunk[0]}/detail.aspx")
-            r = await self._get(B2B_DETAIL_URL, params=params, headers=headers,
-                                cookies=self._cookies, slot=slot)
+            params = {**B2B_PARAMS, "dest": settings.wb_dest, "udg": settings.wb_b2b_udg,
+                      "nm": ";".join(map(str, chunk))}
+            r = await self._get(B2B_DETAIL_URL, params=params, headers=headers, slot=slot)
             statuses.append("сеть" if r is None else str(r.status_code))
-            if r is None:
-                continue  # сеть легла — не про куку
-            if r.status_code == 498:
-                # 498 = WBAAS-заглушка на НЕВАЛИДНУЮ куку (проверено 2026-07-17:
-                # протухшая кука → 498 на любом IP; живая → 200 даже с датацентрового).
-                # Это и есть главный маркер «кука протухла» — копим streak.
-                saw_response = True
-                continue
-            if r.status_code != 200:
-                continue  # 403/429 (WAF/темп/бан IP) — не про куку
-            saw_response = True
+            if r is None or r.status_code != 200:
+                continue  # 498 = guardium (алерт по каталогу), 401/403 считаем ниже
             try:
                 items = r.json().get("products") or []
             except Exception:
@@ -411,15 +363,11 @@ class WBClient:
                 p.price = prices[p.nm_id]
             if p.nm_id in deliv:
                 p.delivery_hours, p.from_seller = deliv[p.nm_id]
-        # 0 цен при наличии товаров = кука протухла — НО только если WB реально ответил.
-        # Если все чанки легли по сети (прокси оборвал), это не про куку — не копим счётчик,
-        # иначе транзиентные обрывы мобильного прокси дают ложный алерт «кука протухла».
-        if products and not prices:
-            if saw_response:
-                self.b2b_fail_streak += 1
-            else:
-                log.warning("b2b: ни одного 200 (сеть/бан IP), счётчик куки не трогаю")
-        else:
+        # 401/403 = WB не принял Bearer (сессию отозвали) — копим счётчик для алерта.
+        # Сеть/429/498 — не про Bearer, счётчик не трогаем.
+        if any(code in ("401", "403") for code in statuses) and not prices:
+            self.b2b_fail_streak += 1
+        elif prices:
             self.b2b_fail_streak = 0
         log.info("detail цены применены: %d/%d (ответы %s, слот %s)", len(prices), len(products),
                  ",".join(statuses) or "-", slot.proxy or "direct")

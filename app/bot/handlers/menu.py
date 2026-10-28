@@ -14,7 +14,7 @@ from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from app.bot import keyboards as kb
 from app.bot import views
 from app.bot.access import access
-from app.bot.states import AddSeller, AddUser, CheckBrands, SetCookie, WorkHours
+from app.bot.states import AddSeller, AddUser, CheckBrands, SetTokens, WorkHours
 from app.bot.utils import parse_seller_slug, parse_supplier_id
 from app.config import settings
 from app.db import repo
@@ -22,7 +22,7 @@ from app.db.base import Session
 from app.emoji import esc, tge
 from app.services import reporting
 from app.services.monitor import _pass_lock, sync_seller
-from app.wb.client import guardium_expires_at, wb_client
+from app.wb.client import bearer_user, guardium_expires_at, wb_client
 
 log = logging.getLogger(__name__)
 router = Router()
@@ -84,56 +84,54 @@ async def rb_stats(m: Message, state: FSMContext):
     await m.answer(text, reply_markup=markup, parse_mode="HTML")
 
 
-# ---------- обновление WB-куки (FSM) ----------
-@router.message(F.text == kb.RB_COOKIE)
-async def rb_cookie(m: Message, state: FSMContext):
+# ---------- обновление токенов WB (FSM) ----------
+@router.message(F.text.in_({kb.RB_TOKENS, kb.RB_TOKENS_OLD}))
+async def rb_tokens(m: Message, state: FSMContext):
     if not access.is_admin(m.from_user.id):
         return
-    await state.set_state(SetCookie.waiting)
+    await state.set_state(SetTokens.waiting)
     await m.answer(
-        f"{tge('shop')} <b>Обновление куки WB</b>\n\n"
-        "1. Открой <b>wildberries.ru</b> на ПК, залогинься в бизнес-аккаунт.\n"
-        "2. F12 → вкладка <b>Network</b> (Сеть), обнови страницу.\n"
-        "3. Кликни любой запрос → <b>Headers</b> → <b>Request Headers</b> → "
-        "скопируй целиком строку <code>Cookie:</code> (без слова Cookie).\n"
-        "4. Пришли её одним сообщением сюда.\n\n"
-        "Сюда же присылай <b>guardium</b> из приложения WB (заголовок "
-        "<code>x-guardium-token</code>, начинается с <code>1.1000.</code>) — "
-        "на нём живёт каталог, обновлять раз в ~3 дня.",
+        f"{tge('shop')} <b>Обновление токенов WB</b>\n\n"
+        "Пришли одним сообщением токен из приложения WB (сними перехватом трафика):\n"
+        "• <b>guardium</b> — заголовок <code>x-guardium-token</code>, начинается с "
+        "<code>1.1000.</code>. Нужен каталогу и бизнес-ценам, обновлять раз в ~3 дня.\n"
+        "• <b>Bearer</b> — заголовок <code>authorization</code>, начинается с "
+        "<code>Bearer eyJ</code>. Нужен бизнес-ценам, срока нет — только если WB разлогинит.",
         reply_markup=kb.cancel_kb(),
         parse_mode="HTML",
     )
 
 
-@router.message(SetCookie.waiting)
-async def cookie_input(m: Message, state: FSMContext):
+async def _save_setting(key: str, value: str) -> None:
+    async with Session() as s:
+        await repo.set_setting(s, key, value)
+        await s.commit()
+
+
+@router.message(SetTokens.waiting)
+async def tokens_input(m: Message, state: FSMContext):
     raw = (m.text or "").strip()
+    # новый токен подхватывается ближайшим минутным циклом — ре-синк не нужен
     if raw.startswith("1.1000.") and guardium_expires_at(raw):
         await state.clear()
         wb_client.set_guardium(raw)
-        async with Session() as s:
-            await repo.set_setting(s, "wb_guardium", raw)
-            await s.commit()
+        await _save_setting("wb_guardium", raw)
         exp = datetime.fromtimestamp(guardium_expires_at(raw), ZoneInfo("Europe/Moscow"))
         await m.answer(f"{tge('ok')} Guardium обновлён, действует до {exp:%d.%m %H:%M} МСК.",
                        parse_mode="HTML")
         return
-    if "=" not in raw or len(raw) < 20:
-        await m.answer(
-            "Это не похоже на строку Cookie. Пришли ещё раз или нажмите Отмена.",
-            reply_markup=kb.cancel_kb(),
-        )
+    user = bearer_user(raw)
+    if user:
+        await state.clear()
+        wb_client.set_bearer(raw)
+        await _save_setting("wb_bearer", wb_client.bearer)
+        await m.answer(f"{tge('ok')} Bearer обновлён (аккаунт {user}). "
+                       "Бизнес-цены подтянутся ближайшим циклом.", parse_mode="HTML")
         return
-    await state.clear()
-    n = await wb_client.set_cookie(raw)
-    async with Session() as s:
-        await repo.set_setting(s, "wb_cookie", raw)
-        await s.commit()
-    # ре-синк не нужен: минутный цикл через ≤60с сам подтянет цены с новой кукой,
-    # а реальное снижение за время протухшей куки честно алертнёт (не глушим)
     await m.answer(
-        f"{tge('ok')} Кука обновлена ({n} полей). Цены подтянутся ближайшим циклом.",
-        parse_mode="HTML",
+        "Не похоже ни на guardium (1.1000.…), ни на Bearer (eyJ…). "
+        "Пришли ещё раз или нажмите Отмена.",
+        reply_markup=kb.cancel_kb(),
     )
 
 
@@ -415,7 +413,7 @@ async def nav_bc_run(cb: CallbackQuery, state: FSMContext):
 
 
 PRICE_HINT = (
-    f"{tge('clock')} Режим цены: 🏢 бизнес-цена (нужна кука) / 👤 розница. "
+    f"{tge('clock')} Режим цены: 🏢 бизнес-цена (нужен Bearer) / 👤 розница. "
     "Жми магазин, чтобы переключить:"
 )
 

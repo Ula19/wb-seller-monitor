@@ -73,9 +73,9 @@ def _wallet_line(p, b2b: bool) -> list[str]:
 
 
 def _stale_line(p, b2b: bool) -> list[str]:
-    """Guard: b2b-цена не подтверждена свежим detail (кука/бан/сбой) — честно помечаем.
+    """Guard: b2b-цена не подтверждена свежим detail (Bearer/бан/сбой) — честно помечаем.
 
-    Причину не называем: пропуск бывает и при живой куке (упал один чанк, бан IP).
+    Причину не называем: пропуск бывает и при живом Bearer (упал один чанк, бан IP).
     getattr — в отчёты приходят и ORM-строки из БД, у них поля price_stale нет.
     """
     if b2b and getattr(p, "price_stale", False):

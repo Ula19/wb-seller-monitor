@@ -12,7 +12,7 @@ class AddUser(StatesGroup):
     waiting_id = State()
 
 
-class SetCookie(StatesGroup):
+class SetTokens(StatesGroup):
     waiting = State()
 
 

@@ -47,11 +47,11 @@ def detect_changes(old_price, old_stock, p):
 async def sync_seller(
     seller: models.Seller, *, silent_seed: bool = False, slot=None
 ):
-    """Тянет каталог (без куки), обновляет БД. Возвращает (все_товары, новые, изменения).
+    """Тянет каталог (guardium), обновляет БД. Возвращает (все_товары, новые, изменения).
 
-    Розница (`b2b=False`): каталог уже даёт точную цену — куку не трогаем вовсе.
+    Розница (`b2b=False`): каталог уже даёт точную цену — Bearer не нужен.
     Бизнес (`b2b=True`): каждый вызов навешиваем бизнес-цену из detail (`enrich_prices`,
-    с кукой) на ВСЕ товары — без триггеров и sweep; товары без свежей бизнес-цены
+    с Bearer) на ВСЕ товары — без триггеров и sweep; товары без свежей бизнес-цены
     сохраняют прежнюю и помечаются price_stale. Сток/наличие — всегда из каталога.
     silent_seed=True — первичная загрузка: товары помечаются известными, не шумим.
     """
@@ -64,11 +64,11 @@ async def sync_seller(
             rows = await repo.get_products(s, seller.supplier_id)
             existing = {r.nm_id: r for r in rows}
             # Розница: каталог уже даёт точную цену (p.price = shelf_price из normalize).
-            # Бизнес-цена видна только с кукой → detail на все товары каждый цикл.
+            # Бизнес-цена видна только с Bearer → detail на все товары каждый цикл.
             if seller.b2b:
                 priced = await wb_client.enrich_prices(fetched, slot=slot)
                 # без свежей бизнес-цены — сохраняем прежнюю (в p.price сейчас витрина)
-                # и помечаем: цена не подтверждена (кука мертва/detail упал)
+                # и помечаем: цена не подтверждена (Bearer мёртв/detail упал)
                 for p in fetched:
                     if p.nm_id not in priced:
                         p.price_stale = True
@@ -169,10 +169,10 @@ async def send_report_to(bot, user_ids, seller, products) -> None:
                     log.warning("отчёт не доставлен %s: %s", uid, e)
 
 
-COOKIE_ALERT = (
-    "‼️‼️‼️ <b>ВНИМАНИЕ: КУКА WB ПРОТУХЛА</b> ‼️‼️‼️\n\n"
-    "🔴 Бизнес-цены <b>не приходят</b>.\n"
-    "👉 Срочно обнови куку кнопкой «🔑 Куки»."
+BEARER_ALERT = (
+    "‼️‼️‼️ <b>ВНИМАНИЕ: BEARER WB НЕ РАБОТАЕТ</b> ‼️‼️‼️\n\n"
+    "🔴 Бизнес-цены <b>не приходят</b> (Bearer не задан или WB его отклонил).\n"
+    "👉 Сними Bearer из приложения WB и пришли кнопкой «🔑 Токены»."
 )
 
 
@@ -200,22 +200,22 @@ async def _alert_all(bot, text: str) -> None:
             log.warning("алерт не доставлен %s: %s", uid, e)
 
 
-async def _check_cookie_health(bot) -> None:
-    """Если detail-цены не приходят несколько раз подряд — кука протухла, шумим всем.
+async def _check_tokens_health(bot) -> None:
+    """Если бизнес-цены не приходят несколько раз подряд (нет Bearer / 401 / 403) — шумим всем.
 
-    b2b дёргает detail каждый цикл — при мёртвой куке порог 3 набирается за ~3 мин.
+    b2b дёргает detail каждый цикл — порог 3 набирается за ~3 мин.
     """
-    if wb_client.b2b_fail_streak >= 3 and not wb_client.cookie_alerted:
-        wb_client.cookie_alerted = True
-        await _alert_all(bot, COOKIE_ALERT)
+    if wb_client.b2b_fail_streak >= 3 and not wb_client.bearer_alerted:
+        wb_client.bearer_alerted = True
+        await _alert_all(bot, BEARER_ALERT)
     elif wb_client.b2b_fail_streak == 0:
-        wb_client.cookie_alerted = False
+        wb_client.bearer_alerted = False
     # guardium (каталог): шумим один раз, флаг сбрасывает set_guardium
     problem = _guardium_problem()
     if problem and not wb_client.guardium_alerted:
         wb_client.guardium_alerted = True
         await _alert_all(bot, f"‼️ <b>GUARDIUM WB</b>: {problem}.\n"
-                              "👉 Сними новый из приложения и пришли кнопкой «🔑 Куки».")
+                              "👉 Сними новый из приложения и пришли кнопкой «🔑 Токены».")
 
 
 def _within_work_hours(start, end, hour) -> bool:
@@ -239,8 +239,8 @@ async def _work_window() -> tuple[int | None, int | None]:
 async def monitoring_job(bot) -> None:
     """Единый проход по ВСЕМ магазинам раз в monitor_interval_seconds.
 
-    Каждый магазин каждый цикл: каталог без куки (розница = готовая цена),
-    b2b — плюс detail с кукой на все товары внутри sync_seller. Никаких
+    Каждый магазин каждый цикл: каталог (розница = готовая цена),
+    b2b — плюс detail с Bearer на все товары внутри sync_seller. Никаких
     приоритетов/триггеров/sweep — все магазины равны, всё свежее каждую минуту.
     Слоты разбирают ОБЩУЮ очередь магазинов (work-stealing): кто освободился —
     берёт следующего; завязший в 429 слот возьмёт меньше, его хвост подстрахуют
@@ -301,7 +301,7 @@ async def monitoring_job(bot) -> None:
             else:  # слот один — повторить можно только им же
                 retries = [_retry(s, b) for s, b in failed]
             await asyncio.gather(*retries)
-        await _check_cookie_health(bot)
+        await _check_tokens_health(bot)
     took = asyncio.get_event_loop().time() - t0
     saved = len(failed) - len(skipped)  # спас повтор другим IP
     fails_by = {id(sl): 0 for sl in slots}

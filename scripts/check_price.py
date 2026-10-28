@@ -39,7 +39,7 @@ def show_response(r):
             print(p["id"], "|", p.get("name"), "|", json.dumps(price, ensure_ascii=False))
     else:
         if r.status_code == 498:
-            print("guardium протух или не задан — обнови кнопкой «Куки».")
+            print("guardium протух или не задан — обнови кнопкой «Токены».")
         print("тело:", repr(r.text[:300]))
 
 
