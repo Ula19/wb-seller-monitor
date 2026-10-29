@@ -4,14 +4,13 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from sqlalchemy import text
 
 from app.bot.access import access
 from app.bot.handlers import admin, common, menu, user
 from app.bot.middlewares import AuthMiddleware
 from app.config import settings
 from app.db import repo
-from app.db.base import Base, Session, engine
+from app.db.base import Session
 from app.services.monitor import monitoring_job, report_job
 from app.wb.client import wb_client
 
@@ -19,28 +18,7 @@ log = logging.getLogger(__name__)
 
 
 async def on_startup() -> None:
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-        # create_all не добавляет колонки в существующую таблицу — добавляем вручную
-        await conn.execute(text(
-            "ALTER TABLE products ADD COLUMN IF NOT EXISTS delivery_hours INTEGER"
-        ))
-        await conn.execute(text(
-            "ALTER TABLE products ADD COLUMN IF NOT EXISTS from_seller BOOLEAN"
-        ))
-        await conn.execute(text(
-            "ALTER TABLE products ADD COLUMN IF NOT EXISTS subject_id INTEGER"
-        ))
-        await conn.execute(text(
-            "ALTER TABLE products ADD COLUMN IF NOT EXISTS shelf_price INTEGER"
-        ))
-        # is_fast упразднён: все магазины мониторятся ежеминутно единым джобом
-        await conn.execute(text(
-            "ALTER TABLE sellers DROP COLUMN IF EXISTS is_fast"
-        ))
-        await conn.execute(text(
-            "ALTER TABLE sellers ADD COLUMN IF NOT EXISTS b2b BOOLEAN DEFAULT TRUE"
-        ))
+    # схему БД готовит Alembic (`alembic upgrade head` в CMD Dockerfile) до старта бота
     await access.load()
     # актуальные токены живут в БД (обновляются из Telegram); .env — лишь стартовый seed
     async with Session() as s:

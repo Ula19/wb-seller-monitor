@@ -8,15 +8,20 @@ from app.wb.parser import NormProduct
 
 
 # ---------- пользователи ----------
-# Владелец живёт только в .env (settings.owner_id) и в БД не пишется —
-# в БД лежат лишь выданные через /grant пользователи (whitelist).
+# Владелец задаётся в .env (settings.owner_id); в users у него строка с role=owner
+# (на неё ссылаются его сессия WB и магазины), остальные — выданные через /grant.
 async def list_user_ids(s) -> list[int]:
     res = await s.execute(select(models.User.telegram_id))
     return [r[0] for r in res.all()]
 
 
 async def list_users(s) -> list[models.User]:
-    res = await s.execute(select(models.User).order_by(models.User.created_at))
+    """Whitelist для админки — без владельца."""
+    res = await s.execute(
+        select(models.User)
+        .where(models.User.role != "owner")
+        .order_by(models.User.created_at)
+    )
     return list(res.scalars().all())
 
 
@@ -181,5 +186,7 @@ async def set_setting(s, key: str, value: str) -> None:
 async def stats(s) -> tuple[int, int, int]:
     sellers = await s.scalar(select(func.count()).select_from(models.Seller))
     products = await s.scalar(select(func.count()).select_from(models.Product))
-    users = await s.scalar(select(func.count()).select_from(models.User))
+    users = await s.scalar(
+        select(func.count()).select_from(models.User).where(models.User.role != "owner")
+    )
     return sellers or 0, products or 0, users or 0
