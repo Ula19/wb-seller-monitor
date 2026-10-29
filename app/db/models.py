@@ -1,6 +1,17 @@
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Integer,
+    String,
+    Text,
+    func,
+)
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -77,6 +88,83 @@ class AppSetting(Base):
 
     key: Mapped[str] = mapped_column(String(64), primary_key=True)
     value: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class WbSession(Base):
+    """Залогиненный аккаунт WB юзера бота (один аккаунт на юзера).
+
+    shard_key/session_id не храним — они есть внутри JWT access_token.
+    """
+
+    __tablename__ = "wb_sessions"
+
+    telegram_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.telegram_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    wb_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    access_token: Mapped[str | None] = mapped_column(Text, nullable=True)  # Bearer
+    # куки браузера (Playwright storageState) — по wbid-refresh обновляем токен без SMS
+    storage_state: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    access_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    refresh_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # active | expired | revoked
+    status: Mapped[str] = mapped_column(String(16), default="active", server_default="active")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class UserSeller(Base):
+    """Какие магазины отслеживает конкретный юзер."""
+
+    __tablename__ = "user_sellers"
+
+    telegram_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.telegram_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    supplier_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("sellers.supplier_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    # режим цены: True — бизнес-цена под аккаунтом юзера, False — розничная
+    b2b: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    added_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class UserProductPrice(Base):
+    """Бизнес-цена товара под аккаунтом юзера (у каждого аккаунта своя)."""
+
+    __tablename__ = "user_product_prices"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["supplier_id", "nm_id"],
+            ["products.supplier_id", "products.nm_id"],
+            ondelete="CASCADE",
+        ),
+    )
+
+    telegram_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.telegram_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    supplier_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    nm_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    b2b_price: Mapped[int | None] = mapped_column(Integer, nullable=True)  # NULL = цены ещё нет
+    last_priced_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class Notified(Base):
