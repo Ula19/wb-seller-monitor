@@ -97,36 +97,31 @@ class WebClient:
             return None
         subjects = subjects or {SMARTPHONE_SUBJECT_ID}
         session = self._ensure_session()
-        headers = {"Cookie": self._cookie}
-        products: list[NormProduct] = []
-        for page in range(1, settings.max_pages + 1):
-            params = {**BASE_PARAMS, "supplier": supplier_id, "page": page,
-                      "xsubject": ";".join(map(str, sorted(subjects)))}
-            await self._throttle()
-            try:
-                r = await session.get(CATALOG_URL, params=params, headers=headers)
-            except Exception as e:
-                log.warning("веб-каталог %s: сеть %s", supplier_id, type(e).__name__)
-                return None
-            if r.status_code in (401, 403):
-                log.warning("веб-каталог %s: HTTP %s — сессия отклонена", supplier_id, r.status_code)
-                return None  # сигнал fallback + протухшая сессия
-            if r.status_code != 200:
-                log.warning("веб-каталог %s: HTTP %s", supplier_id, r.status_code)
-                return None
-            try:
-                data = r.json()
-                items = data.get("products") or (data.get("data") or {}).get("products") or []
-            except Exception:
-                log.warning("веб-каталог %s: неверный JSON", supplier_id)
-                return None
-            if not items:
-                break
-            products.extend(normalize(p, supplier_id) for p in items)
-            if len(items) < 100:  # последняя страница
-                break
-        if subjects:  # страховка, если WB проигнорит xsubject
-            products = [p for p in products if p.subject_id in subjects]
+        # один запрос без пагинации: параметры страниц у веба не выверены, а дубли/
+        # зацикливание опаснее недолистанного хвоста. xsubject фильтрует на стороне WB.
+        params = {**BASE_PARAMS, "supplier": supplier_id, "page": 1,
+                  "xsubject": ";".join(map(str, sorted(subjects)))}
+        await self._throttle()
+        try:
+            r = await session.get(CATALOG_URL, params=params, headers={"Cookie": self._cookie})
+        except Exception as e:
+            log.warning("веб-каталог %s: сеть %s", supplier_id, type(e).__name__)
+            return None
+        if r.status_code != 200:
+            log.warning("веб-каталог %s: HTTP %s (401/403 = сессия отклонена)", supplier_id, r.status_code)
+            return None
+        try:
+            data = r.json()
+            items = data.get("products") or (data.get("data") or {}).get("products") or []
+        except Exception:
+            log.warning("веб-каталог %s: неверный JSON", supplier_id)
+            return None
+        products = [normalize(p, supplier_id) for p in items if p.get("subjectId") in subjects]
+        # пусто = либо магазин без смартфонов, либо неверные параметры запроса: не рискуем
+        # тихо обнулить каталог — отдаём None, пусть проверит мобильный fallback.
+        if not products:
+            log.info("веб-каталог %s: пусто (товаров %d) → fallback на мобильный", supplier_id, len(items))
+            return None
         return products
 
 
