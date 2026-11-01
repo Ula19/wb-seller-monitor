@@ -16,6 +16,7 @@ from curl_cffi.requests import AsyncSession
 
 from app.config import settings
 from app.wb.parser import NormProduct, _delivery, _price, normalize
+from app.wb.web_client import web_client
 
 log = logging.getLogger(__name__)
 
@@ -111,6 +112,33 @@ class WBClient:
         self.guardium = settings.wb_guardium.strip()
         self.guardium_fail_streak = 0  # подряд 498 от каталога = guardium мёртв
         self.guardium_alerted = False
+        # Веб-путь (основной): куки бизнес-аккаунта от keeper. Сбой → деградация,
+        # весь цикл откатывается на мобильный api-ios (guardium). Восстанавливает keeper.
+        self.web_fail_streak = 0
+        self._web_degraded = False
+        self.web_alerted = False  # уже предупредили о падении веба (сбрасывает set_web_session)
+
+    def _web_enabled(self) -> bool:
+        """Веб готов работать: есть куки и не было устойчивого сбоя."""
+        return web_client.ready and not self._web_degraded
+
+    def set_web_session(self, storage_state) -> None:
+        """Свежая банка кук от keeper — поднимает веб из деградации."""
+        web_client.set_session(storage_state)
+        self._web_degraded = not web_client.ready
+        self.web_fail_streak = 0
+        self.web_alerted = False
+
+    def _mark_web_down(self, what: str) -> None:
+        """Веб-запрос упал → деградация: до восстановления всё идёт мобильным путём."""
+        self.web_fail_streak += 1
+        self._web_degraded = True
+        log.warning("веб-путь деградировал (%s), откат на мобильный api; подряд сбоев %d",
+                    what, self.web_fail_streak)
+
+    @property
+    def web_degraded(self) -> bool:
+        return self._web_degraded
 
     def _make_slots(self) -> list[_Slot]:
         slots = [_Slot(self._make_session(None), None)]  # прямой IP сервера
@@ -154,6 +182,7 @@ class WBClient:
         log.info("WB-клиент: guardium обновлён, истекает %s", guardium_expires_at(self.guardium))
 
     async def close(self) -> None:
+        await web_client.close()
         for sl in self._slots:
             try:
                 await sl.session.close()
@@ -275,6 +304,19 @@ class WBClient:
     async def fetch_seller_catalog(
         self, supplier_id: int, subjects: set[int] | None = None, slot: "_Slot | None" = None
     ) -> list[NormProduct]:
+        """Каталог магазина. Основной путь — веб (куки, цена уже бизнес-аккаунта);
+        при сбое откат на мобильный api-ios (guardium, розница + enrich)."""
+        if self._web_enabled():
+            products = await web_client.fetch_catalog(supplier_id, subjects)
+            if products is not None:
+                self.web_fail_streak = 0
+                return products
+            self._mark_web_down("каталог")
+        return await self._fetch_catalog_mobile(supplier_id, subjects, slot)
+
+    async def _fetch_catalog_mobile(
+        self, supplier_id: int, subjects: set[int] | None = None, slot: "_Slot | None" = None
+    ) -> list[NormProduct]:
         """Анонимный каталог (guardium): цена и сток витрины (`shelf_price`).
 
         Фильтр по предмету — на стороне WB (`xsubject`), поэтому у крупных продавцов не
@@ -322,6 +364,14 @@ class WBClient:
         return products
 
     async def enrich_prices(self, products: list[NormProduct], slot: "_Slot | None" = None) -> set[int]:
+        """Бизнес-цена товаров. В веб-режиме каталог уже пришёл залогиненным (цена
+        бизнес-аккаунта), поэтому все товары считаются обогащёнными без доп. запросов.
+        В мобильном режиме — detail с Bearer (fallback)."""
+        if self._web_enabled():
+            return {p.nm_id for p in products}
+        return await self._enrich_prices_mobile(products, slot)
+
+    async def _enrich_prices_mobile(self, products: list[NormProduct], slot: "_Slot | None" = None) -> set[int]:
         """Навешивает БИЗНЕС-цену из мобильного detail (батчи по 100) поверх каталожной.
 
         Только для b2b-магазинов: бизнес-цена видна лишь с Bearer аккаунта (b2b=true).
