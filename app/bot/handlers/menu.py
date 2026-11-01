@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -14,13 +15,13 @@ from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from app.bot import keyboards as kb
 from app.bot import views
 from app.bot.access import access
-from app.bot.states import AddSeller, AddUser, CheckBrands, SetTokens, WorkHours
+from app.bot.states import AddSeller, AddUser, CheckBrands, SetTokens, WbLogin, WorkHours
 from app.bot.utils import parse_seller_slug, parse_supplier_id
 from app.config import settings
 from app.db import repo
 from app.db.base import Session
 from app.emoji import esc, tge
-from app.services import reporting
+from app.services import keeper, reporting
 from app.services.monitor import _pass_lock, sync_seller
 from app.wb.client import bearer_user, guardium_expires_at, wb_client
 
@@ -48,6 +49,38 @@ async def _deny_if_not_admin(cb: CallbackQuery) -> bool:
         await cb.answer("⛔ Только для администратора", show_alert=True)
         return True
     return False
+
+
+# ---------- вход в аккаунт WB (веб-сессия для keeper) ----------
+@router.message(Command("wblogin"))
+async def cmd_wblogin(m: Message, state: FSMContext):
+    if m.from_user.id != settings.owner_id:
+        await m.answer("⛔ Только для владельца")
+        return
+    await state.set_state(WbLogin.waiting_phone)
+    await m.answer("🔐 Вход в аккаунт WB.\nПришли номер телефона (можно с +7 или без):")
+
+
+@router.message(WbLogin.waiting_phone)
+async def wblogin_phone(m: Message, state: FSMContext):
+    phone = re.sub(r"\D", "", m.text or "")[-10:]
+    if len(phone) != 10:
+        await m.answer("Нужно 10 цифр номера (без кода страны). Пришли ещё раз:")
+        return
+    await keeper.start_login(m.bot, m.from_user.id, phone)
+    await state.set_state(WbLogin.waiting_code)
+    await m.answer("Открываю WB и ввожу номер… Жди код: он придёт <b>пушем в приложение WB</b> "
+                   "(и в колокольчик на сайте). Пришли код сюда:", parse_mode="HTML")
+
+
+@router.message(WbLogin.waiting_code)
+async def wblogin_code(m: Message, state: FSMContext):
+    code = re.sub(r"\D", "", m.text or "")
+    await state.clear()
+    if keeper.submit_code(m.from_user.id, code):
+        await m.answer("Код принят, проверяю вход…")
+    else:
+        await m.answer("Сейчас код никто не ждёт (истёк таймаут?). Начни заново: /wblogin")
 
 
 # ---------- вход в меню ----------

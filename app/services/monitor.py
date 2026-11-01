@@ -205,6 +205,12 @@ async def _check_tokens_health(bot) -> None:
 
     b2b дёргает detail каждый цикл — порог 3 набирается за ~3 мин.
     """
+    # Веб-путь упал → один алерт на переход (владелец просил о каждом падении).
+    # Флаг web_alerted сбрасывается в set_web_session при восстановлении сессии.
+    if wb_client.web_degraded and not wb_client.web_alerted:
+        wb_client.web_alerted = True
+        await _alert_all(bot, "⚠️ <b>Веб-сессия WB упала</b> — работаю на мобильном guardium.\n"
+                              "👉 Проверь /wblogin (перелогинься) и что guardium свежий.")
     if wb_client.b2b_fail_streak >= 3 and not wb_client.bearer_alerted:
         wb_client.bearer_alerted = True
         await _alert_all(bot, BEARER_ALERT)

@@ -11,6 +11,7 @@ from app.bot.middlewares import AuthMiddleware
 from app.config import settings
 from app.db import repo
 from app.db.base import Session
+from app.services import keeper
 from app.services.monitor import monitoring_job, report_job
 from app.wb.client import wb_client
 
@@ -28,6 +29,7 @@ async def on_startup() -> None:
         wb_client.set_guardium(saved_guardium)
     if saved_bearer:
         wb_client.set_bearer(saved_bearer)
+    await keeper.load_into_client()  # поднять сохранённую веб-сессию (основной путь)
     n_px = len(wb_client._proxies)
     proxy_state = f"вкл ({n_px} шт.)" if n_px else "выкл (напрямую)"
     log.info("Старт: владелец %s, разрешённых пользователей %d, прокси WB: %s",
@@ -60,6 +62,10 @@ async def main() -> None:
         coalesce=True,
     )
     scheduler.add_job(report_job, "cron", minute=0, args=[bot], max_instances=1)
+    scheduler.add_job(  # освежаем веб-сессию, чтобы куки не протухли
+        keeper.refresh_job, "interval", hours=settings.web_refresh_hours,
+        args=[bot], max_instances=1,
+    )
     scheduler.start()
 
     try:
