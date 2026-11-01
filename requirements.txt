@@ -1,5 +1,6 @@
 aiogram==3.29.0
 alembic==1.20.1
+patchright==1.52.5
 APScheduler==3.10.4
 SQLAlchemy[asyncio]==2.0.35
 asyncpg==0.29.0
