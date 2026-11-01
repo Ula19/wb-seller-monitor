@@ -12,6 +12,9 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+    logging:  # ротация логов, чтобы не забивали диск
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
 
   bot:
     build: .
@@ -20,6 +23,9 @@ services:
       db:
         condition: service_healthy
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
 
 volumes:
   pgdata:

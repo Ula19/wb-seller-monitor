@@ -21,6 +21,8 @@ HOME_URL = "https://www.wildberries.ru/"
 LOGIN_URL = "https://www.wildberries.ru/security/login"
 # поле номера — обёртка <ui-field-phone id=phone-number>, реальный input внутри
 PHONE_SEL = "#phone-number input, input#phone-number, [data-test-id=phone_input] input"
+# в Docker под root chromium без песочницы не стартует; dev-shm мал — выносим в /tmp
+LAUNCH_ARGS = ["--no-sandbox", "--disable-dev-shm-usage"]
 
 
 def _web_proxy() -> str | None:
@@ -72,7 +74,7 @@ async def login(phone: str, get_code) -> dict | None:
 
     proxy = _pw_proxy(_web_proxy())
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=False, proxy=proxy)
+        browser = await p.chromium.launch(headless=False, proxy=proxy, args=LAUNCH_ARGS)
         try:
             ctx = await browser.new_context(locale="ru-RU")
             page = await ctx.new_page()
@@ -122,7 +124,7 @@ async def refresh(storage_state: dict | str) -> dict | None:
         storage_state = json.loads(storage_state)
     proxy = _pw_proxy(_web_proxy())
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=False, proxy=proxy)
+        browser = await p.chromium.launch(headless=False, proxy=proxy, args=LAUNCH_ARGS)
         try:
             ctx = await browser.new_context(locale="ru-RU", storage_state=storage_state)
             page = await ctx.new_page()
