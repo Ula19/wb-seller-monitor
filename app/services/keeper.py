@@ -9,9 +9,9 @@ import asyncio
 import json
 import logging
 
-from app.config import settings
 from app.db import repo
 from app.db.base import Session
+from app.services.monitor import alert_all
 from app.wb import web_session
 from app.wb.client import wb_client
 
@@ -42,16 +42,6 @@ async def load_into_client() -> None:
         log.info("keeper: веб-сессии нет — работаем на мобильном пути (guardium)")
 
 
-async def _alert(bot, text: str) -> None:
-    async with Session() as s:
-        ids = list({settings.owner_id, *await repo.list_user_ids(s)})
-    for uid in ids:
-        try:
-            await bot.send_message(uid, text, parse_mode="HTML")
-        except Exception as e:
-            log.warning("keeper-алерт не доставлен %s: %s", uid, e)
-
-
 async def refresh_job(bot) -> None:
     """Периодически освежает веб-сессию (заход на сайт). Протухла → алерт на релогин."""
     async with Session() as s:
@@ -65,7 +55,7 @@ async def refresh_job(bot) -> None:
         return
     if state is None:
         wb_client.set_web_session("")  # куки сняты → клиент уходит на мобильный fallback
-        await _alert(bot, "‼️ <b>Веб-сессия WB протухла</b>. Войди заново: /wblogin")
+        await alert_all(bot, "‼️ <b>Веб-сессия WB протухла</b>. Войди заново: /wblogin")
         return
     await _save(state)
     wb_client.set_web_session(state)

@@ -47,11 +47,11 @@ def detect_changes(old_price, old_stock, p):
 async def sync_seller(
     seller: models.Seller, *, silent_seed: bool = False, slot=None
 ):
-    """Тянет каталог (guardium), обновляет БД. Возвращает (все_товары, новые, изменения).
+    """Тянет каталог, обновляет БД. Возвращает (все_товары, новые, изменения).
 
-    Розница (`b2b=False`): каталог уже даёт точную цену — Bearer не нужен.
-    Бизнес (`b2b=True`): каждый вызов навешиваем бизнес-цену из detail (`enrich_prices`,
-    с Bearer) на ВСЕ товары — без триггеров и sweep; товары без свежей бизнес-цены
+    Розница (`b2b=False`): каталог (анонимный, веб или api-ios) уже даёт точную цену.
+    Бизнес (`b2b=True`): каждый вызов навешиваем бизнес-цену отдельным detail под
+    бизнес-аккаунтом (`enrich_prices`: веб-куки, fallback — Bearer) на ВСЕ товары; товары без свежей бизнес-цены
     сохраняют прежнюю и помечаются price_stale. Сток/наличие — всегда из каталога.
     silent_seed=True — первичная загрузка: товары помечаются известными, не шумим.
     """
@@ -64,11 +64,11 @@ async def sync_seller(
             rows = await repo.get_products(s, seller.supplier_id)
             existing = {r.nm_id: r for r in rows}
             # Розница: каталог уже даёт точную цену (p.price = shelf_price из normalize).
-            # Бизнес-цена видна только с Bearer → detail на все товары каждый цикл.
+            # Бизнес-цена видна только под бизнес-аккаунтом → detail на все товары каждый цикл.
             if seller.b2b:
                 priced = await wb_client.enrich_prices(fetched, slot=slot)
                 # без свежей бизнес-цены — сохраняем прежнюю (в p.price сейчас витрина)
-                # и помечаем: цена не подтверждена (Bearer мёртв/detail упал)
+                # и помечаем: цена не подтверждена (веб-detail и Bearer оба не дали цену)
                 for p in fetched:
                     if p.nm_id not in priced:
                         p.price_stale = True
@@ -190,7 +190,7 @@ def _guardium_problem() -> str | None:
     return None
 
 
-async def _alert_all(bot, text: str) -> None:
+async def alert_all(bot, text: str) -> None:
     async with Session() as s:
         user_ids = await recipient_ids(s)
     for uid in user_ids:
@@ -205,22 +205,27 @@ async def _check_tokens_health(bot) -> None:
 
     b2b дёргает detail каждый цикл — порог 3 набирается за ~3 мин.
     """
-    # Веб-путь упал → один алерт на переход (владелец просил о каждом падении).
-    # Флаг web_alerted сбрасывается в set_web_session при восстановлении сессии.
-    if wb_client.web_degraded and not wb_client.web_alerted:
-        wb_client.web_alerted = True
-        await _alert_all(bot, "⚠️ <b>Веб-сессия WB упала</b> — работаю на мобильном guardium.\n"
-                              "👉 Проверь /wblogin (перелогинься) и что guardium свежий.")
+    # Веб-путь выключился → один алерт на каждое падение (владелец просил о каждом).
+    # Флаг alerted сбрасывается, когда путь снова заработал.
+    for path, text in (
+        (wb_client.web_catalog, "⚠️ <b>Веб-каталог WB упал</b> — розница идёт через api-ios (guardium).\n"
+                                "👉 Проверь прокси, /wblogin и что guardium свежий."),
+        (wb_client.web_b2b, "⚠️ <b>Веб бизнес-цены WB упали</b> — беру через api-ios (Bearer).\n"
+                            "👉 Перелогинься: /wblogin."),
+    ):
+        if path.down and not path.alerted:
+            path.alerted = True
+            await alert_all(bot, text)
     if wb_client.b2b_fail_streak >= 3 and not wb_client.bearer_alerted:
         wb_client.bearer_alerted = True
-        await _alert_all(bot, BEARER_ALERT)
+        await alert_all(bot, BEARER_ALERT)
     elif wb_client.b2b_fail_streak == 0:
         wb_client.bearer_alerted = False
     # guardium (каталог): шумим один раз, флаг сбрасывает set_guardium
     problem = _guardium_problem()
     if problem and not wb_client.guardium_alerted:
         wb_client.guardium_alerted = True
-        await _alert_all(bot, f"‼️ <b>GUARDIUM WB</b>: {problem}.\n"
+        await alert_all(bot, f"‼️ <b>GUARDIUM WB</b>: {problem}.\n"
                               "👉 Сними новый из приложения и пришли кнопкой «🔑 Токены».")
 
 

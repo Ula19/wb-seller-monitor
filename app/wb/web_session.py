@@ -25,12 +25,19 @@ PHONE_SEL = "#phone-number input, input#phone-number, [data-test-id=phone_input]
 LAUNCH_ARGS = ["--no-sandbox", "--disable-dev-shm-usage"]
 
 
-def _web_proxy() -> str | None:
+def web_proxy() -> str | None:
     """Выделенный прокси для веб-сессии: wb_web_proxy, иначе первый из wb_proxies."""
     if settings.wb_web_proxy.strip():
         return settings.wb_web_proxy.strip()
     first = [x.strip() for x in settings.wb_proxies.split(",") if x.strip()]
     return first[0] if first else None
+
+
+def curl_proxy(url: str | None) -> str | None:
+    """curl_cffi к socks5-прокси требует socks5h (remote DNS), иначе ошибка 97."""
+    if url and url.startswith("socks5://"):
+        return "socks5h://" + url[len("socks5://"):]
+    return url
 
 
 def _pw_proxy(url: str | None):
@@ -45,8 +52,16 @@ def _pw_proxy(url: str | None):
     return d
 
 
-def cookie_header(storage_state: dict | str | None) -> str:
-    """Собирает заголовок Cookie для wildberries.ru из storageState (для curl_cffi)."""
+# куки, по которым WB узнаёт аккаунт. Без них остаются только антибот-куки
+# (x_wbaas_token и т.п.) — запрос идёт как от анонима, цена = розница.
+ACCOUNT_COOKIE_PREFIXES = ("wbid", "wbx-validation", "WILDAUTH")
+
+
+def cookie_header(storage_state: dict | str | None, *, anonymous: bool = False) -> str:
+    """Собирает заголовок Cookie для wildberries.ru из storageState (для curl_cffi).
+
+    anonymous=True — без кук аккаунта (для розничного каталога).
+    """
     if not storage_state:
         return ""
     if isinstance(storage_state, str):
@@ -54,7 +69,8 @@ def cookie_header(storage_state: dict | str | None) -> str:
     pairs = [
         f"{c['name']}={c['value']}"
         for c in storage_state.get("cookies", [])
-        if "wildberries" in c.get("domain", "") or "wb.ru" in c.get("domain", "")
+        if ("wildberries" in c.get("domain", "") or "wb.ru" in c.get("domain", ""))
+        and not (anonymous and c["name"].startswith(ACCOUNT_COOKIE_PREFIXES))
     ]
     return "; ".join(pairs)
 
@@ -72,7 +88,7 @@ async def login(phone: str, get_code) -> dict | None:
     """
     from patchright.async_api import async_playwright
 
-    proxy = _pw_proxy(_web_proxy())
+    proxy = _pw_proxy(web_proxy())
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=False, proxy=proxy, args=LAUNCH_ARGS)
         try:
@@ -122,7 +138,7 @@ async def refresh(storage_state: dict | str) -> dict | None:
 
     if isinstance(storage_state, str):
         storage_state = json.loads(storage_state)
-    proxy = _pw_proxy(_web_proxy())
+    proxy = _pw_proxy(web_proxy())
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=False, proxy=proxy, args=LAUNCH_ARGS)
         try:
@@ -153,4 +169,8 @@ if __name__ == "__main__":  # self-check чистых функций (без б�
     assert is_logged(st) is True
     assert is_logged({"cookies": []}) is False
     assert cookie_header(json.dumps(st)) == h  # строка и dict дают одно
+    st["cookies"].append({"name": "wbx-validation-key", "value": "v", "domain": ".wildberries.ru"})
+    anon = cookie_header(st, anonymous=True)
+    assert anon == "x_wbaas_token=xyz", anon  # аноним: только антибот, без кук аккаунта
+    assert curl_proxy("socks5://h:1") == "socks5h://h:1" and curl_proxy(None) is None
     print("ok")
