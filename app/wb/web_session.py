@@ -213,6 +213,9 @@ async def refresh(storage_state: dict | str) -> dict | None:
             await browser.close()
 
 
+MINT_WAIT_SEC = 45  # сколько ждём запрос каталога в браузере
+
+
 async def mint_antibot(supplier_id: int) -> dict | None:
     """Свежая антибот-кука: анонимный браузер открывает страницу продавца и ловит
     настоящий запрос каталога — его куки (x_wbaas_token…) и заголовки браузера.
@@ -232,16 +235,26 @@ async def mint_antibot(supplier_id: int) -> dict | None:
         try:
             page = await (await browser.new_context(locale="ru-RU")).new_page()
             page.on("response", on_resp)
-            await page.goto(SELLER_URL.format(supplier_id), wait_until="domcontentloaded")
-            for _ in range(30):  # антибот решается JS-ом, каталог приходит через секунды
+            # не ждём загрузку страницы (через прокси бывает >30с) — ждём сам запрос каталога
+            await page.goto(SELLER_URL.format(supplier_id), wait_until="commit", timeout=MINT_WAIT_SEC * 1000)
+            for _ in range(MINT_WAIT_SEC):  # антибот решается JS-ом, каталог приходит через секунды
                 if got:
                     break
-                await page.mouse.wheel(0, 3000)
+                try:
+                    await page.mouse.wheel(0, 3000)
+                except Exception:
+                    pass  # страница ещё грузится — крутить нечего
                 await asyncio.sleep(1)
+            if not got:  # медленный прокси или страница-проверка WB — по заголовку видно
+                try:
+                    title = await page.title()
+                except Exception:
+                    title = "?"
+                log.warning("антибот: запрос каталога не пойман за %dс (продавец %s), страница %s «%s»",
+                            MINT_WAIT_SEC, supplier_id, page.url, title[:80])
         finally:
             await browser.close()
     if not got:
-        log.warning("антибот: запрос каталога не пойман (продавец %s) — антибот не пройден?", supplier_id)
         return None
     hh = got[0]
     cookie = hh.get("cookie", "")

@@ -92,10 +92,14 @@ class _WebPath:
     """
     FAILS_TO_DOWN = 3
     RETRY_AFTER = 15 * 60
+    # сбои ближе этого — один сбой: упавший выпуск антибота роняет все магазины цикла
+    # разом, а выключать надо за 3 плохих ЦИКЛА, не за 3 магазина
+    FAIL_DEDUP_SEC = 30
 
     def __init__(self, name: str) -> None:
         self.name = name
         self.fails = 0
+        self.last_fail: float | None = None  # monotonic последнего засчитанного сбоя
         self.down_since: float | None = None  # monotonic, когда выключили
         self.alerted = False  # уже предупредили о падении (сбрасывает ok())
 
@@ -111,10 +115,14 @@ class _WebPath:
         if self.down:
             log.info("%s: снова работает", self.name)
         self.fails = 0
+        self.last_fail = None
         self.down_since = None
         self.alerted = False
 
     def fail(self, now: float) -> None:
+        if not self.down and self.last_fail is not None and now - self.last_fail < self.FAIL_DEDUP_SEC:
+            return  # тот же цикл — уже засчитан
+        self.last_fail = now
         self.fails += 1
         # уже выключен (неудачная повторная проба) — откладываем следующую пробу
         if self.down or self.fails >= self.FAILS_TO_DOWN:
@@ -528,18 +536,23 @@ if __name__ == "__main__":  # self-check выбора пути: веб/api-ios, 
             web_cat.return_value = []
             assert [p.nm_id for p in await c.fetch_seller_catalog(1)] == [9]
             assert not c.web_catalog.down and c.web_catalog.fails == 0
-            # 3) два сбоя — ещё не выключен, третий — выключен
+            # 3) сбои всех магазинов одного цикла = один сбой; три цикла подряд — выключен
             web_cat.return_value = None
-            await c.fetch_seller_catalog(1); await c.fetch_seller_catalog(1)
+            for _ in range(5):
+                await c.fetch_seller_catalog(1)
+            assert c.web_catalog.fails == 1 and not c.web_catalog.down
+            clock.return_value = 1000.0 + 60
+            await c.fetch_seller_catalog(1)
             assert not c.web_catalog.down
+            clock.return_value = 1000.0 + 120
             await c.fetch_seller_catalog(1)
             assert c.web_catalog.down
             # 4) пока выключен — в веб не ходим; через 15 мин пробуем снова и поднимаемся
             calls = web_cat.await_count
-            clock.return_value = 1000.0 + 60
+            clock.return_value = 1000.0 + 180
             await c.fetch_seller_catalog(1)
             assert web_cat.await_count == calls
-            clock.return_value = 1000.0 + _WebPath.RETRY_AFTER
+            clock.return_value = 1000.0 + 120 + _WebPath.RETRY_AFTER
             web_cat.return_value = [prod(1)]
             await c.fetch_seller_catalog(1)
             assert not c.web_catalog.down

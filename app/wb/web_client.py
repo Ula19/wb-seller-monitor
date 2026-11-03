@@ -173,7 +173,8 @@ class WebClient:
             try:
                 return _items(r)
             except Exception:
-                log.warning("%s: неверный JSON", what)
+                log.warning("%s: неверный JSON, тип=%s, байт=%d, начало: %r", what,
+                            r.headers.get("content-type"), len(r.content), r.text[:200])
                 return None
         return None
 
