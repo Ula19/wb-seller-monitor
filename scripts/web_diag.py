@@ -7,7 +7,7 @@
 
 Запуск в контейнере (~35 запросов к WB + один заход браузером):
     docker compose cp scripts/web_diag.py bot:/app/scripts/web_diag.py
-    docker compose exec bot env PYTHONPATH=/app python scripts/web_diag.py <supplier_id> [минут_наблюдения]
+    docker compose exec bot env PYTHONPATH=/app python scripts/web_diag.py <supplier_id> [минут_наблюдения] [anon]
 """
 import asyncio
 import json
@@ -21,20 +21,25 @@ from patchright.async_api import async_playwright
 from app.db import repo
 from app.db.base import Session, engine
 from app.wb.web_client import B2B_PARAMS, DETAIL_URL
-from app.wb.web_session import HOME_URL, LAUNCH_ARGS, _pw_proxy, cookie_header, curl_proxy, is_logged, web_proxy
+from app.wb.web_session import (ACCOUNT_COOKIE_PREFIXES, HOME_URL, LAUNCH_ARGS, _for_www, _pw_proxy,
+                                cookie_header, curl_proxy, is_logged, web_proxy)
 
-SUP = int(sys.argv[1]) if len(sys.argv) > 1 else 4145836
-WATCH_MIN = int(sys.argv[2]) if len(sys.argv) > 2 else 0
+# аргументы: <supplier_id> [минут_наблюдения] [anon]
+# anon — браузер БЕЗ кук аккаунта (как будущий перевыпуск антибот-куки в keeper)
+NUMS = [int(a) for a in sys.argv[1:] if a.isdigit()]
+SUP = NUMS[0] if NUMS else 4145836
+WATCH_MIN = NUMS[1] if len(NUMS) > 1 else 0
+ANON = "anon" in sys.argv[1:]
 SKIP = {"host", "content-length", "connection"}
 
 
-async def capture(state: str):
+async def capture(state: str | None):
     """Заходим браузером на страницу продавца и ловим запрос каталога с его заголовками."""
     got = []
     async with async_playwright() as p:
         b = await p.chromium.launch(headless=False, proxy=_pw_proxy(web_proxy()), args=LAUNCH_ARGS)
         try:
-            ctx = await b.new_context(locale="ru-RU", storage_state=json.loads(state))
+            ctx = await b.new_context(locale="ru-RU", **({"storage_state": json.loads(state)} if state else {}))
             page = await ctx.new_page()
 
             async def on_resp(r):
@@ -103,7 +108,8 @@ async def main():
             return
         print("сессия в БД залогинена на сайте (куки www):", "ДА" if is_logged(state) else "НЕТ")
         print(f"прокси веба: {web_proxy() or 'НЕТ'}; ловлю запрос каталога браузером…")
-        cap = await capture(state)
+        print("режим: браузер АНОНИМНЫЙ (без кук аккаунта)" if ANON else "режим: браузер с сессией из БД")
+        cap = await capture(None if ANON else state)
         if not cap:
             print("запрос каталога браузером НЕ пойман (антибот? пустой магазин?)")
             return
@@ -131,6 +137,14 @@ async def main():
                 await hit(s, "7 detail b2b + куки аккаунта", b2b, {**H, "cookie": full_ck})
                 await hit(s, "8 detail b2b + куки браузера", b2b, {**H, "cookie": br_cookie})
                 await hit(s, "9 detail без b2b + анонимные куки", plain, {**H, "cookie": anon_ck})
+                # свежий антибот браузера + ТОЛЬКО куки аккаунта из БД (их старый x_wbaas_token не берём)
+                acc = "; ".join(f"{c['name']}={c['value']}" for c in json.loads(state)["cookies"]
+                                if _for_www(c) and c["name"].startswith(ACCOUNT_COOKIE_PREFIXES))
+                mixed = f"{br_cookie}; {acc}" if acc else br_cookie
+                print(f"  (кук аккаунта из БД: {len(acc.split('; ')) if acc else 0})")
+                await hit(s, "10 detail b2b: антибот браузера + куки аккаунта БД", b2b, {**H, "cookie": mixed})
+                await hit(s, "11 каталог: антибот браузера + куки аккаунта БД", f"{url}&nc={time.time_ns()}",
+                          {**H, "cookie": mixed})
             # бюджет запросов: 20 подряд (пауза 1с) кукой бота с полной банкой — где начнётся 498
             sep = "&" if "?" in url else "?"
             codes = []
