@@ -209,7 +209,7 @@ async def _check_tokens_health(bot) -> None:
     # Флаг alerted сбрасывается, когда путь снова заработал.
     for path, text in (
         (wb_client.web_catalog, "⚠️ <b>Веб-каталог WB упал</b> — розница идёт через api-ios (guardium).\n"
-                                "👉 Проверь прокси, /wblogin и что guardium свежий."),
+                                "👉 Проверь прокси и логи «антибот»; для api-ios нужен свежий guardium."),
         (wb_client.web_b2b, "⚠️ <b>Веб бизнес-цены WB упали</b> — беру через api-ios (Bearer).\n"
                             "👉 Перелогинься: /wblogin."),
     ):

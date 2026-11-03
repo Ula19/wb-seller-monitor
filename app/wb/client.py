@@ -514,8 +514,8 @@ if __name__ == "__main__":  # self-check выбора пути: веб/api-ios, 
         c = WBClient()
         mobile = AsyncMock(return_value=[prod(9)])
         c._fetch_catalog_mobile = mobile
-        with patch.object(web_client, "_cookie_anon", "a"), \
-             patch.object(web_client, "_cookie_account", "acc"), \
+        with patch("app.wb.web_client.web_proxy", lambda: "http://p:1"), \
+             patch.object(web_client, "_account", "acc"), \
              patch.object(web_client, "fetch_catalog", AsyncMock()) as web_cat, \
              patch.object(web_client, "fetch_b2b_items", AsyncMock()) as web_b2b, \
              patch("time.monotonic") as clock:

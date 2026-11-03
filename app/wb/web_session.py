@@ -1,9 +1,12 @@
-"""Веб-сессия WB: логин бизнес-аккаунта через headless-браузер и поддержание кук.
+"""Веб-сессия WB через браузер: логин аккаунта, поддержание его кук, выпуск антибот-куки.
 
-Банка кук (storageState) — это кредентиал: с ней HTTP-клиент ходит в веб-каталог и
-detail БЕЗ guardium. Антибот WB ловит автоматизацию, поэтому браузер — patchright
-(стелс-форк Playwright) + headful под Xvfb + выделенный прокси (прямой IP сервера
-палится). Логин редкий (сессия живёт неделями), код приходит пушем в приложение WB.
+Две разные вещи:
+- куки АККАУНТА (storageState после логина) — живут неделями, нужны бизнес-ценам;
+- антибот-кука x_wbaas_token — живёт МИНУТЫ (проверено 2026-11-03: из анонимного
+  браузера < 5 мин, из залогиненного 10–15), выпускается анонимным браузером без
+  участия аккаунта. Без неё веб отвечает 498, без заголовков браузера — 403.
+Антибот WB ловит автоматизацию, поэтому браузер — patchright (стелс-форк Playwright)
++ headful под Xvfb + выделенный прокси (прямой IP сервера палится).
 """
 import asyncio
 import json
@@ -23,6 +26,9 @@ LOGIN_URL = "https://www.wildberries.ru/security/login"
 PHONE_SEL = "#phone-number input, input#phone-number, [data-test-id=phone_input] input"
 # в Docker под root chromium без песочницы не стартует; dev-shm мал — выносим в /tmp
 LAUNCH_ARGS = ["--no-sandbox", "--disable-dev-shm-usage"]
+SELLER_URL = "https://www.wildberries.ru/seller/{}"
+# служебные заголовки запроса браузера, которые curl ставит сам (cookie — свои)
+SKIP_HEADERS = {"host", "content-length", "connection", "cookie"}
 
 
 def web_proxy() -> str | None:
@@ -87,6 +93,19 @@ WWW_HOST = "www.wildberries.ru"
 # куки залогиненного аккаунта НА САЙТЕ (www) — их ставит callback после обмена кода.
 # Одних SSO-кук id.wb.ru мало: сайт по ним аноним, бизнес-цен не будет.
 WWW_SESSION_COOKIES = ("wbx-validation-key", "wbid-sdk-id-token", "wbid-sdk-refresh")
+
+
+def account_cookies(storage_state: dict | str | None) -> str:
+    """Только куки аккаунта для www (без антибота — он выпускается отдельно и свежий)."""
+    if not storage_state:
+        return ""
+    if isinstance(storage_state, str):
+        storage_state = json.loads(storage_state)
+    return "; ".join(
+        f"{c['name']}={c['value']}"
+        for c in storage_state.get("cookies", [])
+        if _for_www(c) and c["name"].startswith(ACCOUNT_COOKIE_PREFIXES)
+    )
 
 
 def is_logged(storage_state: dict | str | None) -> bool:
@@ -183,15 +202,54 @@ async def refresh(storage_state: dict | str) -> dict | None:
             page = await ctx.new_page()
             await page.goto(HOME_URL, wait_until="domcontentloaded")
             await asyncio.sleep(5)
-            body = (await page.inner_text("body"))[:300]
             state = await ctx.storage_state()
-            if "Войти" in body and not is_logged(state):
-                log.warning("веб-рефреш: сессия протухла")
+            # по кукам сайта, а не по слову «Войти» — оно есть и на залогиненной странице
+            if not is_logged(state):
+                log.warning("веб-рефреш: сессия протухла (кук сайта нет)")
                 return None
             log.info("веб-рефреш: сессия жива, куки обновлены")
             return state
         finally:
             await browser.close()
+
+
+async def mint_antibot(supplier_id: int) -> dict | None:
+    """Свежая антибот-кука: анонимный браузер открывает страницу продавца и ловит
+    настоящий запрос каталога — его куки (x_wbaas_token…) и заголовки браузера.
+
+    Аккаунт НЕ участвует (контекст без кук). Возвращает {"cookie", "headers"} или None.
+    """
+    from patchright.async_api import async_playwright
+
+    got: list = []
+
+    async def on_resp(r):
+        if "u-catalog/sellers" in r.url and "/catalog" in r.url and r.status == 200:
+            got.append(await r.request.all_headers())
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=False, proxy=_pw_proxy(web_proxy()), args=LAUNCH_ARGS)
+        try:
+            page = await (await browser.new_context(locale="ru-RU")).new_page()
+            page.on("response", on_resp)
+            await page.goto(SELLER_URL.format(supplier_id), wait_until="domcontentloaded")
+            for _ in range(30):  # антибот решается JS-ом, каталог приходит через секунды
+                if got:
+                    break
+                await page.mouse.wheel(0, 3000)
+                await asyncio.sleep(1)
+        finally:
+            await browser.close()
+    if not got:
+        log.warning("антибот: запрос каталога не пойман (продавец %s) — антибот не пройден?", supplier_id)
+        return None
+    hh = got[0]
+    cookie = hh.get("cookie", "")
+    if "x_wbaas_token" not in cookie:
+        log.warning("антибот: в запросе браузера нет x_wbaas_token")
+        return None
+    headers = {k: v for k, v in hh.items() if not k.startswith(":") and k.lower() not in SKIP_HEADERS}
+    return {"cookie": cookie, "headers": headers}
 
 
 if __name__ == "__main__":  # self-check чистых функций (без браузера)
@@ -215,4 +273,6 @@ if __name__ == "__main__":  # self-check чистых функций (без б�
     anon = cookie_header(st, anonymous=True)
     assert anon == "x_wbaas_token=xyz", anon  # аноним: только антибот, без кук аккаунта
     assert curl_proxy("socks5://h:1") == "socks5h://h:1" and curl_proxy(None) is None
+    acc = account_cookies(st)  # только аккаунт, без антибота и чужих доменов
+    assert acc == "wbid-refresh=abc; wbx-validation-key=v", acc
     print("ok")

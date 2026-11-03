@@ -37,9 +37,9 @@ async def load_into_client() -> None:
         raw = await repo.get_setting(s, KEY)
     if raw:
         wb_client.set_web_session(raw)
-        log.info("keeper: веб-сессия загружена из БД, веб-путь активен")
+        log.info("keeper: сессия аккаунта загружена из БД — бизнес-цены через веб")
     else:
-        log.info("keeper: веб-сессии нет — работаем на мобильном пути (guardium)")
+        log.info("keeper: сессии аккаунта нет — бизнес-цены через api-ios (Bearer); /wblogin")
 
 
 async def refresh_job(bot) -> None:
@@ -54,8 +54,9 @@ async def refresh_job(bot) -> None:
         log.warning("keeper: рефреш упал: %s", e)
         return
     if state is None:
-        wb_client.set_web_session("")  # куки сняты → клиент уходит на мобильный fallback
-        await alert_all(bot, "‼️ <b>Веб-сессия WB протухла</b>. Войди заново: /wblogin")
+        wb_client.set_web_session("")  # куки аккаунта сняты → бизнес-цены через api-ios
+        await alert_all(bot, "‼️ <b>Сессия аккаунта WB протухла</b> — бизнес-цены ушли на api-ios (Bearer).\n"
+                             "👉 Войди заново: /wblogin")
         return
     await _save(state)
     wb_client.set_web_session(state)
@@ -87,7 +88,7 @@ async def start_login(bot, uid: int, phone: str) -> str:
     async def run():
         try:
             ok = await _do_login(phone, get_code)
-            msg = ("✅ Вошёл в WB — веб-путь активен, guardium больше не нужен."
+            msg = ("✅ Вошёл в WB — бизнес-цены идут через веб."
                    if ok else "❌ Логин не удался (неверный код или антибот). Попробуй ещё раз: /wblogin")
         except Exception as e:
             log.exception("keeper: логин упал")

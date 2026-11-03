@@ -32,8 +32,8 @@ async def load_tokens():
     await keeper.load_into_client()
     print("guardium истекает:", guardium_expires_at(wb_client.guardium) or "нет/не разобран")
     print("Bearer:", "есть" if wb_client.bearer else "НЕТ")
-    print("веб-куки:", "есть" if web_client.ready else "НЕТ",
-          "| бизнес-аккаунт:", "есть" if web_client.account_ready else "НЕТ")
+    print("веб (прокси):", "есть" if web_client.ready else "НЕТ",
+          "| бизнес-аккаунт:", "есть" if web_client.account_ready else "НЕТ (/wblogin)")
 
 
 async def b2b_prices(fetch, products) -> dict[int, int] | None:
