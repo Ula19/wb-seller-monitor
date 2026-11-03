@@ -69,16 +69,53 @@ def cookie_header(storage_state: dict | str | None, *, anonymous: bool = False) 
     pairs = [
         f"{c['name']}={c['value']}"
         for c in storage_state.get("cookies", [])
-        if ("wildberries" in c.get("domain", "") or "wb.ru" in c.get("domain", ""))
-        and not (anonymous and c["name"].startswith(ACCOUNT_COOKIE_PREFIXES))
+        if _for_www(c) and not (anonymous and c["name"].startswith(ACCOUNT_COOKIE_PREFIXES))
     ]
     return "; ".join(pairs)
 
 
+def _for_www(cookie: dict) -> bool:
+    """Кука уходит на www.wildberries.ru (как решил бы браузер по домену).
+
+    SSO-куки id.wb.ru (wbid-refresh и т.п.) на www браузер не шлёт — и мы не шлём.
+    """
+    domain = cookie.get("domain", "").lstrip(".")
+    return domain == WWW_HOST or WWW_HOST.endswith("." + domain)
+
+
+WWW_HOST = "www.wildberries.ru"
+# куки залогиненного аккаунта НА САЙТЕ (www) — их ставит callback после обмена кода.
+# Одних SSO-кук id.wb.ru мало: сайт по ним аноним, бизнес-цен не будет.
+WWW_SESSION_COOKIES = ("wbx-validation-key", "wbid-sdk-id-token", "wbid-sdk-refresh")
+
+
 def is_logged(storage_state: dict | str | None) -> bool:
-    """Есть ли в банке кук признаки залогиненного аккаунта (refresh/validation)."""
-    header = cookie_header(storage_state)
-    return any(k in header for k in ("wbid-refresh", "wbid-validation", "wbx-validation"))
+    """Залогинен ли аккаунт именно на сайте (www), а не только в SSO id.wb.ru."""
+    if not storage_state:
+        return False
+    if isinstance(storage_state, str):
+        storage_state = json.loads(storage_state)
+    return any(c["name"] in WWW_SESSION_COOKIES and _for_www(c)
+               for c in storage_state.get("cookies", []))
+
+
+async def _wait_www_session(ctx, page) -> dict:
+    """После callback ждём, пока сайт обменяет код на куки www (до ~45с).
+
+    Раньше банку забирали сразу на callback — успевали только SSO-куки id.wb.ru,
+    и сайт оставался анонимным. Если за 30с не появились — заходим на главную
+    (она тоже доделывает вход) и ждём ещё.
+    """
+    for i in range(45):
+        state = await ctx.storage_state()
+        if is_logged(state):
+            return state
+        if i == 30:
+            await page.goto(HOME_URL, wait_until="domcontentloaded")
+        await asyncio.sleep(1)
+    names = sorted(f"{c['domain']}:{c['name']}" for c in state.get("cookies", []))
+    log.warning("веб-логин: куки сайта не появились, есть только: %s", ", ".join(names))
+    return state
 
 
 async def login(phone: str, get_code) -> dict | None:
@@ -118,8 +155,8 @@ async def login(phone: str, get_code) -> dict | None:
             try:
                 await page.wait_for_url("**/wb-id/callback**", timeout=30000)
             except Exception:
-                await asyncio.sleep(6)
-            state = await ctx.storage_state()
+                log.warning("веб-логин: редиректа на callback нет (неверный код?), жду куки сайта")
+            state = await _wait_www_session(ctx, page)
             if is_logged(state):
                 log.info("веб-логин: успех, куки аккаунта получены")
                 return state
@@ -166,10 +203,15 @@ if __name__ == "__main__":  # self-check чистых функций (без б�
     h = cookie_header(st)
     assert "wbid-refresh=abc" in h and "x_wbaas_token=xyz" in h, h
     assert "other=1" not in h, "чужой домен не должен попасть в Cookie"
-    assert is_logged(st) is True
+    assert is_logged(st) is False  # только SSO-кука — на сайте ещё аноним
+    sso = {"cookies": [{"name": "wbid-refresh", "value": "r", "domain": ".id.wb.ru"},
+                       {"name": "x_wbaas_token", "value": "t", "domain": "www.wildberries.ru"}]}
+    assert cookie_header(sso) == "x_wbaas_token=t"  # куки id.wb.ru на www не уходят
+    assert is_logged(sso) is False
     assert is_logged({"cookies": []}) is False
     assert cookie_header(json.dumps(st)) == h  # строка и dict дают одно
     st["cookies"].append({"name": "wbx-validation-key", "value": "v", "domain": ".wildberries.ru"})
+    assert is_logged(st) is True  # wbx-validation-key на .wildberries.ru = вход на сайте
     anon = cookie_header(st, anonymous=True)
     assert anon == "x_wbaas_token=xyz", anon  # аноним: только антибот, без кук аккаунта
     assert curl_proxy("socks5://h:1") == "socks5h://h:1" and curl_proxy(None) is None

@@ -5,7 +5,7 @@
 вариантах: с заголовками браузера / без, с куками браузера / аккаунта / анонимными.
 Опционально — наблюдение: раз в 5 мин повтор, чтобы понять, сколько живут заголовки.
 
-Запуск в контейнере (~15 запросов к WB + один заход браузером):
+Запуск в контейнере (~35 запросов к WB + один заход браузером):
     docker compose cp scripts/web_diag.py bot:/app/scripts/web_diag.py
     docker compose exec bot env PYTHONPATH=/app python scripts/web_diag.py <supplier_id> [минут_наблюдения]
 """
@@ -21,7 +21,7 @@ from patchright.async_api import async_playwright
 from app.db import repo
 from app.db.base import Session, engine
 from app.wb.web_client import B2B_PARAMS, DETAIL_URL
-from app.wb.web_session import HOME_URL, LAUNCH_ARGS, _pw_proxy, cookie_header, curl_proxy, web_proxy
+from app.wb.web_session import HOME_URL, LAUNCH_ARGS, _pw_proxy, cookie_header, curl_proxy, is_logged, web_proxy
 
 SUP = int(sys.argv[1]) if len(sys.argv) > 1 else 4145836
 WATCH_MIN = int(sys.argv[2]) if len(sys.argv) > 2 else 0
@@ -101,6 +101,7 @@ async def main():
         if not state:
             print("веб-сессии в БД нет — сначала /wblogin")
             return
+        print("сессия в БД залогинена на сайте (куки www):", "ДА" if is_logged(state) else "НЕТ")
         print(f"прокси веба: {web_proxy() or 'НЕТ'}; ловлю запрос каталога браузером…")
         cap = await capture(state)
         if not cap:
@@ -130,6 +131,19 @@ async def main():
                 await hit(s, "7 detail b2b + куки аккаунта", b2b, {**H, "cookie": full_ck})
                 await hit(s, "8 detail b2b + куки браузера", b2b, {**H, "cookie": br_cookie})
                 await hit(s, "9 detail без b2b + анонимные куки", plain, {**H, "cookie": anon_ck})
+            # бюджет запросов: 20 подряд (пауза 1с) кукой бота с полной банкой — где начнётся 498
+            sep = "&" if "?" in url else "?"
+            codes = []
+            for _ in range(20):
+                try:
+                    r = await s.get(f"{url}{sep}nc={time.time_ns()}", headers={**H, "cookie": full_ck})
+                    codes.append(r.status_code)
+                except Exception as e:
+                    codes.append(type(e).__name__)
+                await asyncio.sleep(1)
+            bad = next((i + 1 for i, c in enumerate(codes) if c != 200), None)
+            print("\nсерия 20 запросов (куки бота, полная банка):", " ".join(map(str, codes)))
+            print(f"  первый не-200 на запросе #{bad}" if bad else "  все 20 = 200 — бюджета в 10 запросов нет")
             for i in range(1, WATCH_MIN // 5 + 1):
                 await asyncio.sleep(300)
                 print(f"\n+{i * 5} мин — живы ли пойманные заголовки:")
