@@ -47,6 +47,8 @@ MINT_RETRY_SEC = 60
 
 
 def _items(r) -> list:
+    if not r.content:
+        return []  # страница за концом списка: WB отдаёт 200 с пустым телом
     data = r.json()
     items = data.get("products") or (data.get("data") or {}).get("products") or []
     if not isinstance(items, list):
@@ -236,7 +238,10 @@ if __name__ == "__main__":  # self-check антибота: выпуск, TTL, 49
     from unittest.mock import AsyncMock, patch
 
     def resp(code, products=()):
-        return SimpleNamespace(status_code=code, json=lambda: {"products": list(products)})
+        return SimpleNamespace(status_code=code, content=b"{}", json=lambda: {"products": list(products)})
+
+    def json_err():
+        raise ValueError("пустое тело")
 
     phone = {"id": 1, "subjectId": 515, "sizes": [{"price": {"product": 10000}}]}
 
@@ -268,6 +273,10 @@ if __name__ == "__main__":  # self-check антибота: выпуск, TTL, 49
             http.get.side_effect = [resp(498), resp(200, [phone]), resp(200, [phone])]
             assert [p.nm_id for p in await c.fetch_catalog(7)] == [1]
             assert mint.await_count == 3
+            # 3б) стр.2 = 200 с пустым телом → конец списка, товары стр.1 не теряем
+            empty = SimpleNamespace(status_code=200, content=b"", json=json_err)
+            http.get.side_effect = [resp(200, [phone]), empty]
+            assert [p.nm_id for p in await c.fetch_catalog(7)] == [1]
             http.get.side_effect = None
             # 4) бизнес-detail: свежий антибот + куки аккаунта
             http.get.return_value = resp(200, [phone])
