@@ -214,6 +214,15 @@ async def refresh(storage_state: dict | str) -> dict | None:
 
 
 MINT_WAIT_SEC = 45  # сколько ждём запрос каталога в браузере
+CLOSE_TIMEOUT_SEC = 15  # закрытие браузера/драйвера не дольше этого
+
+
+async def _bounded(coro, what: str) -> None:
+    """Ждём не дольше CLOSE_TIMEOUT_SEC; зависло/упало — пишем в лог и идём дальше."""
+    try:
+        await asyncio.wait_for(coro, CLOSE_TIMEOUT_SEC)
+    except Exception as e:
+        log.warning("антибот: %s не удалось: %s", what, type(e).__name__)
 
 
 async def mint_antibot(supplier_id: int) -> dict | None:
@@ -230,22 +239,29 @@ async def mint_antibot(supplier_id: int) -> dict | None:
         if "u-catalog/sellers" in r.url and "/catalog" in r.url and r.status == 200:
             got.append(await r.request.all_headers())
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=False, proxy=_pw_proxy(web_proxy()), args=LAUNCH_ARGS)
+    stage = "запуск браузера"
+    pw = await async_playwright().start()
+    try:
+        browser = await pw.chromium.launch(headless=False, proxy=_pw_proxy(web_proxy()), args=LAUNCH_ARGS)
         try:
+            stage = "открытие страницы"
             page = await (await browser.new_context(locale="ru-RU")).new_page()
             page.on("response", on_resp)
             # не ждём загрузку страницы (через прокси бывает >30с) — ждём сам запрос каталога
             await page.goto(SELLER_URL.format(supplier_id), wait_until="commit", timeout=MINT_WAIT_SEC * 1000)
+            stage = "ожидание каталога (прокрутка)"
             for _ in range(MINT_WAIT_SEC):  # антибот решается JS-ом, каталог приходит через секунды
                 if got:
                     break
                 try:
+                    # у wheel нет таймаута: занятая JS-ом страница его не отпустит —
+                    # от вечного зависания страхует общий таймаут выпуска в web_client
                     await page.mouse.wheel(0, 3000)
                 except Exception:
                     pass  # страница ещё грузится — крутить нечего
                 await asyncio.sleep(1)
             if not got:  # медленный прокси или страница-проверка WB — по заголовку видно
+                stage = "чтение заголовка"
                 try:
                     title = await page.title()
                 except Exception:
@@ -253,7 +269,14 @@ async def mint_antibot(supplier_id: int) -> dict | None:
                 log.warning("антибот: запрос каталога не пойман за %dс (продавец %s), страница %s «%s»",
                             MINT_WAIT_SEC, supplier_id, page.url, title[:80])
         finally:
-            await browser.close()
+            # закрытие идёт через процесс браузера, зависшая страница его не держит; но и
+            # его ограничиваем — finally выполняется и при отмене по таймауту
+            await _bounded(browser.close(), "закрытие браузера")
+    except asyncio.CancelledError:
+        log.warning("антибот: выпуск прерван по таймауту на шаге «%s» (продавец %s)", stage, supplier_id)
+        raise
+    finally:
+        await _bounded(pw.stop(), "остановка playwright")
     if not got:
         return None
     hh = got[0]

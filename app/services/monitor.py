@@ -247,7 +247,31 @@ async def _work_window() -> tuple[int | None, int | None]:
     return start, end
 
 
+# проход дольше этого = завис (норма ~30с): прерываем, следующий запуск начнёт заново.
+# 2026-11-03 завис выпуск антибота — без сторожа мониторинг стоял 15 часов молча.
+PASS_TIMEOUT_SEC = 300
+_pass_hung = False  # уже предупредили о зависании (сбрасывает удачный проход)
+
+
 async def monitoring_job(bot) -> None:
+    """Проход мониторинга под сторожем: завис — прерываем и предупреждаем владельца."""
+    global _pass_hung
+    try:
+        await asyncio.wait_for(_monitoring_pass(bot), PASS_TIMEOUT_SEC)
+    except TimeoutError:
+        log.error("мониторинг: проход дольше %d с — завис, прерван", PASS_TIMEOUT_SEC)
+        if not _pass_hung:
+            _pass_hung = True
+            await alert_all(bot, f"⚠️ Мониторинг завис (проход дольше {PASS_TIMEOUT_SEC // 60} мин) — "
+                                 "прерываю и пробую снова каждую минуту. Смотри логи бота.")
+        return
+    if _pass_hung:
+        _pass_hung = False
+        log.info("мониторинг: снова работает")
+        await alert_all(bot, "✅ Мониторинг снова работает.")
+
+
+async def _monitoring_pass(bot) -> None:
     """Единый проход по ВСЕМ магазинам раз в monitor_interval_seconds.
 
     Каждый магазин каждый цикл: каталог (розница = готовая цена),
@@ -383,4 +407,22 @@ if __name__ == "__main__":  # self-check разбора часов и рабоч
     got = sorted(served["fast"] + served["slow"])
     assert got == list(range(10)), got                      # все и без дублей
     assert len(served["fast"]) > len(served["slow"]), served  # быстрый взял больше
+    # сторож: завис → прерван, ОДИН алерт за серию; удачный проход → «снова работает»
+    async def _watchdog_demo():
+        global PASS_TIMEOUT_SEC, _monitoring_pass, alert_all
+        sent = []
+        async def fake_alert(bot, text):
+            sent.append(text)
+        async def hang(bot):
+            await asyncio.sleep(3600)
+        async def fine(bot):
+            pass
+        PASS_TIMEOUT_SEC, alert_all = 0.05, fake_alert
+        _monitoring_pass = hang
+        await monitoring_job(None); await monitoring_job(None)
+        assert len(sent) == 1 and "завис" in sent[0], sent
+        _monitoring_pass = fine
+        await monitoring_job(None); await monitoring_job(None)
+        assert len(sent) == 2 and "снова работает" in sent[1], sent
+    asyncio.run(_watchdog_demo())
     print("ok")

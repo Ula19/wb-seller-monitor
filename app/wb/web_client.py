@@ -44,6 +44,9 @@ IMPERSONATE = "chrome"
 DEFAULT_MINT_SELLER = 4145836
 # после неудачного выпуска не мучаем браузер каждым запросом (~40с на попытку)
 MINT_RETRY_SEC = 60
+# весь выпуск не дольше этого: 2026-11-03 страница WB зациклила JS, браузер завис
+# навсегда и вместе с локом выпуска остановил мониторинг на 15 часов
+MINT_HARD_TIMEOUT_SEC = 120
 
 
 def _items(r) -> list:
@@ -129,7 +132,7 @@ class WebClient:
             if self._mint_failed_at is not None and started - self._mint_failed_at < MINT_RETRY_SEC:
                 return False  # недавно не вышло — не тратим ещё ~40с браузера
             try:
-                got = await mint_antibot(self._mint_seller)
+                got = await asyncio.wait_for(mint_antibot(self._mint_seller), MINT_HARD_TIMEOUT_SEC)
             except Exception as e:
                 log.warning("антибот: выпуск упал: %s", type(e).__name__)
                 got = None
@@ -291,6 +294,15 @@ if __name__ == "__main__":  # self-check антибота: выпуск, TTL, 49
             clock.return_value += MINT_RETRY_SEC
             await c.fetch_catalog(7)
             assert mint.await_count == calls + 1
+        # 6) браузер завис → выпуск прерывается по общему таймауту, лок отпущен
+        # (вне patch time.monotonic: на нём живут таймеры asyncio)
+        async def hang(sid):
+            await asyncio.sleep(3600)
+        c._antibot, c._mint_failed_at = "", None
+        with patch(f"{__name__}.mint_antibot", hang), patch(f"{__name__}.web_proxy", lambda: "http://p:1"), \
+             patch(f"{__name__}.MINT_HARD_TIMEOUT_SEC", 0.05):
+            assert await c.fetch_catalog(7) is None
+        assert not c._mint_lock.locked() and c._mint_failed_at is not None
         print("ok")
 
     asyncio.run(demo())
