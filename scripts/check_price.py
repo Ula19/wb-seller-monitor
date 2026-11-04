@@ -60,7 +60,7 @@ async def main():
             raise ValueError("ID продавца и число товаров должны быть положительными")
         await load_tokens()
         web_retail = await web_client.fetch_catalog(SUP)
-        ios_retail = await wb_client._fetch_catalog_mobile(SUP, slot=wb_client._direct_slot)
+        ios_retail = await wb_client._fetch_catalog_mobile(SUP, slot=wb_client._direct_slot) or []
         print(f"\nрозница: веб {cell(web_retail and len(web_retail))} товаров, "
               f"api-ios {len(ios_retail)} товаров")
         base = (web_retail or ios_retail)[:LIMIT]

@@ -50,7 +50,7 @@ async def addseller(m: Message):
     try:
         async with _pass_lock:  # не пересекаемся с минутным джобом (флуд «новинок»)
             fetched, _, _ = await sync_seller(seller, silent_seed=True)
-        await status.edit_text(f"✅ Магазин «{name or sid}» добавлен. Товаров: {len(fetched)}.")
+        await status.edit_text(f"✅ Магазин «{name or sid}» добавлен. Товаров: {len(fetched or [])}.")
     except Exception as e:
         await status.edit_text(f"⚠️ Магазин добавлен, но первичная загрузка не удалась: {e}")
 

@@ -339,11 +339,12 @@ class WBClient:
 
     async def fetch_seller_catalog(
         self, supplier_id: int, subjects: set[int] | None = None, slot: "_Slot | None" = None
-    ) -> list[NormProduct]:
+    ) -> list[NormProduct] | None:
         """Каталог магазина = розница (анонимно). Основной путь — веб, при сбое — api-ios.
 
         Пустой веб-ответ веб НЕ роняет (магазин мог остаться без смартфонов): этот
         магазин перепроверяем через api-ios, чтобы неверные веб-параметры не обнулили каталог.
+        Без guardium перепроверять нечем — верим вебу. [] — магазин пуст, None — не достучались.
         """
         now = time.monotonic()
         if web_client.ready and self.web_catalog.usable(now):
@@ -352,15 +353,15 @@ class WBClient:
                 self.web_catalog.fail(now)
             else:
                 self.web_catalog.ok()
-                if products:
-                    return products
+                if products or not self.guardium:
+                    return products  # пусто и без guardium: api-ios всё равно ответит 498
                 log.info("веб-каталог %s: пусто → перепроверяю через api-ios", supplier_id)
         return await self._fetch_catalog_mobile(supplier_id, subjects, slot)
 
     async def _fetch_catalog_mobile(
         self, supplier_id: int, subjects: set[int] | None = None, slot: "_Slot | None" = None
-    ) -> list[NormProduct]:
-        """Анонимный каталог (guardium): цена и сток витрины (`shelf_price`).
+    ) -> list[NormProduct] | None:
+        """Анонимный каталог (guardium): цена и сток витрины (`shelf_price`). None — сбой.
 
         Фильтр по предмету — на стороне WB (`xsubject`), поэтому у крупных продавцов не
         листаем тысячи лишних товаров (ХОБОТ: 1 страница вместо 57). Для розницы это и
@@ -380,15 +381,15 @@ class WBClient:
             elif r is not None and r.status_code == 200:
                 self.guardium_fail_streak = 0
             if r is None or r.status_code != 200:
-                # ошибка/бан на ЛЮБОЙ странице → отдаём пусто («магазин пропущен»),
+                # ошибка/бан на ЛЮБОЙ странице → None («магазин пропущен»),
                 # а не частичный список: иначе deactivate_missing погасит хвост
                 # ассортимента, который просто не долистали. Следующий цикл повторит.
                 # None = _get исчерпал ретраи (4×429 подряд или сетевые обрывы).
                 self._log_catalog_failure(supplier_id, page, slot, r)
-                return []
+                return None
             items = self._catalog_items(r, supplier_id, page, slot)
             if items is None:
-                return []  # Не сохраняем частичный каталог после ошибки JSON.
+                return None  # Не сохраняем частичный каталог после ошибки JSON.
             if not items:
                 break
             if settings.debug_raw and page == 1:
@@ -534,8 +535,13 @@ if __name__ == "__main__":  # self-check выбора пути: веб/api-ios, 
             assert mobile.await_count == 0
             # 2) пустой магазин: перепроверка через api-ios, но веб НЕ выключается
             web_cat.return_value = []
+            c.guardium = "g"
             assert [p.nm_id for p in await c.fetch_seller_catalog(1)] == [9]
             assert not c.web_catalog.down and c.web_catalog.fails == 0
+            # 2б) без guardium перепроверять нечем — пусто = магазин пуст, не сбой
+            c.guardium = ""
+            calls = mobile.await_count
+            assert await c.fetch_seller_catalog(1) == [] and mobile.await_count == calls
             # 3) сбои всех магазинов одного цикла = один сбой; три цикла подряд — выключен
             web_cat.return_value = None
             for _ in range(5):

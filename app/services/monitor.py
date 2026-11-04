@@ -49,6 +49,8 @@ async def sync_seller(
 ):
     """Тянет каталог, обновляет БД. Возвращает (все_товары, новые, изменения).
 
+    все_товары: [] — магазин пуст, None — каталог не получен (магазин пропущен).
+
     Розница (`b2b=False`): каталог (анонимный, веб или api-ios) уже даёт точную цену.
     Бизнес (`b2b=True`): каждый вызов навешиваем бизнес-цену отдельным detail под
     бизнес-аккаунтом (`enrich_prices`: веб-куки, fallback — Bearer) на ВСЕ товары; товары без свежей бизнес-цены
@@ -103,7 +105,7 @@ async def sync_seller(
             new = []
     log.info(
         "sync продавца %s: товаров %d, обогащено %d, новых %d, изменений %d",
-        seller.supplier_id, len(fetched), len(priced), len(new), len(changes),
+        seller.supplier_id, len(fetched or []), len(priced), len(new), len(changes),
     )
     return fetched, new, changes
 
@@ -303,7 +305,7 @@ async def _monitoring_pass(bot) -> None:
             served += 1
             try:
                 fetched = await sync_and_notify(bot, seller, slot=slot)
-                if not fetched:
+                if fetched is None:  # [] = магазин пуст, это не сбой
                     failed.append((seller, slot))
             except Exception as e:
                 log.exception("синхронизация %s упала: %s", seller.supplier_id, e)
@@ -312,7 +314,7 @@ async def _monitoring_pass(bot) -> None:
     async def _retry(seller, slot) -> None:
         try:
             fetched = await sync_and_notify(bot, seller, slot=slot)
-            if not fetched:
+            if fetched is None:
                 skipped.append(seller.supplier_id)
         except Exception as e:
             log.exception("повтор %s упал: %s", seller.supplier_id, e)

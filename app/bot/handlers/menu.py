@@ -544,7 +544,7 @@ def _start_seed(status, seller, name, sid) -> None:
             async with _pass_lock:
                 fetched, _, _ = await sync_seller(seller, silent_seed=True)
             await status.edit_text(
-                f"{tge('ok')} Магазин «{esc(name or sid)}» загружен. Товаров: {len(fetched)}.",
+                f"{tge('ok')} Магазин «{esc(name or sid)}» загружен. Товаров: {len(fetched or [])}.",
                 parse_mode="HTML",
             )
         except Exception as e:
