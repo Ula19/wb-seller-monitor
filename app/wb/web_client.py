@@ -42,8 +42,13 @@ SMARTPHONE_SUBJECT_ID = 515
 IMPERSONATE = "chrome"
 # продавец для выпуска антибот-куки, пока бот ещё не ходил ни в один каталог
 DEFAULT_MINT_SELLER = 4145836
-# после неудачного выпуска не мучаем браузер каждым запросом (~40с на попытку)
-MINT_RETRY_SEC = 60
+# после неудачного выпуска не мучаем браузер каждым запросом. 20 с, не 60: проход идёт
+# раз в минуту, и при 60 с следующий проход тоже оставался без куки (2026-11-05: 6 из 68
+# проходов слепые из-за разовых ERR_EMPTY_RESPONSE/ERR_TIMED_OUT прокси)
+MINT_RETRY_SEC = 20
+# разовый обрыв соединения: сразу повторяем выпуск ещё раз через паузу, в том же проходе
+MINT_ATTEMPTS = 2
+MINT_RETRY_PAUSE_SEC = 5
 # весь выпуск не дольше этого: 2026-11-03 страница WB зациклила JS, браузер завис
 # навсегда и вместе с локом выпуска остановил мониторинг на 15 часов
 MINT_HARD_TIMEOUT_SEC = 120
@@ -120,8 +125,8 @@ class WebClient:
             started = time.monotonic()
             if self._mint_failed_at is not None and started - self._mint_failed_at < MINT_RETRY_SEC:
                 return False  # недавно не вышло — не тратим ещё ~40с браузера
-            try:
-                got = await asyncio.wait_for(mint_antibot(self._mint_seller), MINT_HARD_TIMEOUT_SEC)
+            try:  # общий потолок на все попытки: зависший браузер не держит лок дольше
+                got = await asyncio.wait_for(self._mint_with_retry(), MINT_HARD_TIMEOUT_SEC)
             except Exception as e:
                 log.warning("антибот: выпуск упал: %s: %s", type(e).__name__, str(e)[:300])
                 got = None
@@ -134,6 +139,22 @@ class WebClient:
             self._minted_at = time.monotonic()
             log.info("антибот: выпущен за %.0fс", self._minted_at - started)
             return True
+
+    async def _mint_with_retry(self) -> dict | None:
+        """Выпуск с повтором: страница WB через прокси иногда рвётся (ERR_EMPTY_RESPONSE)."""
+        for attempt in range(1, MINT_ATTEMPTS + 1):
+            try:
+                got = await mint_antibot(self._mint_seller)
+            except Exception as e:
+                if attempt == MINT_ATTEMPTS:
+                    raise
+                log.warning("антибот: выпуск упал (попытка %d/%d, повторю через %d с): %s: %s", attempt,
+                            MINT_ATTEMPTS, MINT_RETRY_PAUSE_SEC, type(e).__name__, str(e).split("\n")[0][:200])
+                got = None
+            if got or attempt == MINT_ATTEMPTS:
+                return got
+            await asyncio.sleep(MINT_RETRY_PAUSE_SEC)
+        return None
 
     async def _get_items(self, what: str, url: str, params: dict, *,
                          account: str = "", referer: str | None = None) -> list | None:
@@ -238,6 +259,8 @@ if __name__ == "__main__":  # self-check антибота: выпуск, TTL, 49
     phone = {"id": 1, "subjectId": 515, "sizes": [{"price": {"product": 10000}}]}
 
     async def demo():
+        global MINT_RETRY_PAUSE_SEC
+        MINT_RETRY_PAUSE_SEC = 0  # self-check без настоящих 5 с паузы
         c = WebClient()
         c._throttle = AsyncMock()
         mints = iter([{"cookie": f"x_wbaas_token=t{i}", "headers": {"user-agent": "UA"}} for i in range(9)])
@@ -273,15 +296,28 @@ if __name__ == "__main__":  # self-check антибота: выпуск, TTL, 49
             http.get.return_value = resp(200, [phone])
             assert len(await c.fetch_b2b_items([1], "wbx-validation-key=acc")) == 1
             assert http.get.await_args.kwargs["headers"]["cookie"] == "x_wbaas_token=t2; wbx-validation-key=acc"
-            # 5) выпуск не удался → None (client.py уйдёт на api-ios), повтор не раньше паузы
+            # 5а) разовый обрыв прокси: первая попытка падает, повтор в том же проходе выпускает
+            calls = mint.await_count
+            fails = iter([RuntimeError("net::ERR_EMPTY_RESPONSE")])
+
+            async def flaky(sid):
+                if (e := next(fails, None)) is not None:
+                    raise e
+                return {"cookie": "x_wbaas_token=t9", "headers": {"user-agent": "UA"}}
+            mint.side_effect = flaky
+            clock.return_value += settings.web_antibot_ttl_sec
+            assert [p.nm_id for p in await c.fetch_catalog(7)] == [1]
+            assert mint.await_count == calls + 2 and c._antibot == "x_wbaas_token=t9"
+            # 5б) обе попытки не удались → None, повтор не раньше паузы, но уже в следующем проходе
             mint.side_effect = lambda sid: None
             clock.return_value += settings.web_antibot_ttl_sec
-            assert await c.fetch_catalog(7) is None
             calls = mint.await_count
-            assert await c.fetch_catalog(7) is None and mint.await_count == calls  # браузер не дёргаем
+            assert await c.fetch_catalog(7) is None and mint.await_count == calls + MINT_ATTEMPTS
+            assert await c.fetch_catalog(7) is None and mint.await_count == calls + MINT_ATTEMPTS  # браузер не дёргаем
             clock.return_value += MINT_RETRY_SEC
             await c.fetch_catalog(7)
-            assert mint.await_count == calls + 1
+            assert mint.await_count == calls + 2 * MINT_ATTEMPTS
+            assert MINT_RETRY_SEC < 40  # проход раз в минуту: следующий обязан попробовать снова
         # 6) браузер завис → выпуск прерывается по общему таймауту, лок отпущен
         # (вне patch time.monotonic: на нём живут таймеры asyncio)
         async def hang(sid):

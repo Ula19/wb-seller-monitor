@@ -98,7 +98,9 @@ class _WebPath:
         self.down_since = None
         self.alerted = False
 
-    def fail(self, now: float) -> None:
+    def fail(self, now: float, fallback: bool = True) -> None:
+        """fallback=False — guardium нет, отступать некуда: магазины цикла пропущены,
+        а «выключен» означает только «давно не отвечает» (для алерта) — веб пробуем каждый цикл."""
         if not self.down and self.last_fail is not None and now - self.last_fail < self.FAIL_DEDUP_SEC:
             return  # тот же цикл — уже засчитан
         self.last_fail = now
@@ -106,11 +108,15 @@ class _WebPath:
         # уже выключен (неудачная повторная проба) — откладываем следующую пробу
         if self.down or self.fails >= self.FAILS_TO_DOWN:
             self.down_since = now
-            log.warning("%s: выключен, работаю через api-ios; сбоев подряд %d, повтор через %d мин",
-                        self.name, self.fails, self.RETRY_AFTER // 60)
+            if fallback:
+                log.warning("%s: выключен, работаю через api-ios; сбоев подряд %d, повтор через %d мин",
+                            self.name, self.fails, self.RETRY_AFTER // 60)
+            else:
+                log.warning("%s: не отвечает %d циклов подряд, guardium не задан — магазины пропущены, "
+                            "пробую каждый цикл", self.name, self.fails)
         else:
-            log.warning("%s: сбой %d/%d, в этот раз через api-ios",
-                        self.name, self.fails, self.FAILS_TO_DOWN)
+            log.warning("%s: сбой %d/%d, %s", self.name, self.fails, self.FAILS_TO_DOWN,
+                        "в этот раз через api-ios" if fallback else "guardium не задан — магазины цикла пропущены")
 
 
 class _Slot:
@@ -310,7 +316,10 @@ class WBClient:
         if web_client.ready and (self.web_catalog.usable(time.monotonic()) or not self.guardium):
             products = await web_client.fetch_catalog(supplier_id, subjects)
             if products is None:
-                self.web_catalog.fail(time.monotonic())  # время сбоя, не старта: выпуск антибота идёт до 2 мин
+                # время сбоя, не старта: выпуск антибота идёт до 2 мин
+                self.web_catalog.fail(time.monotonic(), fallback=bool(self.guardium))
+                if not self.guardium:
+                    return None  # api-ios без guardium = 498 на каждый магазин: только шум и ложный совет
             else:
                 self.web_catalog.ok()
                 if products or not self.guardium:
@@ -483,6 +492,13 @@ if __name__ == "__main__":  # self-check выбора пути: веб/api-ios, 
             calls = web_cat.await_count
             assert [p.nm_id for p in await c.fetch_seller_catalog(1)] == [1]
             assert web_cat.await_count == calls + 1 and not c.web_catalog.down
+            # 4в) без guardium веб не ответил → пропуск без api-ios (было: 498 на каждый магазин)
+            web_cat.return_value = None
+            calls = mobile.await_count
+            clock.return_value += 100
+            assert await c.fetch_seller_catalog(1) is None and mobile.await_count == calls
+            assert c.web_catalog.fails == 1  # сбой считается: на нём держится алерт «веб-каталог упал»
+            c.web_catalog.ok()
             # 5) бизнес-цены — словарь под куками аккаунта; товары каталога не трогаем
             web_b2b.return_value = [{"id": 1, "sizes": [{"price": {"product": 9000}}]}]
             ps = [prod(1), prod(2)]

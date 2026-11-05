@@ -210,7 +210,10 @@ async def _check_health(bot) -> None:
     if path.down and not path.alerted:
         path.alerted = True
         await alert_all(bot, "⚠️ <b>Веб-каталог WB упал</b> — розница идёт через api-ios (guardium).\n"
-                             "👉 Проверь прокси и логи «антибот»; для api-ios нужен свежий guardium.")
+                             "👉 Проверь прокси и логи «антибот»; для api-ios нужен свежий guardium."
+                        if wb_client.guardium else
+                        "⚠️ <b>Веб-каталог WB не отвечает 3 цикла подряд</b> — guardium не задан, отступать "
+                        "некуда: мониторинг слепой.\n👉 Проверь прокси и логи «антибот».")
     # guardium (каталог): шумим один раз, флаг сбрасывает set_guardium
     problem = _guardium_problem()
     if problem and not wb_client.guardium_alerted:
