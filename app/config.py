@@ -67,6 +67,11 @@ class Settings(BaseSettings):
     request_jitter: float = 4.0
     max_pages: int = 100
 
+    # бэкап БД владельцу в Telegram раз в сутки. Открытый ключ age (age1…): на сервере
+    # только он, закрытый — у владельца в менеджере паролей. Пусто — бэкап не делаем.
+    backup_age_recipient: str = ""
+    backup_hour: int = 4  # час по Москве
+
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8", extra="ignore"
     )

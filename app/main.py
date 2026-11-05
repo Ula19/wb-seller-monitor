@@ -11,7 +11,7 @@ from app.bot.middlewares import AuthMiddleware
 from app.config import settings
 from app.db import repo
 from app.db.base import Session
-from app.services import keeper
+from app.services import backup, keeper
 from app.services.monitor import monitoring_job, report_job
 from app.wb.client import wb_client
 
@@ -62,6 +62,8 @@ async def main() -> None:
         coalesce=True,
     )
     scheduler.add_job(report_job, "cron", minute=0, args=[bot], max_instances=1)
+    scheduler.add_job(backup.backup_job, "cron", hour=settings.backup_hour, minute=30,
+                      args=[bot], max_instances=1)
     scheduler.add_job(  # освежаем веб-сессию, чтобы куки не протухли
         keeper.refresh_job, "interval", hours=settings.web_refresh_hours,
         args=[bot], max_instances=1,

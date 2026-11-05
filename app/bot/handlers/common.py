@@ -34,7 +34,7 @@ async def help_cmd(m: Message):
     await m.answer(
         f"{tge('info')} Управление — через кнопки ниже.\n"
         "Команды тоже работают: /menu, /listsellers"
-        " (для админа: /addseller, /removeseller, /grant, /revoke, /users, /stats).\n\n"
+        " (для админа: /addseller, /removeseller, /grant, /revoke, /users, /stats, /backup).\n\n"
         + text,
         reply_markup=markup,
         parse_mode="HTML",

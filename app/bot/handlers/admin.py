@@ -7,6 +7,7 @@ from app.bot.utils import parse_seller_slug, parse_supplier_id
 from app.config import settings
 from app.db import repo
 from app.db.base import Session
+from app.services.backup import send_backup
 from app.services.monitor import _pass_lock, sync_seller
 from app.wb.client import wb_client
 
@@ -116,6 +117,16 @@ async def users(m: Message):
         suffix = f" (@{u.username})" if u.username else ""
         lines.append(f"• {u.telegram_id} — {u.role}{suffix}")
     await m.answer("\n".join(lines))
+
+
+@router.message(Command("backup"))
+async def backup_cmd(m: Message):
+    if not _is_owner(m):
+        await m.answer("⛔ Бэкап — только для владельца.")
+        return
+    status = await m.answer("⏳ Делаю бэкап БД...")
+    text = await send_backup(m.bot)
+    await status.edit_text(text)
 
 
 @router.message(Command("stats"))

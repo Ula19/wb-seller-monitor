@@ -8,7 +8,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # chromium для keeper (веб-сессия WB) + Xvfb: браузер гоняем headful под виртуальным
 # дисплеем (headless антибот WB палит). --with-deps ставит системные либы chromium.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends xvfb \
+    && apt-get install -y --no-install-recommends xvfb postgresql-client age \
     && rm -rf /var/lib/apt/lists/* \
     && patchright install --with-deps chromium
 
