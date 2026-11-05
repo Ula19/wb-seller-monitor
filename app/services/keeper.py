@@ -35,10 +35,11 @@ def has_bearer(state: dict) -> bool:
 
 
 async def save_login(uid: int, phone: str, kind: str, state: dict) -> models.WbAccount:
+    profile = state.pop(account_api.PROFILE_KEY, None)  # профиль — в колонки, не в сессию
     if not has_bearer(state):  # без Bearer не будет лимита и заказов (шаг account_state)
         log.warning("keeper: в сессии нет Bearer сайта — лимит/заказы появятся после рефреша, если он его допишет")
     async with Session() as s:
-        acc = await repo.save_account(s, uid, phone_mask(phone), kind, encrypt_json(state))
+        acc = await repo.save_account(s, uid, phone_mask(phone), kind, encrypt_json(state), profile)
         await s.commit()
         return acc
 
@@ -65,10 +66,12 @@ async def _refresh(acc: models.WbAccount, state: dict) -> dict | None:
     """Браузерный рефреш сессии; живая → сохраняем. None — протухла."""
     new = await web_session.refresh(state)
     if new is not None:
+        profile = new.pop(account_api.PROFILE_KEY, None)
         async with Session() as s:
             row = await s.get(models.WbAccount, acc.id)
             if row is not None:
                 row.state_enc = encrypt_json(new)
+                repo.apply_profile(row, profile)  # имя, полный телефон, процент выкупа — без перелогина
                 await s.commit()
     return new
 

@@ -221,19 +221,22 @@ async def items(seller_id: int | None = None, q: str = "", in_stock: bool = Fals
     q = q.strip().lower()
     rows = [(src, p) for src in srcs for p in await repo.source_products(s, src)
             if not (q and q not in f"{p.name} {p.brand or ''} {p.nm_id}".lower()) and not (in_stock and not p.stock)]
-    ago = await repo.price_ago(s, [p.nm_id for _, p in rows], datetime.now(timezone.utc) - timedelta(days=1))
+    day_ago = datetime.now(timezone.utc) - timedelta(days=1)
+    ago = await repo.price_ago(s, [p.nm_id for _, p in rows], day_ago)
     targets = await repo.user_targets(s, u.telegram_id)
     out = []
     for src, p in rows:
         w = wallet_price(p.shelf_price, accounts)
-        p24, new = ago.get(p.nm_id, (None, False))
+        p24, seen = ago.get(p.nm_id, (None, None))
+        # «новый» = появился ПОСЛЕ первой загрузки продавца и моложе суток (ассортимент при загрузке — не новинки)
+        new = bool(seen and src.seeded_at and seen > src.seeded_at and seen > day_ago)
         # лучшая цена — как в пуше «ниже цели» (неподтверждённая бизнес-цена не в счёт)
         best = best_offer(None if p.price_stale else p.price, src.b2b, p.shelf_price, accounts)
         t = targets.get(p.nm_id)
         out.append({"nm_id": p.nm_id, "name": p.name, "brand": p.brand, "url": p.url,
                     "supplier_id": src.supplier_id, "seller": src.name, "b2b": src.b2b,
                     "price": p.price, "price_stale": p.price_stale, "shelf_price": p.shelf_price,
-                    "wallet_price": w[0] if w else None, "wallet_account": w[1].label if w else None,
+                    "wallet_price": w[0] if w else None, "wallet_account": acc_title(w[1]) if w else None,
                     "price_24h": None if new else p24, "is_new": new,
                     "best_price": best[0] if best else None, "best_how": offer_text(best) if best else None,
                     "target": t.price if t else None,
@@ -242,12 +245,25 @@ async def items(seller_id: int | None = None, q: str = "", in_stock: bool = Fals
     return out
 
 
+def acc_title(a) -> str:
+    """Как называть аккаунт на сайте: имя из WB, иначе метка/маска."""
+    return a.name or a.label or a.phone_mask
+
+
 @app.get("/api/feed")
 async def feed(limit: int = Query(100, ge=1, le=500), u=Depends(user), s=Depends(db)):
-    """new — новинка, change — цена/остаток (old_* — прошлое значение), gone — пропал. Розница."""
-    return [{"nm_id": r.nm_id, "name": r.name, "supplier_id": r.supplier_id, "event": r.event,
-             "price": r.price, "stock": r.stock, "old_price": r.old_price, "old_stock": r.old_stock,
-             "at": r.at} for r in await repo.feed(s, u.telegram_id, limit)]
+    """new — новинка, change — цена/остаток (old_* — прошлое значение), gone — пропал. Розница.
+    Цена с Кошельком — от цены события с ТЕКУЩИМИ % и лимитом аккаунтов (% меняется редко)."""
+    accounts = [a for a in await repo.user_accounts(s, u.telegram_id) if a.status == "active"]
+    names = {x.supplier_id: x.name for x in await repo.list_sources(s, u.telegram_id)}
+    out = []
+    for r in await repo.feed(s, u.telegram_id, limit):
+        w = wallet_price(r.price, accounts) if r.event != "gone" else None
+        out.append({"nm_id": r.nm_id, "name": r.name, "supplier_id": r.supplier_id, "seller": names.get(r.supplier_id),
+                    "event": r.event, "price": r.price, "stock": r.stock, "old_price": r.old_price,
+                    "old_stock": r.old_stock, "at": r.at,
+                    "wallet_price": w[0] if w else None, "wallet_account": acc_title(w[1]) if w else None})
+    return out
 
 
 # ---------- цели ₽ ----------
@@ -265,6 +281,37 @@ async def put_target(nm_id: int, body: TargetIn, u=Depends(user), s=Depends(db))
     return {"nm_id": nm_id, "target": body.price}
 
 
+@app.get("/api/targets")
+async def targets_list(u=Depends(user), s=Depends(db)):
+    """Мои цели: лучшая цена сейчас (как в пуше) и сколько до цели."""
+    accounts = [a for a in await repo.user_accounts(s, u.telegram_id) if a.status == "active"]
+    targets = await repo.user_targets(s, u.telegram_id)
+    out = []
+    for src in await repo.list_sources(s, u.telegram_id):
+        for p in await repo.source_products(s, src):
+            t = targets.get(p.nm_id)
+            if t is None:
+                continue
+            best = best_offer(None if p.price_stale else p.price, src.b2b, p.shelf_price, accounts)
+            gap = best[0] - t.price if best else None
+            out.append({"nm_id": p.nm_id, "name": p.name, "url": p.url, "supplier_id": src.supplier_id,
+                        "seller": src.name, "target": t.price, "best_price": best[0] if best else None,
+                        "best_how": offer_text(best) if best else None, "gap": gap,
+                        "gap_pct": round(gap / t.price * 100, 1) if gap is not None else None,
+                        "stock": p.stock, "below": bool(best and p.stock > 0 and gap <= 0),
+                        "below_at": t.below_at, "created_at": t.created_at})
+    # цели на товары, пропавшие из выдачи: source_products их не вернёт — показываем, чтобы можно было снять
+    seen = {x["nm_id"] for x in out}
+    for nm, t in targets.items():
+        if nm not in seen:
+            it = await s.get(models.Item, nm)
+            out.append({"nm_id": nm, "name": it.name if it else None, "url": f"https://www.wildberries.ru/catalog/{nm}/detail.aspx",
+                        "supplier_id": it.supplier_id if it else None, "seller": None, "target": t.price,
+                        "best_price": None, "best_how": "нет в продаже", "gap": None, "gap_pct": None, "stock": 0,
+                        "below": False, "below_at": t.below_at, "created_at": t.created_at})
+    return out
+
+
 @app.delete("/api/targets/{nm_id}")
 async def delete_target(nm_id: int, u=Depends(user), s=Depends(db)):
     if not await repo.delete_target(s, u.telegram_id, nm_id):
@@ -274,7 +321,7 @@ async def delete_target(nm_id: int, u=Depends(user), s=Depends(db)):
 
 
 # ---------- аккаунты WB ----------
-ACC_FIELDS = ("id", "label", "phone_mask", "kind", "status", "wallet_pct", "limit_left", "monthly_limit", "max_order",
+ACC_FIELDS = ("id", "label", "phone_mask", "name", "phone", "purchase_pct", "kind", "status", "wallet_pct", "limit_left", "monthly_limit", "max_order",
               "max_rid", "wallet_balance", "bonus_balance", "state_at")
 ORDER_FIELDS = ("rid", "nm_id", "name", "brand", "price", "dst_office_id", "status_name", "group_id",
                 "status_at", "ordered_at", "expiry_at")

@@ -71,6 +71,11 @@ input:focus, select:focus { outline: 2px solid var(--accent-soft); border-color:
 
 .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; }
 .empty { color: var(--muted); text-align: center; padding: 32px 16px; }
+.lead { color: var(--muted); margin: -10px 0 16px; }
+th.sortable { cursor: pointer; user-select: none; }
+th.sortable:hover { color: var(--accent); }
+.arrow { color: var(--accent); }
+.wallet-t { color: var(--text); }
 .login { width: 100%; max-width: 380px; text-align: center; }
 .login h1 { margin-bottom: 4px; }
 .tg { min-height: 48px; margin: 20px 0 8px; display: flex; justify-content: center; }
@@ -134,9 +139,7 @@ tr.hit td { background: var(--ok-soft); }
 .pill.bad { background: var(--bad-soft); color: var(--bad); }
 .pill.g3 { background: var(--accent-soft); color: var(--accent); }
 
-/* товары + лента справа */
-.with-feed { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 20px; align-items: start; }
-.feed-side { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; position: sticky; top: 24px; max-height: calc(100vh - 48px); overflow: auto; }
+/* лента событий */
 .feed { list-style: none; margin: 0; padding: 0; }
 .ev { padding: 10px 0; border-bottom: 1px solid var(--line); display: grid; gap: 3px; }
 .ev:last-child { border-bottom: 0; }
@@ -173,12 +176,6 @@ tr.hit td { background: var(--ok-soft); }
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-/* ноутбук: таблице товаров нужна вся ширина — лента уходит под неё */
-@media (max-width: 1500px) {
-  .with-feed { grid-template-columns: minmax(0, 1fr); }
-  .feed-side { position: static; max-height: none; }
-}
-
 /* телефон: меню вниз, лента под товарами */
 @media (max-width: 768px) {
   .shell { grid-template-columns: minmax(0, 1fr); }
@@ -193,8 +190,6 @@ tr.hit td { background: var(--ok-soft); }
   .nav { flex: 1; flex-direction: column; gap: 2px; font-size: 11px; padding: 8px 4px; border-radius: 0; }
   .ico { font-size: 16px; }
   .main { padding: 16px 16px 84px; }
-  .with-feed { grid-template-columns: minmax(0, 1fr); }
-  .feed-side { position: static; max-height: none; }
   .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .acc-grid { grid-template-columns: minmax(0, 1fr); }
   .search { flex-basis: 100%; }

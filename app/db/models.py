@@ -132,7 +132,11 @@ class WbAccount(Base):
     user_id: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("users.telegram_id", ondelete="CASCADE"), index=True)
     label: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    phone_mask: Mapped[str] = mapped_column(String(32))
+    phone_mask: Mapped[str] = mapped_column(String(32))  # ключ «тот же аккаунт» при повторном входе
+    # профиль из WB (www/webapi/personalinfo): при входе и на рефреше сессии
+    name: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    phone: Mapped[str | None] = mapped_column(String(32), nullable=True)  # полностью: сайт закрытый
+    purchase_pct: Mapped[int | None] = mapped_column(Integer, nullable=True)  # процент выкупа
     kind: Mapped[str] = mapped_column(String(16), default="business")  # business | retail
     state_enc: Mapped[bytes] = mapped_column(LargeBinary)
     status: Mapped[str] = mapped_column(String(16), default="active", server_default="active")
@@ -198,6 +202,7 @@ class Target(Base):
         BigInteger, ForeignKey("items.nm_id", ondelete="CASCADE"), primary_key=True)
     price: Mapped[int] = mapped_column(Integer)
     below: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    below_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)  # последнее срабатывание
     created_at: Mapped[datetime] = _now()
 
 

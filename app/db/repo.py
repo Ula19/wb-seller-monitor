@@ -184,17 +184,23 @@ async def feed(s, uid: int, limit: int = 100) -> list:
     return list(res.all())
 
 
-async def price_ago(s, nm_ids, at: datetime) -> dict[int, tuple[int | None, bool]]:
-    """nm_id → (розничная цена на момент `at`, товар новее `at`). Новому Δ не считаем."""
+async def price_ago(s, nm_ids, at: datetime) -> dict[int, tuple[int | None, datetime]]:
+    """nm_id → (база для Δ, когда товар впервые увиден).
+
+    База = розничная цена на момент `at` (последняя до него); истории старше нет — самая ранняя
+    известная (v2 живёт меньше суток, а Δ уже нужна). «Новый» решает вызывающий по first_seen_at.
+    """
     nm_ids = list(nm_ids)
     if not nm_ids:
         return {}
     h = models.PriceHistory
     last = (select(h.price).where(h.nm_id == models.Item.nm_id, h.at <= at)
             .order_by(h.at.desc(), h.id.desc()).limit(1).scalar_subquery())
-    res = await s.execute(select(models.Item.nm_id, last, models.Item.first_seen_at > at)
+    first = (select(h.price).where(h.nm_id == models.Item.nm_id)
+             .order_by(h.at, h.id).limit(1).scalar_subquery())
+    res = await s.execute(select(models.Item.nm_id, func.coalesce(last, first), models.Item.first_seen_at)
                           .where(models.Item.nm_id.in_(nm_ids)))
-    return {nm: (price, new) for nm, price, new in res.all()}
+    return {nm: (price, seen) for nm, price, seen in res.all()}
 
 
 async def count_active_items(s, supplier_id: int) -> int:
@@ -282,7 +288,18 @@ async def active_accounts(s) -> list[models.WbAccount]:
     return list(res.scalars().all())
 
 
-async def save_account(s, uid: int, phone_mask: str, kind: str, state_enc: bytes) -> models.WbAccount:
+PROFILE_FIELDS = ("name", "phone", "purchase_pct")
+
+
+def apply_profile(acc: models.WbAccount, profile: dict | None) -> None:
+    """Профиль из WB поверх аккаунта; пустые поля не затирают уже известные."""
+    for k in PROFILE_FIELDS:
+        if profile and profile.get(k) is not None:
+            setattr(acc, k, profile[k])
+
+
+async def save_account(s, uid: int, phone_mask: str, kind: str, state_enc: bytes,
+                       profile: dict | None = None) -> models.WbAccount:
     """Вход в аккаунт: тот же номер у пользователя — обновляем, иначе новый аккаунт."""
     acc = await s.scalar(select(models.WbAccount).where(
         models.WbAccount.user_id == uid, models.WbAccount.phone_mask == phone_mask))
@@ -290,6 +307,7 @@ async def save_account(s, uid: int, phone_mask: str, kind: str, state_enc: bytes
         acc = models.WbAccount(user_id=uid, phone_mask=phone_mask, label=phone_mask)
         s.add(acc)
     acc.kind, acc.state_enc, acc.status = kind, state_enc, "active"
+    apply_profile(acc, profile)
     await s.flush()
     return acc
 

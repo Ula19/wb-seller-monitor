@@ -6,9 +6,11 @@ import Items from "./pages/Items";
 import Sellers from "./pages/Sellers";
 import Accounts from "./pages/Accounts";
 import Events from "./pages/Events";
+import Targets from "./pages/Targets";
 
 const NAV = [
   { to: "/items", label: "Товары", icon: "▦" },
+  { to: "/targets", label: "Цели", icon: "◎" },
   { to: "/sellers", label: "Продавцы", icon: "★" },
   { to: "/accounts", label: "Аккаунты", icon: "◉" },
   { to: "/events", label: "События", icon: "≡" },
@@ -67,6 +69,7 @@ export default function App() {
         </header>
         <Routes>
           <Route path="/items" element={<Items />} />
+          <Route path="/targets" element={<Targets />} />
           <Route path="/sellers" element={<Sellers />} />
           <Route path="/accounts" element={<Accounts />} />
           <Route path="/events" element={<Events />} />

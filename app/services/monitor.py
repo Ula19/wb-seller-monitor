@@ -121,6 +121,7 @@ async def _check_targets(s, sources, fetched, accounts, biz_new) -> list:
         below = offer is not None and p.stock > 0 and offer[0] <= t.price
         if below and not t.below:
             hits.append((src, replace(p, price=offer[0]), [("target", t.price, offer)]))
+            t.below_at = datetime.now(ZoneInfo("UTC"))
         t.below = below
     return hits
 

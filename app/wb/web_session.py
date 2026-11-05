@@ -137,6 +137,20 @@ async def _wait_www_session(ctx, page) -> dict:
     return state
 
 
+async def _profile(page) -> dict | None:
+    """Имя, телефон, процент выкупа — в ТОМ ЖЕ браузере, он уже на сайте (personalinfo за антиботом).
+    Не вышло — None: вход и рефреш от этого не ломаются."""
+    from app.wb.account_api import PROFILE_JS, parse_profile  # account_api сам импортирует этот модуль
+    try:
+        if not page.url.startswith(HOME_URL):
+            await page.goto(HOME_URL, wait_until="domcontentloaded")
+            await asyncio.sleep(3)
+        return parse_profile(await asyncio.wait_for(page.evaluate(PROFILE_JS), 20))
+    except Exception as e:
+        log.warning("профиль WB не получен: %s: %s", type(e).__name__, str(e)[:200])
+        return None
+
+
 async def login(phone: str, get_code) -> dict | None:
     """Логин аккаунта WB по телефону. get_code() — корутина, возвращает код из пуша.
 
@@ -178,6 +192,8 @@ async def login(phone: str, get_code) -> dict | None:
             state = await _wait_www_session(ctx, page)
             if is_logged(state):
                 log.info("веб-логин: успех, куки аккаунта получены")
+                from app.wb.account_api import PROFILE_KEY
+                state[PROFILE_KEY] = await _profile(page)  # keeper заберёт и не сохранит в сессию
                 return state
             log.warning("веб-логин: куки аккаунта не появились (неверный код?)")
             return None
@@ -194,6 +210,7 @@ async def refresh(storage_state: dict | str) -> dict | None:
 
     if isinstance(storage_state, str):
         storage_state = json.loads(storage_state)
+    storage_state = {k: v for k, v in storage_state.items() if k in ("cookies", "origins")}
     proxy = _pw_proxy(web_proxy())
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=False, proxy=proxy, args=LAUNCH_ARGS)
@@ -208,6 +225,8 @@ async def refresh(storage_state: dict | str) -> dict | None:
                 log.warning("веб-рефреш: сессия протухла (кук сайта нет)")
                 return None
             log.info("веб-рефреш: сессия жива, куки обновлены")
+            from app.wb.account_api import PROFILE_KEY
+            state[PROFILE_KEY] = await _profile(page)  # имя/телефон/выкуп обновляются вместе с сессией
             return state
         finally:
             await browser.close()

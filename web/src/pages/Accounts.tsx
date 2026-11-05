@@ -99,7 +99,7 @@ function Card({ a }: { a: Account }) {
     <div className="card acc">
       <div className="acc-head">
         <div>
-          <b>{a.phone_mask}</b>
+          <b>{a.name ?? "Без имени"}</b> <span className="muted">· {a.phone ?? a.phone_mask}</span>
           <div className="muted small">{a.kind === "business" ? "Бизнес" : "Обычный"} · обновлён {time(a.state_at)}</div>
         </div>
         <span className={`pill ${a.status === "active" ? (low ? "warn" : "ok") : "bad"}`}>
@@ -111,6 +111,7 @@ function Card({ a }: { a: Account }) {
         <div><span>Баланс</span><b>{rub(a.wallet_balance)}</b></div>
         <div><span>Бонусы</span><b>{rub(a.bonus_balance)}</b></div>
         <div><span>В пути / в ПВЗ</span><b>{transit} / {pvz}</b></div>
+        <div><span>Процент выкупа</span><b>{a.purchase_pct != null ? `${a.purchase_pct}%` : "—"}</b></div>
       </div>
       {a.monthly_limit ? (
         <div className="limit">
@@ -123,7 +124,9 @@ function Card({ a }: { a: Account }) {
       ) : a.limit_left != null && <p className="small">Остаток лимита скидки: <b>{rub(a.limit_left)}</b></p>}
       <div className="acc-foot">
         <button className="link" onClick={() => setOpen(!open)}>Заказы ({a.orders.length}) {open ? "▴" : "▾"}</button>
-        <button className="link danger" onClick={() => confirm(`Удалить аккаунт ${a.phone_mask}? Сессия будет стёрта.`) && del.mutate()}>Удалить</button>
+        <button className="link danger" onClick={() => confirm(
+          `Удалить аккаунт ${[a.name, a.phone ?? a.phone_mask].filter(Boolean).join(" ")}?\n\n`
+          + "Сессия удалится, бизнес-цены и заказы под ним перестанут обновляться. Вход — заново по коду.") && del.mutate()}>Удалить</button>
       </div>
       {open && <Orders orders={a.orders} />}
     </div>

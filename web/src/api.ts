@@ -39,8 +39,14 @@ export type Item = {
   stock: number; delivery_hours: number | null;
 };
 export type FeedEvent = {
-  nm_id: number; name: string | null; supplier_id: number; event: "new" | "change" | "gone";
+  nm_id: number; name: string | null; supplier_id: number; seller: string | null; event: "new" | "change" | "gone";
   price: number | null; stock: number | null; old_price: number | null; old_stock: number | null; at: string;
+  wallet_price: number | null; wallet_account: string | null;
+};
+export type Target = {
+  nm_id: number; name: string | null; url: string; supplier_id: number | null; seller: string | null;
+  target: number; best_price: number | null; best_how: string | null; gap: number | null; gap_pct: number | null;
+  stock: number; below: boolean; below_at: string | null; created_at: string;
 };
 export type Order = {
   rid: string; nm_id: number | null; name: string | null; brand: string | null; price: number | null;
@@ -48,7 +54,8 @@ export type Order = {
   status_at: string | null; ordered_at: string | null; expiry_at: string | null;
 };
 export type Account = {
-  id: number; label: string | null; phone_mask: string; kind: "business" | "retail";
+  id: number; label: string | null; phone_mask: string; name: string | null; phone: string | null;
+  purchase_pct: number | null; kind: "business" | "retail";
   status: "active" | "relogin" | "off"; wallet_pct: number | null; limit_left: number | null;
   monthly_limit: number | null; max_order: number | null; max_rid: number | null;
   wallet_balance: number | null; bonus_balance: number | null; state_at: string | null; orders: Order[];

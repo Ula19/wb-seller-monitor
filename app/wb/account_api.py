@@ -67,6 +67,28 @@ def parse_grade(d: dict) -> int | None:
     return None
 
 
+PROFILE_KEY = "wb_profile"  # web_session кладёт профиль в возвращаемый state; keeper забирает его оттуда
+# JS в странице www: сайт сам Bearer к personalinfo не добавит — берём из localStorage, как сайт
+PROFILE_JS = """async () => {
+  const raw = localStorage.getItem('wbx__tokenData') || localStorage.getItem('wbid-oauth-sdk-access-token') || '';
+  const m = raw.match(/eyJ[\\w-]+\\.[\\w-]+\\.[\\w-]+/);
+  const h = {'x-requested-with': 'XMLHttpRequest'};
+  if (m) h.authorization = 'Bearer ' + m[0];
+  const r = await fetch('/webapi/personalinfo', {method: 'POST', headers: h, credentials: 'include'});
+  return r.ok ? await r.json() : null;
+}"""
+
+
+def parse_profile(d) -> dict | None:
+    """personalinfo → {name, phone, purchase_pct}. Аноним (нет Bearer/сессии) → None."""
+    v = (d or {}).get("value") or {}
+    if not v.get("isAuthenticated") and not v.get("firstName"):
+        return None
+    return {"name": (v.get("firstName") or "").strip() or None,
+            "phone": v.get("formattedPhoneMobile") or None,
+            "purchase_pct": v.get("purchasePercent") if isinstance(v.get("purchasePercent"), int) else None}
+
+
 def parse_orders(d: dict) -> list[dict]:
     """Позиции активных заказов: в заказе (data[]) несколько rid, ключ — uid."""
     out = []
@@ -140,6 +162,10 @@ if __name__ == "__main__":  # self-check на формах ответов из H
     apply_statuses(o, [[{"rid": "eAe.a.0.0", "status_name": "Вы оформили заказ", "group_id": "1", "date": 1 * 10**18},
                         {"rid": "eAe.a.0.0", "status_name": "Едет в пункт выдачи", "group_id": "3", "date": 2 * 10**18}]])
     assert (o[0]["status_name"], o[0]["group_id"]) == ("Едет в пункт выдачи", 3) and o[1]["status_name"] is None
+    assert parse_profile({"value": {"isAuthenticated": True, "firstName": " Анна ", "purchasePercent": 94,
+                                    "formattedPhoneMobile": "+7 916 123-45-67"}}) == \
+        {"name": "Анна", "phone": "+7 916 123-45-67", "purchase_pct": 94}
+    assert parse_profile({"value": {"isAuthenticated": False, "firstName": ""}}) is None and parse_profile(None) is None
     st = {"cookies": [], "origins": [{"origin": WWW, "localStorage": [
         {"name": "wbx__tokenData", "value": '{"token":"eyJa.eyJb.sig-1","exp":1}'}]}]}
     assert bearer(st) == "eyJa.eyJb.sig-1" and bearer({"origins": []}) is None
