@@ -229,6 +229,27 @@ async def upsert_account_prices(s, account_id: int, prices: dict[int, int]) -> N
         set_={"price": stmt.excluded.price, "priced_at": stmt.excluded.priced_at}))
 
 
+ACCOUNT_STATE_FIELDS = ("wallet_pct", "limit_left", "max_order", "max_rid", "wallet_balance", "bonus_balance")
+
+
+async def save_account_state(s, account_id: int, st: dict) -> None:
+    """Состояние из account_api.fetch: поля аккаунта + активные заказы (пропавшие rid — в архив, удаляем)."""
+    await s.execute(update(models.WbAccount).where(models.WbAccount.id == account_id).values(
+        state_at=_utcnow(), **{k: st.get(k) for k in ACCOUNT_STATE_FIELDS}))
+    orders = st.get("orders") or []
+    await s.execute(delete(models.AccountOrder).where(
+        models.AccountOrder.account_id == account_id,
+        models.AccountOrder.rid.not_in([o["rid"] for o in orders]) if orders else true()))
+    if orders:
+        cols = ("nm_id", "name", "brand", "price", "dst_office_id", "status_name", "group_id",
+                "status_at", "ordered_at", "expiry_at")
+        stmt = pg_insert(models.AccountOrder).values(
+            [{"account_id": account_id, "rid": o["rid"], **{c: o.get(c) for c in cols}} for o in orders])
+        await s.execute(stmt.on_conflict_do_update(
+            index_elements=[models.AccountOrder.account_id, models.AccountOrder.rid],
+            set_={c: stmt.excluded[c] for c in cols}))
+
+
 # ---------- настройки (key-value) ----------
 async def get_setting(s, key: str) -> str | None:
     row = await s.get(models.AppSetting, key)

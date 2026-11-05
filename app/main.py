@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -65,6 +66,10 @@ async def main() -> None:
     scheduler.add_job(  # освежаем веб-сессию, чтобы куки не протухли
         keeper.refresh_job, "interval", hours=settings.web_refresh_hours,
         args=[bot], max_instances=1,
+    )
+    scheduler.add_job(  # лимит/% Кошелька/заказы аккаунтов; 401 → рефреш → «войдите заново»
+        keeper.state_job, "interval", minutes=10, args=[bot], max_instances=1,
+        next_run_time=datetime.now(timezone.utc) + timedelta(minutes=1),
     )
     scheduler.start()
 

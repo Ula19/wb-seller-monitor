@@ -135,6 +135,34 @@ class WbAccount(Base):
     created_at: Mapped[datetime] = _now()
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    # состояние (account_api, раз в 10 мин), рубли; у бизнес-аккаунта может быть NULL
+    wallet_pct: Mapped[int | None] = mapped_column(Integer, nullable=True)  # % Кошелька
+    limit_left: Mapped[int | None] = mapped_column(Integer, nullable=True)  # остаток месячного лимита скидки
+    max_order: Mapped[int | None] = mapped_column(Integer, nullable=True)  # разовый лимит заказа
+    max_rid: Mapped[int | None] = mapped_column(Integer, nullable=True)  # лимит позиции
+    wallet_balance: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    bonus_balance: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    state_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AccountOrder(Base):
+    """Активная позиция заказа аккаунта (rid из wbxoofex). Ушла в архив — строку удаляем."""
+
+    __tablename__ = "account_orders"
+
+    account_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("wb_accounts.id", ondelete="CASCADE"), primary_key=True)
+    rid: Mapped[str] = mapped_column(String(64), primary_key=True)
+    nm_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    name: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    brand: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    price: Mapped[int | None] = mapped_column(Integer, nullable=True)  # ₽
+    dst_office_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)  # ПВЗ, адрес — потом
+    status_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    group_id: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 1 оформлен … 3 в пути, 5 в ПВЗ
+    status_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ordered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expiry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class AccountPrice(Base):

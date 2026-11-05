@@ -11,7 +11,7 @@ import logging
 from app.crypto import decrypt_json, encrypt_json
 from app.db import models, repo
 from app.db.base import Session
-from app.wb import web_session
+from app.wb import account_api, web_session
 
 log = logging.getLogger(__name__)
 
@@ -42,33 +42,82 @@ async def save_login(uid: int, phone: str, kind: str, state: dict) -> models.WbA
         return acc
 
 
+async def _relogin(bot, acc: models.WbAccount) -> None:
+    """Сессия мертва: статус relogin + сообщение владельцу аккаунта."""
+    async with Session() as s:
+        row = await s.get(models.WbAccount, acc.id)
+        if row is None:
+            return
+        row.status = "relogin"
+        await s.commit()
+    log.warning("keeper: аккаунт %s (%s) разлогинен", acc.id, acc.label)
+    try:
+        await bot.send_message(acc.user_id, f"‼️ <b>Аккаунт WB {acc.label} разлогинен</b> — "
+                                            "бизнес-цены, лимит и заказы под ним не идут.\n👉 Войди заново: /wblogin",
+                               parse_mode="HTML")
+    except Exception:
+        pass
+
+
+async def _refresh(acc: models.WbAccount, state: dict) -> dict | None:
+    """Браузерный рефреш сессии; живая → сохраняем. None — протухла."""
+    new = await web_session.refresh(state)
+    if new is not None:
+        async with Session() as s:
+            row = await s.get(models.WbAccount, acc.id)
+            if row is not None:
+                row.state_enc = encrypt_json(new)
+                await s.commit()
+    return new
+
+
 async def refresh_job(bot) -> None:
     """Освежает сессии активных аккаунтов по очереди. Протухла → «нужен вход» владельцу."""
     async with Session() as s:
         accounts = await repo.active_accounts(s)
     for acc in accounts:
         try:
-            state = await web_session.refresh(decrypt_json(acc.state_enc))
+            state = await _refresh(acc, decrypt_json(acc.state_enc))
         except Exception as e:
             log.warning("keeper: рефреш аккаунта %s упал: %s", acc.id, e)
             continue
-        async with Session() as s:
-            row = await s.get(models.WbAccount, acc.id)
-            if row is None:
-                continue
-            if state is None:
-                row.status = "relogin"
-            else:
-                row.state_enc = encrypt_json(state)
-            await s.commit()
         if state is None:
-            log.warning("keeper: аккаунт %s (%s) разлогинен", acc.id, acc.label)
+            await _relogin(bot, acc)
+
+
+async def state_job(bot) -> None:
+    """Лимит, % Кошелька, балансы и активные заказы всех активных аккаунтов.
+
+    401 = детектор разлогина, но не сразу: access живёт 30 дн., сначала один рефреш
+    и повтор; relogin — только если и после рефреша 401.
+    """
+    async with Session() as s:
+        accounts = await repo.active_accounts(s)
+    for acc in accounts:
+        state = decrypt_json(acc.state_enc)
+        try:
             try:
-                await bot.send_message(acc.user_id, f"‼️ <b>Аккаунт WB {acc.label} разлогинен</b> — "
-                                                    "бизнес-цены под ним не идут.\n👉 Войди заново: /wblogin",
-                                       parse_mode="HTML")
-            except Exception:
-                pass
+                st = await account_api.fetch(state)
+            except account_api.Unauthorized as e:
+                log.info("keeper: аккаунт %s: 401 (%s), освежаю сессию и повторяю", acc.id, e)
+                state = await _refresh(acc, state)
+                if state is None:
+                    await _relogin(bot, acc)
+                    continue
+                st = await account_api.fetch(state)
+        except account_api.Unauthorized:
+            await _relogin(bot, acc)
+            continue
+        except Exception as e:
+            log.warning("keeper: состояние аккаунта %s не получено: %s: %s", acc.id, type(e).__name__, str(e)[:200])
+            continue
+        async with Session() as s:
+            await repo.save_account_state(s, acc.id, st)
+            await s.commit()
+        log.info("keeper: аккаунт %s: Кошелёк %s%%, лимит %s ₽, заказов %d", acc.label,
+                 st.get("wallet_pct") if st.get("wallet_pct") is not None else "—",
+                 f"{st['limit_left']:,}".replace(",", " ") if st.get("limit_left") is not None else "—",
+                 len(st["orders"]))
 
 
 # ---------- логин через Telegram ----------
