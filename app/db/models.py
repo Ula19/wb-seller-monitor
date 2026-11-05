@@ -10,12 +10,14 @@ from sqlalchemy import (
     Boolean,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     LargeBinary,
     String,
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -75,7 +77,8 @@ class Item(Base):
 
 
 class PriceHistory(Base):
-    """Только изменения розничной цены/остатка (для графиков)."""
+    """События товара для графиков и ленты: new — появился, change — цена/остаток,
+    gone — пропал из выдачи (stock=0). Розничная цена."""
 
     __tablename__ = "price_history"
 
@@ -84,6 +87,7 @@ class PriceHistory(Base):
         BigInteger, ForeignKey("items.nm_id", ondelete="CASCADE"), index=True)
     price: Mapped[int | None] = mapped_column(Integer, nullable=True)
     stock: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    event: Mapped[str] = mapped_column(String(8), default="change", server_default="change")
     at: Mapped[datetime] = _now()
 
 
@@ -176,6 +180,32 @@ class AccountPrice(Base):
         BigInteger, ForeignKey("items.nm_id", ondelete="CASCADE"), primary_key=True)
     price: Mapped[int | None] = mapped_column(Integer, nullable=True)
     priced_at: Mapped[datetime] = _now()
+
+
+class WbLoginRequest(Base):
+    """Заявка сайта на вход в аккаунт WB. api пишет, worker выполняет (браузер есть только у него).
+
+    status: new → running → wait_code → done | error. Активная — одна на пользователя
+    (частичный уникальный индекс). Номер и код стираются, когда заявка завершилась.
+    """
+
+    __tablename__ = "wb_login_requests"
+    __table_args__ = (Index("uq_login_active", "user_id", unique=True,
+                            postgresql_where=text("status IN ('new', 'running', 'wait_code')")),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.telegram_id", ondelete="CASCADE"), index=True)
+    phone: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    kind: Mapped[str] = mapped_column(String(16))
+    status: Mapped[str] = mapped_column(String(16), default="new", server_default="new")
+    code: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    error: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    account_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("wb_accounts.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = _now()
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
 class AppSetting(Base):

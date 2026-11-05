@@ -1,6 +1,7 @@
 """Логика мониторинга: синхронизация магазинов, детект изменений, рассылка, отчёты."""
 
 import asyncio
+import json
 import logging
 import time
 from dataclasses import replace
@@ -104,6 +105,13 @@ async def sync_seller(supplier_id: int, *, slot=None):
         accounts = await _business_cookies(s, sources)
     if seller is None or not sources:
         return seller, [], []
+    if seller.name is None:  # добавлен с сайта: api в WB не ходит, имя подтягиваем тут
+        info = await wb_client.fetch_supplier_info(supplier_id) or {}
+        if name := info.get("trademark") or info.get("supplierName"):
+            async with Session() as s:
+                await repo.set_seller_info(s, supplier_id, name, info.get("trademark"))
+                await s.commit()
+            seller.name, seller.brand = name, info.get("trademark")
     fetched = await wb_client.fetch_seller_catalog(supplier_id, slot=slot)
     notes: list = []
     biz_new: dict[int, dict[int, int]] = {}
@@ -114,9 +122,10 @@ async def sync_seller(supplier_id: int, *, slot=None):
         async with Session() as s:
             old = await repo.get_items(s, supplier_id)
             biz_old = {a: await repo.get_account_prices(s, a, nm_ids) for a in biz_new}
-            moved = [p for p in fetched
-                     if (o := old.get(p.nm_id)) is None or (o.price, o.stock) != (p.shelf_price, p.stock)]
+            moved = [p for p in fetched if (o := old.get(p.nm_id)) is not None
+                     and ((o.price, o.stock) != (p.shelf_price, p.stock) or not o.is_active)]
             await repo.upsert_items(s, fetched)  # раньше цен аккаунтов: на items ссылается FK
+            await repo.add_history(s, [p for p in fetched if p.nm_id not in old], "new")
             await repo.add_history(s, moved)
             await repo.deactivate_missing(s, supplier_id, set(nm_ids))
             for acc_id, prices in biz_new.items():
@@ -272,6 +281,7 @@ async def _monitoring_pass(bot) -> None:
     if not _within_work_hours(start, end, now.hour):
         log.info("мониторинг пропущен: вне рабочих часов (%s–%s), сейчас %d",
                  start, end, now.hour)
+        await _heartbeat(paused=True)
         return
     async with Session() as s:
         sellers = await repo.monitored_supplier_ids(s)
@@ -334,6 +344,14 @@ async def _monitoring_pass(bot) -> None:
     )
     log.info("мониторинг: завершён за %.1fс, магазинов %d, пропущено %d%s, повтор спас %d | %s",
              took, len(sellers), len(skipped), f" {skipped}" if skipped else "", saved, per_slot)
+    await _heartbeat(took=round(took, 1), sellers=len(sellers), skipped=len(skipped))
+
+
+async def _heartbeat(**info) -> None:
+    """Пульс worker'а для сайта (/api/status): когда и как прошёл последний проход."""
+    async with Session() as s:
+        await repo.set_setting(s, repo.HEARTBEAT_KEY, json.dumps({"at": time.time(), **info}))
+        await s.commit()
 
 
 async def report_job(bot) -> None:

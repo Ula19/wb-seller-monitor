@@ -8,3 +8,5 @@ curl_cffi==0.15.0
 cryptography==50.0.2
 openpyxl==3.1.5
 pydantic-settings==2.5.2
+fastapi==0.162.0
+uvicorn==0.54.0

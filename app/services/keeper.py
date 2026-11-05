@@ -8,6 +8,8 @@
 import asyncio
 import logging
 
+from sqlalchemy import select
+
 from app.crypto import decrypt_json, encrypt_json
 from app.db import models, repo
 from app.db.base import Session
@@ -120,6 +122,84 @@ async def state_job(bot) -> None:
                  st.get("wallet_pct") if st.get("wallet_pct") is not None else "—",
                  f"{st['limit_left']:,}".replace(",", " ") if st.get("limit_left") is not None else "—",
                  len(st["orders"]))
+
+
+# ---------- вход по заявке с сайта (wb_login_requests) ----------
+LOGIN_POLL_SEC = 2  # как часто worker смотрит новые заявки
+
+
+async def _set_request(req_id: int, **values) -> None:
+    async with Session() as s:
+        row = await s.get(models.WbLoginRequest, req_id)
+        if row is not None:
+            for k, v in values.items():
+                setattr(row, k, v)
+            await s.commit()
+
+
+async def process_login_request() -> bool:
+    """Берёт самую старую новую заявку и ведёт вход до конца. False — заявок нет.
+
+    Один вход за раз на процесс: остальные ждут в new («в очереди» на сайте).
+    """
+    async with Session() as s:
+        req = await repo.next_login_request(s)
+        if req is None:
+            return False
+        req.status = "running"
+        await s.commit()
+    asked = got = False
+
+    async def get_code():
+        nonlocal asked, got
+        asked = True
+        await _set_request(req.id, status="wait_code")
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + CODE_TIMEOUT
+        while loop.time() < deadline:
+            await asyncio.sleep(1)
+            async with Session() as s:
+                code = await s.scalar(select(models.WbLoginRequest.code).where(models.WbLoginRequest.id == req.id))
+            if code:
+                got = True
+                await _set_request(req.id, status="running")
+                return code
+        return None
+
+    try:
+        state = await web_session.login(req.phone, get_code)
+        if state:
+            acc = await save_login(req.user_id, req.phone, req.kind, state)
+            status, error, acc_id = "done", None, acc.id
+        else:
+            status, acc_id = "error", None
+            error = ("неверный код или WB не пустил — попробуйте ещё раз" if got
+                     else f"код не введён за {CODE_TIMEOUT // 60} мин" if asked
+                     else "WB не показал форму входа (антибот) — попробуйте позже")
+    except Exception as e:
+        log.exception("keeper: вход по заявке %s упал", req.id)
+        status, error, acc_id = "error", f"ошибка входа: {type(e).__name__}", None
+    async with Session() as s:
+        await repo.finish_login_request(s, req.id, status, error=error, account_id=acc_id)
+        await s.commit()
+    log.info("keeper: заявка на вход %s (пользователь %s): %s%s", req.id, req.user_id, status,
+             f" — {error}" if error else "")
+    return True
+
+
+async def login_requests_loop() -> None:
+    """Фоновая задача worker'а: заявки на вход с сайта (браузер есть только тут)."""
+    async with Session() as s:
+        if n := await repo.fail_stale_logins(s):
+            log.warning("keeper: %d заявок на вход прервано прошлым рестартом", n)
+        await s.commit()
+    while True:
+        try:
+            if await process_login_request():
+                continue  # сразу следующую из очереди
+        except Exception:
+            log.exception("keeper: цикл заявок на вход")
+        await asyncio.sleep(LOGIN_POLL_SEC)
 
 
 # ---------- логин через Telegram ----------

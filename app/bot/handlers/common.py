@@ -4,6 +4,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from app.bot import views
+from app.config import settings
 from app.emoji import tge
 
 router = Router()
@@ -20,6 +21,9 @@ async def stale_callback(cb: CallbackQuery):
 @router.message(CommandStart())
 async def start(m: Message, state: FSMContext):
     await state.clear()
+    if settings.site_domain:  # v2: всё управление на сайте, бот — уведомления (меню пока в /menu)
+        await m.answer(f"Управление мониторингом — на сайте: https://{settings.site_domain}")
+        return
     text, markup = await views.view_main(m.from_user.id)
     await m.answer(
         f"{tge('wave')} Бот мониторинга продавцов Wildberries.\n\n" + text,

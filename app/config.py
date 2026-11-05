@@ -72,6 +72,12 @@ class Settings(BaseSettings):
     # ключ Fernet для сессий аккаунтов WB в БД (обязателен для /wblogin), см. app/crypto.py
     accounts_key: str = ""
 
+    # сайт (контейнер api): домен для Caddy и ссылок, секрет подписи cookie сессии (≥32 символов),
+    # запасной вход владельца по паролю — включён только при длине ≥ 20 символов
+    site_domain: str = ""
+    session_secret: str = ""
+    site_password: str = ""
+
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8", extra="ignore"
     )

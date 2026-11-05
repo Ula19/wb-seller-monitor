@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 
-from sqlalchemy import delete, func, select, true, update
+from sqlalchemy import and_, delete, func, select, true, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.db import models
@@ -108,8 +108,14 @@ async def seller_sources(s, supplier_id: int) -> tuple[models.Seller | None, lis
 
 async def mark_seeded(s, source_ids: list[int]) -> None:
     if source_ids:
+        # now() транзакции = время событий первой загрузки → лента (at > seeded_at) их не покажет
         await s.execute(update(models.Source).where(models.Source.id.in_(source_ids))
-                        .values(seeded_at=_utcnow()))
+                        .values(seeded_at=func.now()))
+
+
+async def set_seller_info(s, supplier_id: int, name: str | None, brand: str | None) -> None:
+    await s.execute(update(models.Seller).where(models.Seller.supplier_id == supplier_id)
+                    .values(name=name, brand=brand))
 
 
 async def touch_seller(s, supplier_id: int) -> None:
@@ -138,18 +144,44 @@ async def upsert_items(s, products: list[NormProduct]) -> None:
         index_elements=[models.Item.nm_id], set_={c: stmt.excluded[c] for c in cols}))
 
 
-async def add_history(s, products: list[NormProduct]) -> None:
+async def add_history(s, products: list[NormProduct], event: str = "change") -> None:
     if products:
         await s.execute(pg_insert(models.PriceHistory).values(
-            [dict(nm_id=p.nm_id, price=p.shelf_price, stock=p.stock) for p in products]))
+            [dict(nm_id=p.nm_id, price=p.shelf_price, stock=p.stock, event=event) for p in products]))
 
 
-async def deactivate_missing(s, supplier_id: int, seen_ids: set[int]) -> None:
-    """Пропавшие из выдачи → is_active=False. Пустая выдача гасит все (магазин распродан)."""
-    await s.execute(update(models.Item).where(
+async def deactivate_missing(s, supplier_id: int, seen_ids: set[int]) -> int:
+    """Пропавшие из выдачи → is_active=False + событие gone. Пустая выдача гасит все (магазин распродан)."""
+    res = await s.execute(update(models.Item).where(
         models.Item.supplier_id == supplier_id, models.Item.is_active.is_(True),
         models.Item.nm_id.not_in(seen_ids) if seen_ids else true(),
-    ).values(is_active=False))
+    ).values(is_active=False).returning(models.Item.nm_id, models.Item.price))
+    gone = res.all()
+    if gone:
+        await s.execute(pg_insert(models.PriceHistory).values(
+            [dict(nm_id=nm, price=price, stock=0, event="gone") for nm, price in gone]))
+    return len(gone)
+
+
+async def feed(s, uid: int, limit: int = 100) -> list:
+    """Лента пользователя: события товаров его продавцов после первой загрузки источника.
+
+    Строки: nm_id, event, price, stock, at, old_price, old_stock (прошлое событие), name, supplier_id.
+    """
+    # ponytail: lag по всей истории продавцов пользователя на каждый запрос; при росте — материализовать
+    h = models.PriceHistory
+    w = {"partition_by": h.nm_id, "order_by": (h.at, h.id)}
+    inner = (select(h.id, h.nm_id, h.event, h.price, h.stock, h.at,
+                    func.lag(h.price).over(**w).label("old_price"),
+                    func.lag(h.stock).over(**w).label("old_stock"),
+                    models.Item.name, models.Item.supplier_id, models.Source.seeded_at)
+             .join(models.Item, models.Item.nm_id == h.nm_id)
+             .join(models.Source, and_(models.Source.supplier_id == models.Item.supplier_id,
+                                       models.Source.user_id == uid, models.Source.kind == "seller"))
+             ).subquery()
+    res = await s.execute(select(inner).where(inner.c.seeded_at.is_not(None), inner.c.at > inner.c.seeded_at)
+                          .order_by(inner.c.at.desc(), inner.c.id.desc()).limit(limit))
+    return list(res.all())
 
 
 async def count_active_items(s, supplier_id: int) -> int:
@@ -190,6 +222,20 @@ async def business_account(s, uid: int) -> models.WbAccount | None:
     return await s.scalar(select(models.WbAccount).where(
         models.WbAccount.user_id == uid, models.WbAccount.kind == "business",
         models.WbAccount.status == "active").order_by(models.WbAccount.id).limit(1))
+
+
+async def user_accounts(s, uid: int) -> list[models.WbAccount]:
+    res = await s.execute(select(models.WbAccount).where(models.WbAccount.user_id == uid)
+                          .order_by(models.WbAccount.id))
+    return list(res.scalars().all())
+
+
+async def account_orders(s, account_ids: list[int]) -> list[models.AccountOrder]:
+    if not account_ids:
+        return []
+    res = await s.execute(select(models.AccountOrder).where(models.AccountOrder.account_id.in_(account_ids))
+                          .order_by(models.AccountOrder.ordered_at.desc().nulls_last(), models.AccountOrder.rid))
+    return list(res.scalars().all())
 
 
 async def active_accounts(s) -> list[models.WbAccount]:
@@ -250,7 +296,37 @@ async def save_account_state(s, account_id: int, st: dict) -> None:
             set_={c: stmt.excluded[c] for c in cols}))
 
 
+# ---------- заявки на вход в аккаунт WB (сайт → worker) ----------
+LOGIN_ACTIVE = ("new", "running", "wait_code")
+
+
+async def last_login_request(s, uid: int) -> models.WbLoginRequest | None:
+    return await s.scalar(select(models.WbLoginRequest).where(models.WbLoginRequest.user_id == uid)
+                          .order_by(models.WbLoginRequest.id.desc()).limit(1))
+
+
+async def next_login_request(s) -> models.WbLoginRequest | None:
+    return await s.scalar(select(models.WbLoginRequest).where(models.WbLoginRequest.status == "new")
+                          .order_by(models.WbLoginRequest.id).limit(1))
+
+
+async def finish_login_request(s, req_id: int, status: str, *, error=None, account_id=None) -> None:
+    """Итог заявки; номер и код больше не нужны — стираем."""
+    await s.execute(update(models.WbLoginRequest).where(models.WbLoginRequest.id == req_id).values(
+        status=status, error=error, account_id=account_id, phone=None, code=None))
+
+
+async def fail_stale_logins(s) -> int:
+    """Старт worker'а: заявки, которые вёл прошлый процесс, уже не доведёт никто."""
+    res = await s.execute(update(models.WbLoginRequest).where(
+        models.WbLoginRequest.status.in_(("running", "wait_code"))).values(
+        status="error", error="вход прерван перезапуском, повторите", phone=None, code=None))
+    return res.rowcount
+
+
 # ---------- настройки (key-value) ----------
+HEARTBEAT_KEY = "monitor_last_pass"  # пульс worker'а: пишет мониторинг, читает /api/status
+
 async def get_setting(s, key: str) -> str | None:
     row = await s.get(models.AppSetting, key)
     return row.value if row else None

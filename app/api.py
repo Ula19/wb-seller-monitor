@@ -1,0 +1,314 @@
+"""API сайта (свой контейнер: `uvicorn app.api:app`). Ходит ТОЛЬКО в Postgres.
+
+В WB ходит один worker (процесс бота): вход в аккаунт — заявкой в wb_login_requests,
+имя и первая загрузка продавца — на ближайшем цикле мониторинга.
+Вход на сайт — Telegram Login Widget (JS-колбэк → POST /api/auth/telegram) или
+запасной пароль владельца. Сессия — подписанная cookie, пользователь сверяется
+с белым списком users на каждом запросе (удалили — доступ закрыт сразу).
+"""
+import asyncio
+import hashlib
+import hmac
+import json
+import re
+import time
+from pathlib import Path
+from typing import Literal
+
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
+from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
+
+from app.config import settings
+from app.db import models, repo
+from app.db.base import Session
+from app.wallet import wallet_price
+
+COOKIE = "wbm_session"
+SESSION_TTL = 30 * 86400
+AUTH_MAX_AGE = 86400  # подпись виджета старше суток не принимаем
+MIN_PASSWORD = 20  # запасной вход торчит в интернет: короткий пароль = вход выключен
+WEB_DIST = Path(__file__).resolve().parent.parent / "web" / "dist"
+
+app = FastAPI(title="WB Монитор", docs_url=None, redoc_url=None, openapi_url=None)
+
+
+# ---------- сессия и вход ----------
+def _secret() -> bytes:
+    if len(settings.session_secret) < 32:
+        raise RuntimeError("SESSION_SECRET не задан (нужно ≥32 символов)")
+    return settings.session_secret.encode()
+
+
+def make_session(uid: int, now: float | None = None) -> str:
+    body = f"{uid}.{int(now or time.time()) + SESSION_TTL}"
+    return f"{body}.{hmac.new(_secret(), body.encode(), hashlib.sha256).hexdigest()}"
+
+
+def read_session(value: str | None, now: float | None = None) -> int | None:
+    try:
+        uid, exp, sig = (value or "").split(".")
+        good = hmac.new(_secret(), f"{uid}.{exp}".encode(), hashlib.sha256).hexdigest()
+        if hmac.compare_digest(sig, good) and int(exp) > (now or time.time()):
+            return int(uid)
+    except ValueError:
+        pass
+    return None
+
+
+def check_telegram(data: dict, bot_token: str, now: float | None = None) -> int | None:
+    """Подпись Telegram Login Widget: HMAC-SHA256(sha256(BOT_TOKEN), data_check_string) == hash."""
+    fields = {k: v for k, v in data.items() if k != "hash" and v is not None}
+    check = "\n".join(f"{k}={fields[k]}" for k in sorted(fields))
+    good = hmac.new(hashlib.sha256(bot_token.encode()).digest(), check.encode(), hashlib.sha256).hexdigest()
+    try:
+        fresh = (now or time.time()) - int(fields.get("auth_date", 0)) <= AUTH_MAX_AGE
+        return int(fields["id"]) if fresh and hmac.compare_digest(str(data.get("hash", "")), good) else None
+    except (KeyError, ValueError):
+        return None
+
+
+def _login(resp: Response, uid: int) -> dict:
+    # Lax, не Strict: ссылки из пушей бота — переход с чужого сайта, Strict-cookie там не придёт
+    resp.set_cookie(COOKIE, make_session(uid), max_age=SESSION_TTL, httponly=True,
+                    secure=bool(settings.site_domain), samesite="lax")
+    return {"id": uid}
+
+
+async def db():
+    async with Session() as s:
+        yield s
+
+
+async def user(request: Request, s=Depends(db)) -> models.User:
+    uid = read_session(request.cookies.get(COOKIE))
+    u = await s.get(models.User, uid) if uid else None
+    if u is None:
+        raise HTTPException(401, "нужен вход")
+    return u
+
+
+class TelegramAuth(BaseModel):
+    id: int
+    auth_date: int
+    hash: str
+    first_name: str | None = None
+    last_name: str | None = None
+    username: str | None = None
+    photo_url: str | None = None
+
+
+@app.post("/api/auth/telegram")
+async def auth_telegram(body: TelegramAuth, resp: Response, s=Depends(db)):
+    uid = check_telegram(body.model_dump(), settings.bot_token)
+    if uid is None:
+        raise HTTPException(401, "подпись Telegram не прошла")
+    u = await s.get(models.User, uid)
+    if u is None:
+        raise HTTPException(403, "доступа нет — попросите владельца добавить вас")
+    if body.username and u.username != body.username:
+        u.username = body.username
+        await s.commit()
+    return _login(resp, uid)
+
+
+class PasswordAuth(BaseModel):
+    password: str
+
+
+@app.post("/api/auth/password")
+async def auth_password(body: PasswordAuth, resp: Response):
+    pw = settings.site_password
+    if len(pw) < MIN_PASSWORD:
+        raise HTTPException(404, "вход по паролю выключен")
+    if not hmac.compare_digest(body.password.encode(), pw.encode()):
+        await asyncio.sleep(1)  # против перебора
+        raise HTTPException(401, "неверный пароль")
+    return _login(resp, settings.owner_id)
+
+
+@app.post("/api/logout")
+async def logout(resp: Response):
+    resp.delete_cookie(COOKIE)
+    return {"ok": True}
+
+
+@app.get("/api/me")
+async def me(u=Depends(user)):
+    return {"id": u.telegram_id, "username": u.username, "role": u.role}
+
+
+# ---------- продавцы ----------
+class SellerIn(BaseModel):
+    supplier_id: int = Field(gt=0)
+    b2b: bool = False
+
+
+class SellerPatch(BaseModel):
+    b2b: bool | None = None
+    enabled: bool | None = None
+
+
+async def _my_source(s, u, supplier_id: int) -> models.Source:
+    src = await repo.get_source(s, u.telegram_id, supplier_id)
+    if src is None:
+        raise HTTPException(404, "нет такого продавца")
+    return src
+
+
+@app.get("/api/sellers")
+async def sellers(u=Depends(user), s=Depends(db)):
+    srcs = await repo.list_sources(s, u.telegram_id)
+    counts = dict((await s.execute(select(models.Item.supplier_id, func.count()).where(
+        models.Item.supplier_id.in_([x.supplier_id for x in srcs]), models.Item.is_active.is_(True),
+    ).group_by(models.Item.supplier_id))).all())
+    return [{"supplier_id": x.supplier_id, "name": x.name, "brand": x.seller.brand if x.seller else None,
+             "b2b": x.b2b, "enabled": x.enabled, "loaded": x.seeded_at is not None,
+             "last_check_at": x.seller.last_check_at if x.seller else None,
+             "items": counts.get(x.supplier_id, 0)} for x in srcs]
+
+
+@app.post("/api/sellers", status_code=201)
+async def add_seller(body: SellerIn, u=Depends(user), s=Depends(db)):
+    # имя и первую загрузку (без уведомлений) сделает worker на ближайшем цикле
+    if not await repo.add_source(s, u.telegram_id, body.supplier_id, b2b=body.b2b):
+        raise HTTPException(409, "этот продавец уже добавлен")
+    await s.commit()
+    return {"supplier_id": body.supplier_id}
+
+
+@app.patch("/api/sellers/{supplier_id}")
+async def patch_seller(supplier_id: int, body: SellerPatch, u=Depends(user), s=Depends(db)):
+    src = await _my_source(s, u, supplier_id)
+    if body.b2b is not None:
+        src.b2b = body.b2b
+    if body.enabled is not None:
+        src.enabled = body.enabled
+    await s.commit()
+    return {"ok": True}
+
+
+@app.delete("/api/sellers/{supplier_id}")
+async def delete_seller(supplier_id: int, u=Depends(user), s=Depends(db)):
+    if not await repo.remove_source(s, u.telegram_id, supplier_id):
+        raise HTTPException(404, "нет такого продавца")
+    await s.commit()
+    return {"ok": True}
+
+
+# ---------- товары и лента ----------
+@app.get("/api/items")
+async def items(seller_id: int | None = None, q: str = "", in_stock: bool = False,
+                u=Depends(user), s=Depends(db)):
+    srcs = [x for x in await repo.list_sources(s, u.telegram_id) if seller_id in (None, x.supplier_id)]
+    accounts = [a for a in await repo.user_accounts(s, u.telegram_id) if a.status == "active"]
+    q = q.strip().lower()
+    out = []
+    for src in srcs:
+        for p in await repo.source_products(s, src):
+            if (q and q not in f"{p.name} {p.brand or ''}".lower()) or (in_stock and not p.stock):
+                continue
+            w = wallet_price(p.shelf_price, accounts)
+            out.append({"nm_id": p.nm_id, "name": p.name, "brand": p.brand, "url": p.url,
+                        "supplier_id": src.supplier_id, "seller": src.name, "b2b": src.b2b,
+                        "price": p.price, "price_stale": p.price_stale, "shelf_price": p.shelf_price,
+                        "wallet_price": w[0] if w else None, "wallet_account": w[1].label if w else None,
+                        "stock": p.stock, "delivery_hours": p.delivery_hours})
+    return out
+
+
+@app.get("/api/feed")
+async def feed(limit: int = Query(100, ge=1, le=500), u=Depends(user), s=Depends(db)):
+    """new — новинка, change — цена/остаток (old_* — прошлое значение), gone — пропал. Розница."""
+    return [{"nm_id": r.nm_id, "name": r.name, "supplier_id": r.supplier_id, "event": r.event,
+             "price": r.price, "stock": r.stock, "old_price": r.old_price, "old_stock": r.old_stock,
+             "at": r.at} for r in await repo.feed(s, u.telegram_id, limit)]
+
+
+# ---------- аккаунты WB ----------
+ACC_FIELDS = ("id", "label", "phone_mask", "kind", "status", "wallet_pct", "limit_left", "max_order",
+              "max_rid", "wallet_balance", "bonus_balance", "state_at")
+ORDER_FIELDS = ("rid", "nm_id", "name", "brand", "price", "dst_office_id", "status_name", "group_id",
+                "status_at", "ordered_at", "expiry_at")
+
+
+@app.get("/api/accounts")
+async def accounts(u=Depends(user), s=Depends(db)):
+    accs = await repo.user_accounts(s, u.telegram_id)
+    orders: dict[int, list] = {}
+    for o in await repo.account_orders(s, [a.id for a in accs]):
+        orders.setdefault(o.account_id, []).append({f: getattr(o, f) for f in ORDER_FIELDS})
+    return [{**{f: getattr(a, f) for f in ACC_FIELDS}, "orders": orders.get(a.id, [])} for a in accs]
+
+
+@app.delete("/api/accounts/{account_id}")
+async def delete_account(account_id: int, u=Depends(user), s=Depends(db)):
+    acc = await s.get(models.WbAccount, account_id)
+    if acc is None or acc.user_id != u.telegram_id:
+        raise HTTPException(404, "нет такого аккаунта")
+    await s.delete(acc)
+    await s.commit()
+    return {"ok": True}
+
+
+class LoginIn(BaseModel):
+    phone: str
+    kind: Literal["business", "retail"]
+
+
+class CodeIn(BaseModel):
+    code: str
+
+
+def _request_view(r: models.WbLoginRequest | None):
+    return r and {"id": r.id, "status": r.status, "kind": r.kind, "error": r.error,
+                  "account_id": r.account_id, "created_at": r.created_at}
+
+
+@app.post("/api/accounts/login", status_code=201)
+async def start_login(body: LoginIn, u=Depends(user), s=Depends(db)):
+    phone = re.sub(r"\D", "", body.phone)
+    phone = phone[1:] if len(phone) == 11 and phone[0] in "78" else phone
+    if len(phone) != 10:
+        raise HTTPException(422, "нужен номер РФ: 10 цифр после +7")
+    s.add(models.WbLoginRequest(user_id=u.telegram_id, phone=phone, kind=body.kind))
+    try:
+        await s.commit()
+    except IntegrityError:  # частичный уникальный индекс: одна активная заявка на пользователя
+        raise HTTPException(409, "вход уже идёт — дождитесь его или введите код")
+    return _request_view(await repo.last_login_request(s, u.telegram_id))
+
+
+@app.get("/api/accounts/login")
+async def login_status(u=Depends(user), s=Depends(db)):
+    """Последняя заявка: new (в очереди) → running → wait_code (введите код) → done | error."""
+    return _request_view(await repo.last_login_request(s, u.telegram_id))
+
+
+@app.post("/api/accounts/login/code")
+async def login_code(body: CodeIn, u=Depends(user), s=Depends(db)):
+    code = body.code.strip()
+    if not re.fullmatch(r"\d{4,8}", code):
+        raise HTTPException(422, "код — 4–8 цифр")
+    r = await repo.last_login_request(s, u.telegram_id)
+    if r is None or r.status != "wait_code":
+        raise HTTPException(409, "код сейчас не ждём")
+    r.code = code
+    await s.commit()
+    return {"ok": True}
+
+
+# ---------- статус worker'а ----------
+@app.get("/api/status")
+async def status(u=Depends(user), s=Depends(db)):
+    raw = await repo.get_setting(s, repo.HEARTBEAT_KEY)
+    last = json.loads(raw) if raw else None
+    alive = bool(last) and time.time() - last["at"] < max(3 * settings.monitor_interval_seconds, 300)
+    sellers_n, items_n, _ = await repo.stats(s)
+    return {"worker_alive": alive, "last_pass": last, "sellers": sellers_n, "items": items_n}
+
+
+if WEB_DIST.is_dir():  # собранный сайт с того же origin: без CORS
+    app.mount("/", StaticFiles(directory=WEB_DIST, html=True), name="web")

@@ -28,5 +28,36 @@ services:
       driver: json-file
       options: { max-size: "10m", max-file: "3" }
 
+  api:  # сайт и API: только Postgres, в WB не ходит; миграции катит bot (worker) при старте
+    build: .
+    command: ["uvicorn", "app.api:app", "--host", "0.0.0.0", "--port", "8000",
+              "--proxy-headers", "--forwarded-allow-ips", "*"]
+    env_file: .env
+    depends_on:
+      db:
+        condition: service_healthy
+      bot:
+        condition: service_started
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  caddy:  # HTTPS (Let's Encrypt сам) → api; домен из SITE_DOMAIN в .env
+    image: caddy:2-alpine
+    env_file: .env
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on: [api]
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
 volumes:
   pgdata:
+  caddy_data:
+  caddy_config:
