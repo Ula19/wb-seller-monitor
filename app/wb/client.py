@@ -345,12 +345,12 @@ class WBClient:
         Пустой веб-ответ веб НЕ роняет (магазин мог остаться без смартфонов): этот
         магазин перепроверяем через api-ios, чтобы неверные веб-параметры не обнулили каталог.
         Без guardium перепроверять нечем — верим вебу. [] — магазин пуст, None — не достучались.
+        Без guardium веб и не выключаем: api-ios без него всё равно 498, выключение = слепота.
         """
-        now = time.monotonic()
-        if web_client.ready and self.web_catalog.usable(now):
+        if web_client.ready and (self.web_catalog.usable(time.monotonic()) or not self.guardium):
             products = await web_client.fetch_catalog(supplier_id, subjects)
             if products is None:
-                self.web_catalog.fail(now)
+                self.web_catalog.fail(time.monotonic())  # время сбоя, не старта: выпуск антибота идёт до 2 мин
             else:
                 self.web_catalog.ok()
                 if products or not self.guardium:
@@ -416,8 +416,7 @@ class WBClient:
         """
         if not products:
             return set()
-        now = time.monotonic()
-        if web_client.account_ready and self.web_b2b.usable(now):
+        if web_client.account_ready and self.web_b2b.usable(time.monotonic()):
             items = await web_client.fetch_b2b_items([p.nm_id for p in products])
             if items is not None:
                 self.web_b2b.ok()
@@ -426,7 +425,7 @@ class WBClient:
                     self.b2b_fail_streak = 0  # бизнес-цены приходят — Bearer-алерт не нужен
                 log.info("веб бизнес-цены применены: %d/%d", len(priced), len(products))
                 return priced
-            self.web_b2b.fail(now)
+            self.web_b2b.fail(time.monotonic())
         return await self._enrich_prices_mobile(products, slot)
 
     @staticmethod
@@ -543,10 +542,25 @@ if __name__ == "__main__":  # self-check выбора пути: веб/api-ios, 
             calls = mobile.await_count
             assert await c.fetch_seller_catalog(1) == [] and mobile.await_count == calls
             # 3) сбои всех магазинов одного цикла = один сбой; три цикла подряд — выключен
+            c.guardium = "g"  # выключение — только когда есть куда отступить
             web_cat.return_value = None
             for _ in range(5):
                 await c.fetch_seller_catalog(1)
             assert c.web_catalog.fails == 1 and not c.web_catalog.down
+            # 3б) выпуск антибота шёл 2 мин (прод 14:30): первый магазин упал в t+120,
+            # следующий сразу за ним — это тот же цикл, сбой один (было: время старта → 2)
+            saved, c.web_catalog = c.web_catalog, _WebPath("тест")
+            delays = iter([120.0, 0.2])
+
+            async def slow(*_):
+                clock.return_value += next(delays)
+                return None
+            web_cat.side_effect = slow
+            clock.return_value = 5000.0
+            await c.fetch_seller_catalog(1)
+            await c.fetch_seller_catalog(1)
+            assert c.web_catalog.fails == 1, c.web_catalog.fails
+            web_cat.side_effect, c.web_catalog = None, saved
             clock.return_value = 1000.0 + 60
             await c.fetch_seller_catalog(1)
             assert not c.web_catalog.down
@@ -562,6 +576,12 @@ if __name__ == "__main__":  # self-check выбора пути: веб/api-ios, 
             web_cat.return_value = [prod(1)]
             await c.fetch_seller_catalog(1)
             assert not c.web_catalog.down
+            # 4б) без guardium выключенный веб не ждёт 15 мин: пробуем сразу и возвращаемся на него
+            c.web_catalog.down_since = clock.return_value
+            c.guardium = ""
+            calls = web_cat.await_count
+            assert [p.nm_id for p in await c.fetch_seller_catalog(1)] == [1]
+            assert web_cat.await_count == calls + 1 and not c.web_catalog.down
             # 5) бизнес-цена: веб-detail кладёт СВОЮ цену поверх розницы
             web_b2b.return_value = [{"id": 1, "sizes": [{"price": {"product": 9000}}]}]
             ps = [prod(1), prod(2)]

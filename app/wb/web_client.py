@@ -134,7 +134,7 @@ class WebClient:
             try:
                 got = await asyncio.wait_for(mint_antibot(self._mint_seller), MINT_HARD_TIMEOUT_SEC)
             except Exception as e:
-                log.warning("антибот: выпуск упал: %s", type(e).__name__)
+                log.warning("антибот: выпуск упал: %s: %s", type(e).__name__, str(e)[:300])
                 got = None
             if not got:
                 self._antibot = ""
