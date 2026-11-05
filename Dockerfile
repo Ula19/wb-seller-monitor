@@ -16,5 +16,6 @@ COPY . .
 
 # виртуальный дисплей для headful-браузера keeper'а. Xvfb запускаем сами в фоне:
 # xvfb-run в Docker виснет навсегда, ожидая от Xvfb сигнал готовности.
+# lock от прошлого запуска: при рестарте контейнера /tmp сохраняется, и Xvfb не стартует
 ENV DISPLAY=:99
-CMD ["sh", "-c", "Xvfb :99 -screen 0 1280x1024x24 -nolisten tcp & alembic upgrade head && exec python -m app.main"]
+CMD ["sh", "-c", "rm -f /tmp/.X99-lock; Xvfb :99 -screen 0 1280x1024x24 -nolisten tcp & alembic upgrade head && exec python -m app.main"]
