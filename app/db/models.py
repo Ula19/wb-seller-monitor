@@ -72,6 +72,9 @@ class Item(Base):
     delivery_hours: Mapped[int | None] = mapped_column(Integer, nullable=True)
     from_seller: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # промахов подряд: нет в выдаче цикла. «Пропал» — только после repo.MISS_TO_GONE (один промах —
+    # недолистанная страница WB, а не уход товара); появился — сброс в 0
+    miss_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     first_seen_at: Mapped[datetime] = _now()
     last_seen_at: Mapped[datetime] = _now()
 

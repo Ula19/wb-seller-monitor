@@ -136,10 +136,10 @@ async def upsert_items(s, products: list[NormProduct]) -> None:
     rows = [dict(nm_id=p.nm_id, supplier_id=p.supplier_id, name=p.name, brand=p.brand,
                  subject_id=p.subject_id, pics=p.pics, price=p.shelf_price, stock=p.stock,
                  delivery_hours=p.delivery_hours, from_seller=p.from_seller,
-                 is_active=True, last_seen_at=_utcnow()) for p in products]
+                 is_active=True, miss_count=0, last_seen_at=_utcnow()) for p in products]
     stmt = pg_insert(models.Item).values(rows)
     cols = ("supplier_id", "name", "brand", "subject_id", "pics", "price", "stock",
-            "delivery_hours", "from_seller", "is_active", "last_seen_at")
+            "delivery_hours", "from_seller", "is_active", "miss_count", "last_seen_at")
     await s.execute(stmt.on_conflict_do_update(
         index_elements=[models.Item.nm_id], set_={c: stmt.excluded[c] for c in cols}))
 
@@ -150,13 +150,22 @@ async def add_history(s, products: list[NormProduct], event: str = "change") -> 
             [dict(nm_id=p.nm_id, price=p.shelf_price, stock=p.stock, event=event) for p in products]))
 
 
+MISS_TO_GONE = 3  # «пропал» после стольких циклов подряд без товара в выдаче (~3 мин)
+
+
 async def deactivate_missing(s, supplier_id: int, seen_ids: set[int]) -> int:
-    """Пропавшие из выдачи → is_active=False + событие gone. Пустая выдача гасит все (магазин распродан)."""
+    """Нет в выдаче → +1 промах; MISS_TO_GONE подряд → is_active=False + событие gone.
+
+    Один промах — не уход: WB недодаёт страницу, и с первого промаха шли ложные «пропал →
+    появился» (2026-11-06). Пустая выдача тоже гасит все — после тех же промахов (магазин распродан).
+    """
+    miss = models.Item.miss_count + 1
     res = await s.execute(update(models.Item).where(
         models.Item.supplier_id == supplier_id, models.Item.is_active.is_(True),
         models.Item.nm_id.not_in(seen_ids) if seen_ids else true(),
-    ).values(is_active=False).returning(models.Item.nm_id, models.Item.price))
-    gone = res.all()
+    ).values(miss_count=miss, is_active=miss < MISS_TO_GONE)
+     .returning(models.Item.nm_id, models.Item.price, models.Item.is_active))
+    gone = [(nm, price) for nm, price, active in res.all() if not active]
     if gone:
         await s.execute(pg_insert(models.PriceHistory).values(
             [dict(nm_id=nm, price=price, stock=0, event="gone") for nm, price in gone]))

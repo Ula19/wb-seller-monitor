@@ -26,10 +26,12 @@ log = logging.getLogger(__name__)
 
 CATALOG_URL = "https://www.wildberries.ru/__internal/u-catalog/sellers/v4/catalog"
 DETAIL_URL = "https://www.wildberries.ru/__internal/u-card/cards/v4/detail"
-# розница: параметры сайта для анонима — без udg/wh_prices (это бизнес-контекст)
+# розница: параметры сайта для анонима — без udg/wh_prices (это бизнес-контекст).
+# Явная стабильная сортировка (по дате добавления): дефолтная «популярность» перемешивается между
+# запросами страниц, и товары на границе страниц теряются.
 CATALOG_PARAMS = {
     "ab_testing": "false", "appType": 1, "curr": "rub", "dest": settings.wb_web_dest,
-    "spp": 30, "hide_vflags": 4294967296, "lang": "ru",
+    "spp": 30, "hide_vflags": 4294967296, "lang": "ru", "sort": "newly",
 }
 # бизнес: detail как в мобильном бизнес-режиме (b2b=true + mdg=3 + udg), appType веба
 B2B_PARAMS = {
@@ -207,7 +209,7 @@ class WebClient:
         products: dict[int, NormProduct] = {}  # nm_id -> товар, дедуп между страницами
         for page in range(1, settings.max_pages + 1):
             params = {**CATALOG_PARAMS, "supplier": supplier_id, "page": page,
-                      "xsubject": ";".join(map(str, sorted(subjects)))}
+                      "limit": settings.web_catalog_limit, "xsubject": ";".join(map(str, sorted(subjects)))}
             items = await self._get_items(f"веб-каталог {supplier_id} стр.{page}", CATALOG_URL,
                                           params,
                                           referer=SELLER_URL.format(supplier_id))
@@ -276,6 +278,8 @@ if __name__ == "__main__":  # self-check антибота: выпуск, TTL, 49
             assert mint.await_count == 1 and mint.await_args.args == (7,)  # на странице этого продавца
             h = http.get.await_args.kwargs["headers"]
             assert h["cookie"] == "x_wbaas_token=t0" and h["user-agent"] == "UA", h
+            prm = http.get.await_args.kwargs["params"]  # стабильная сортировка и крупные страницы
+            assert prm["sort"] == "newly" and prm["limit"] == settings.web_catalog_limit == 300, prm
             # 2) кука моложе TTL — переиспользуем; старше — выпускаем заранее
             await c.fetch_catalog(7)
             assert mint.await_count == 1
