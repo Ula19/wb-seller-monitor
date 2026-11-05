@@ -16,7 +16,6 @@ from app.wb import account_api, web_session
 log = logging.getLogger(__name__)
 
 CODE_TIMEOUT = 300  # сколько ждём код из чата, сек
-TOKEN_KEY = "wbx__tokenData"  # Bearer в localStorage www.wildberries.ru
 
 # ожидание кода из чата по telegram_id (логин — долгая корутина, код приходит отдельно)
 _pending_code: dict[int, asyncio.Future] = {}
@@ -29,13 +28,12 @@ def phone_mask(phone: str) -> str:
 
 
 def has_bearer(state: dict) -> bool:
-    return any(item.get("name") == TOKEN_KEY
-               for origin in state.get("origins") or [] for item in origin.get("localStorage") or [])
+    return account_api.bearer(state) is not None
 
 
 async def save_login(uid: int, phone: str, kind: str, state: dict) -> models.WbAccount:
     if not has_bearer(state):  # без Bearer не будет лимита и заказов (шаг account_state)
-        log.warning("keeper: в сессии нет %s — лимит/заказы аккаунта будут недоступны", TOKEN_KEY)
+        log.warning("keeper: в сессии нет Bearer сайта — лимит/заказы появятся после рефреша, если он его допишет")
     async with Session() as s:
         acc = await repo.save_account(s, uid, phone_mask(phone), kind, encrypt_json(state))
         await s.commit()
@@ -98,8 +96,9 @@ async def state_job(bot) -> None:
         try:
             try:
                 st = await account_api.fetch(state)
-            except account_api.Unauthorized as e:
-                log.info("keeper: аккаунт %s: 401 (%s), освежаю сессию и повторяю", acc.id, e)
+            except (account_api.Unauthorized, account_api.NoBearer) as e:
+                log.info("keeper: аккаунт %s: %s, освежаю сессию и повторяю",
+                         acc.id, f"401 ({e})" if isinstance(e, account_api.Unauthorized) else "нет Bearer")
                 state = await _refresh(acc, state)
                 if state is None:
                     await _relogin(bot, acc)
@@ -107,6 +106,9 @@ async def state_job(bot) -> None:
                 st = await account_api.fetch(state)
         except account_api.Unauthorized:
             await _relogin(bot, acc)
+            continue
+        except account_api.NoBearer:  # сессия жива (рефреш прошёл), бизнес-цены по кукам идут — не relogin
+            log.warning("keeper: аккаунт %s: Bearer нет и после рефреша — лимит/заказы недоступны", acc.id)
             continue
         except Exception as e:
             log.warning("keeper: состояние аккаунта %s не получено: %s: %s", acc.id, type(e).__name__, str(e)[:200])
@@ -172,7 +174,8 @@ def awaiting_code(uid: int) -> bool:
 
 if __name__ == "__main__":  # self-check: маска номера, Bearer в сессии, оркестрация кода
     assert phone_mask("9161234567") == "+7 ••• •••-45-67"
-    assert has_bearer({"origins": [{"localStorage": [{"name": TOKEN_KEY, "value": "t"}]}]})
+    assert has_bearer({"origins": [{"origin": "https://www.wildberries.ru", "localStorage": [
+        {"name": "wbid-oauth-sdk-access-token", "value": "eyJa.eyJb.c"}]}]})
     assert not has_bearer({"cookies": [], "origins": []})
 
     async def demo():

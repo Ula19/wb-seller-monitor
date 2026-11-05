@@ -1,6 +1,7 @@
 """Состояние аккаунта WB обычным HTTP по Bearer сайта (без браузера и антибота).
 
-Bearer — localStorage www `wbx__tokenData` из storageState. full-balance ещё хочет куку
+Bearer — localStorage www: `wbx__tokenData` или `wbid-oauth-sdk-access-token` (у разных
+сессий по-разному; токен SSO id.wb.ru `wbIdAccessToken` — не тот, не берём). full-balance ещё хочет куку
 wbx-validation-key, остальным хватает Bearer. Суммы WB — в копейках, наружу отдаём рубли.
 401 → Unauthorized: решение (рефреш / «войдите заново») — у вызывающего.
 """
@@ -16,7 +17,8 @@ GRADE_URL = "https://user-grade.wildberries.ru/api/v6/grade?curr=RUB&uf_loc=ru"
 ORDERS_URL = ("https://wbxoofex.wildberries.ru/api/v2/orders"
               "?limit=100&exclude_delivery_types=777,778&exclude_b2b=true&offset=0")
 STATUSES_URL = "https://status-tracker.wb.ru/api/v6/statuses?lang=ru"
-TOKEN_KEY = "wbx__tokenData"
+TOKEN_KEYS = ("wbx__tokenData", "wbid-oauth-sdk-access-token")  # по порядку предпочтения
+WWW = "https://www.wildberries.ru"
 WALLET_WCTYPE = 1  # grade.payload.payments[]: способ оплаты «Кошелёк»
 JWT = re.compile(r"eyJ[\w-]+\.[\w-]+\.[\w-]+")
 HEADERS = {"Origin": "https://www.wildberries.ru", "Referer": "https://www.wildberries.ru/",
@@ -27,11 +29,16 @@ class Unauthorized(Exception):
     """WB ответил 401: access протух или сессию отозвали."""
 
 
+class NoBearer(Exception):
+    """В localStorage сессии нет Bearer сайта — браузерный рефреш может его дописать."""
+
+
 def bearer(state: dict) -> str | None:
-    for o in state.get("origins") or []:
-        for it in o.get("localStorage") or []:
-            if it.get("name") == TOKEN_KEY and (m := JWT.search(it.get("value") or "")):
-                return m[0]
+    www = {it.get("name"): it.get("value") or "" for o in state.get("origins") or [] if o.get("origin") == WWW
+           for it in o.get("localStorage") or []}
+    for key in TOKEN_KEYS:
+        if m := JWT.search(www.get(key, "")):
+            return m[0]
     return None
 
 
@@ -92,7 +99,7 @@ async def fetch(state: dict) -> dict:
     """Баланс, лимит, % Кошелька и активные заказы. Unauthorized на 401, прочие сбои — исключением."""
     token = bearer(state)
     if not token:  # не 401: сессия может быть жива (бизнес-цены идут по кукам) — просто нечем спросить
-        raise ValueError("в сессии нет Bearer")
+        raise NoBearer()
     auth = {**HEADERS, "Authorization": f"Bearer {token}"}
     vkey = next((c["value"] for c in state.get("cookies") or [] if c.get("name") == "wbx-validation-key"), None)
     proxy = curl_proxy(web_proxy())  # тот же выход, что у браузера аккаунта
@@ -132,7 +139,11 @@ if __name__ == "__main__":  # self-check на формах ответов из H
     apply_statuses(o, [[{"rid": "eAe.a.0.0", "status_name": "Вы оформили заказ", "group_id": "1", "date": 1 * 10**18},
                         {"rid": "eAe.a.0.0", "status_name": "Едет в пункт выдачи", "group_id": "3", "date": 2 * 10**18}]])
     assert (o[0]["status_name"], o[0]["group_id"]) == ("Едет в пункт выдачи", 3) and o[1]["status_name"] is None
-    st = {"cookies": [], "origins": [{"localStorage": [
-        {"name": TOKEN_KEY, "value": '{"token":"eyJa.eyJb.sig-1","exp":1}'}]}]}
+    st = {"cookies": [], "origins": [{"origin": WWW, "localStorage": [
+        {"name": "wbx__tokenData", "value": '{"token":"eyJa.eyJb.sig-1","exp":1}'}]}]}
     assert bearer(st) == "eyJa.eyJb.sig-1" and bearer({"origins": []}) is None
+    sso = {"origin": "https://id.wb.ru", "localStorage": [{"name": "wbIdAccessToken", "value": "eyJs.eyJs.s"}]}
+    oauth = {"origin": WWW, "localStorage": [{"name": "wbid-oauth-sdk-access-token", "value": "eyJo.eyJo.o"}]}
+    assert bearer({"origins": [sso, oauth]}) == "eyJo.eyJo.o"  # сессия с сервера 2026-11-05: только этот ключ
+    assert bearer({"origins": [sso]}) is None  # SSO-токен id.wb.ru не подходит
     print("ok")
