@@ -20,16 +20,14 @@ log = logging.getLogger(__name__)
 
 async def on_startup() -> None:
     # схему БД готовит Alembic (`alembic upgrade head` в CMD Dockerfile) до старта бота
-    await access.load()
-    # актуальные токены живут в БД (обновляются из Telegram); .env — лишь стартовый seed
+    # строка владельца в users: на неё ссылаются его источники и аккаунты
     async with Session() as s:
+        await repo.ensure_owner(s, settings.owner_id)
+        await s.commit()
         saved_guardium = await repo.get_setting(s, "wb_guardium")
-        saved_bearer = await repo.get_setting(s, "wb_bearer")
-    if saved_guardium:
+    await access.load()
+    if saved_guardium:  # актуальный guardium живёт в БД (кнопка «Токены»), .env — стартовый seed
         wb_client.set_guardium(saved_guardium)
-    if saved_bearer:
-        wb_client.set_bearer(saved_bearer)
-    await keeper.load_into_client()  # поднять сохранённую веб-сессию (основной путь)
     n_px = len(wb_client._proxies)
     proxy_state = f"вкл ({n_px} шт.)" if n_px else "выкл (напрямую)"
     log.info("Старт: владелец %s, разрешённых пользователей %d, прокси WB: %s",

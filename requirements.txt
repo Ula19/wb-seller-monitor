@@ -5,5 +5,6 @@ APScheduler==3.10.4
 SQLAlchemy[asyncio]==2.0.35
 asyncpg==0.29.0
 curl_cffi==0.15.0
+cryptography==50.0.2
 openpyxl==3.1.5
 pydantic-settings==2.5.2

@@ -3,16 +3,20 @@
 import asyncio
 import logging
 import time
-from datetime import datetime, timezone
+from dataclasses import replace
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from aiogram.types import BufferedInputFile
 
 from app.config import settings
-from app.db import models, repo
+from app.crypto import decrypt_json
+from app.db import repo
 from app.db.base import Session
 from app.services import reporting
 from app.wb.client import guardium_expires_at, wb_client
+from app.wb.parser import NormProduct
+from app.wb.web_session import account_cookies, is_logged
 
 log = logging.getLogger(__name__)
 
@@ -24,7 +28,7 @@ _pass_lock = asyncio.Lock()
 
 
 async def recipient_ids(s) -> list[int]:
-    """Получатели рассылки: владелец (из .env) + whitelist из БД, без дублей."""
+    """Получатели системных алертов: владелец (из .env) + whitelist из БД, без дублей."""
     return list({settings.owner_id, *await repo.list_user_ids(s)})
 
 
@@ -44,110 +48,111 @@ def detect_changes(old_price, old_stock, p):
     return events
 
 
-async def sync_seller(
-    seller: models.Seller, *, silent_seed: bool = False, slot=None
-):
-    """Тянет каталог, обновляет БД. Возвращает (все_товары, новые, изменения).
+async def _business_cookies(s, sources) -> dict[int, tuple[int, str]]:
+    """user_id → (account_id, куки) бизнес-аккаунта каждого владельца b2b-источника."""
+    out: dict[int, tuple[int, str]] = {}
+    for uid in {src.user_id for src in sources if src.b2b}:
+        acc = await repo.business_account(s, uid)
+        if acc is None:
+            continue
+        try:
+            state = decrypt_json(acc.state_enc)
+        except Exception as e:
+            log.warning("аккаунт %s: сессию не расшифровать: %s", acc.id, type(e).__name__)
+            continue
+        if is_logged(state):
+            out[uid] = (acc.id, account_cookies(state))
+    return out
 
-    все_товары: [] — магазин пуст, None — каталог не получен (магазин пропущен).
 
-    Розница (`b2b=False`): каталог (анонимный, веб или api-ios) уже даёт точную цену.
-    Бизнес (`b2b=True`): каждый вызов навешиваем бизнес-цену отдельным detail под
-    бизнес-аккаунтом (`enrich_prices`: веб-куки, fallback — Bearer) на ВСЕ товары; товары без свежей бизнес-цены
-    сохраняют прежнюю и помечаются price_stale. Сток/наличие — всегда из каталога.
-    silent_seed=True — первичная загрузка: товары помечаются известными, не шумим.
+def _source_notes(src, fetched, old, acc, biz_old, biz_new) -> list:
+    """Новинки и изменения глазами владельца источника: [(src, товар, события|None)].
+
+    Розница — цена каталога. Бизнес — цена под его бизнес-аккаунтом `acc`
+    (account_id, куки): не пришла в этот цикл — прежняя, помечена неподтверждённой
+    (и события цены нет). Новинка = nm_id, которого не было в items.
     """
-    fetched = await wb_client.fetch_seller_catalog(seller.supplier_id, slot=slot)
-    new = []
-    changes = []
-    priced: set[int] = set()
-    if fetched:
-        async with Session() as s:
-            rows = await repo.get_products(s, seller.supplier_id)
-            existing = {r.nm_id: r for r in rows}
-            # Розница: каталог уже даёт точную цену (p.price = shelf_price из normalize).
-            # Бизнес-цена видна только под бизнес-аккаунтом → detail на все товары каждый цикл.
-            if seller.b2b:
-                priced = await wb_client.enrich_prices(fetched, slot=slot)
-                # без свежей бизнес-цены — сохраняем прежнюю (в p.price сейчас витрина)
-                # и помечаем: цена не подтверждена (веб-detail и Bearer оба не дали цену)
-                for p in fetched:
-                    if p.nm_id not in priced:
-                        p.price_stale = True
-                        old = existing.get(p.nm_id)
-                        if old is not None and old.price is not None:
-                            p.price = old.price
-                        elif old is None:
-                            # новинка без подтверждённой цены: НЕ сохраняем витрину как
-                            # b2b-цену — иначе следующий удачный enrich даст ложное
-                            # «цена снизилась» (бизнес-цена ниже витрины)
-                            p.price = None
-            seen: set[int] = set()
-            for p in fetched:
-                seen.add(p.nm_id)
-                old = existing.get(p.nm_id)
-                if old is None:
-                    new.append(p)
-                elif not silent_seed:
-                    ev = detect_changes(old.price, old.stock, p)
-                    if ev:
-                        changes.append((p, ev))
-                await repo.upsert_product(s, p)
-            await repo.deactivate_missing(s, seller.supplier_id, seen)
-            sl = await s.get(models.Seller, seller.supplier_id)
-            if sl:
-                sl.last_check_at = datetime.now(timezone.utc)
-            if silent_seed:
-                for p in new:
-                    await repo.mark_notified(s, p.supplier_id, p.nm_id)
-            await s.commit()
-        if silent_seed:
-            new = []
-    log.info(
-        "sync продавца %s: товаров %d, обогащено %d, новых %d, изменений %d",
-        seller.supplier_id, len(fetched or []), len(priced), len(new), len(changes),
-    )
-    return fetched, new, changes
+    acc_id = acc[0] if acc else None
+    was_biz, new_biz = biz_old.get(acc_id, {}), biz_new.get(acc_id, {})
+    notes = []
+    for p in fetched:
+        o = old.get(p.nm_id)
+        if src.b2b:
+            was, fresh = was_biz.get(p.nm_id), new_biz.get(p.nm_id)
+            view = replace(p, price=fresh if fresh is not None else was, price_stale=fresh is None)
+            old_price = was
+        else:
+            view, old_price = p, (o.price if o else None)
+        if o is None:
+            notes.append((src, view, None))
+        elif ev := detect_changes(old_price, o.stock, view):
+            notes.append((src, view, ev))
+    return notes
 
 
-async def broadcast_change(bot, user_ids, seller, p, events) -> None:
-    text = reporting.change_caption(seller.name or str(seller.supplier_id), p, events, seller.b2b)
-    markup = reporting.wb_button(p.url)
-    for uid in user_ids:
-        try:
-            await bot.send_message(uid, text, parse_mode="HTML", reply_markup=markup)
-        except Exception as e:
-            log.warning("уведомление (изменение) не доставлено %s: %s", uid, e)
+async def sync_seller(supplier_id: int, *, slot=None):
+    """Тянет каталог продавца и пишет снимок. Возвращает (продавец, товары, заметки).
 
-
-async def broadcast_new(bot, user_ids, seller, p) -> None:
-    text = reporting.new_caption(seller.name or str(seller.supplier_id), p, seller.b2b)
-    markup = reporting.wb_button(p.url)
-    for uid in user_ids:
-        try:
-            await bot.send_message(uid, text, parse_mode="HTML", reply_markup=markup)
-        except Exception as e:
-            log.warning("уведомление (новинка) не доставлено %s: %s", uid, e)
-
-
-async def notify_seller(bot, seller, new, changes) -> None:
-    """Рассылает новинки и изменения цены/наличия отдельными сообщениями в чат."""
-    if not new and not changes:
-        return
+    товары: [] — магазин пуст, None — каталог не получен (магазин пропущен).
+    заметки — что разослать владельцам источников (см. _source_notes). Источник без
+    первой загрузки (seeded_at пуст) молча помечается загруженным: весь ассортимент
+    нового магазина «новинками» не шлём.
+    Бизнес-цены — по запросу на каждый бизнес-аккаунт владельцев b2b-источников.
+    """
     async with Session() as s:
-        user_ids = await recipient_ids(s)
-    if not user_ids:
-        return
-    for p in new:
-        await broadcast_new(bot, user_ids, seller, p)
-    for p, events in changes:
-        await broadcast_change(bot, user_ids, seller, p, events)
+        seller, sources = await repo.seller_sources(s, supplier_id)
+        accounts = await _business_cookies(s, sources)
+    if seller is None or not sources:
+        return seller, [], []
+    fetched = await wb_client.fetch_seller_catalog(supplier_id, slot=slot)
+    notes: list = []
+    biz_new: dict[int, dict[int, int]] = {}
+    if fetched is not None:
+        for acc_id, cookies in set(accounts.values()):
+            biz_new[acc_id] = await wb_client.business_prices(fetched, cookies)
+        nm_ids = [p.nm_id for p in fetched]
+        async with Session() as s:
+            old = await repo.get_items(s, supplier_id)
+            biz_old = {a: await repo.get_account_prices(s, a, nm_ids) for a in biz_new}
+            moved = [p for p in fetched
+                     if (o := old.get(p.nm_id)) is None or (o.price, o.stock) != (p.shelf_price, p.stock)]
+            await repo.upsert_items(s, fetched)  # раньше цен аккаунтов: на items ссылается FK
+            await repo.add_history(s, moved)
+            await repo.deactivate_missing(s, supplier_id, set(nm_ids))
+            for acc_id, prices in biz_new.items():
+                await repo.upsert_account_prices(s, acc_id, prices)
+            for src in sources:
+                if src.seeded_at is not None:
+                    notes += _source_notes(src, fetched, old, accounts.get(src.user_id), biz_old, biz_new)
+            await repo.mark_seeded(s, [src.id for src in sources if src.seeded_at is None])
+            await repo.touch_seller(s, supplier_id)
+            await s.commit()
+    log.info(
+        "sync продавца %s: товаров %d, бизнес-цен %s, заметок %d",
+        supplier_id, len(fetched or []),
+        "/".join(str(len(v)) for v in biz_new.values()) or "-", len(notes),
+    )
+    return seller, fetched, notes
 
 
-async def sync_and_notify(bot, seller, slot=None) -> list:
-    """Синхронизирует магазин и сразу рассылает новинки/изменения."""
-    fetched, new, changes = await sync_seller(seller, slot=slot)
-    await notify_seller(bot, seller, new, changes)
+async def notify(bot, seller, notes) -> None:
+    """Каждая заметка — отдельным сообщением владельцу источника."""
+    name = seller.name or str(seller.supplier_id)
+    for src, p, events in notes:
+        text = (reporting.new_caption(name, p, src.b2b) if events is None
+                else reporting.change_caption(name, p, events, src.b2b))
+        try:
+            await bot.send_message(src.user_id, text, parse_mode="HTML",
+                                   reply_markup=reporting.wb_button(p.url))
+        except Exception as e:
+            log.warning("уведомление не доставлено %s: %s", src.user_id, e)
+
+
+async def sync_and_notify(bot, supplier_id: int, slot=None) -> list[NormProduct] | None:
+    """Синхронизирует продавца и сразу рассылает новинки/изменения."""
+    seller, fetched, notes = await sync_seller(supplier_id, slot=slot)
+    if notes:
+        await notify(bot, seller, notes)
     return fetched
 
 
@@ -169,13 +174,6 @@ async def send_report_to(bot, user_ids, seller, products) -> None:
                     await bot.send_message(uid, chunk, parse_mode="HTML")
                 except Exception as e:
                     log.warning("отчёт не доставлен %s: %s", uid, e)
-
-
-BEARER_ALERT = (
-    "‼️‼️‼️ <b>ВНИМАНИЕ: BEARER WB НЕ РАБОТАЕТ</b> ‼️‼️‼️\n\n"
-    "🔴 Бизнес-цены <b>не приходят</b> (Bearer не задан или WB его отклонил).\n"
-    "👉 Сними Bearer из приложения WB и пришли кнопкой «🔑 Токены»."
-)
 
 
 GUARDIUM_WARN_HOURS = 6  # за сколько часов до конца guardium предупредить
@@ -202,27 +200,13 @@ async def alert_all(bot, text: str) -> None:
             log.warning("алерт не доставлен %s: %s", uid, e)
 
 
-async def _check_tokens_health(bot) -> None:
-    """Если бизнес-цены не приходят несколько раз подряд (нет Bearer / 401 / 403) — шумим всем.
-
-    b2b дёргает detail каждый цикл — порог 3 набирается за ~3 мин.
-    """
-    # Веб-путь выключился → один алерт на каждое падение (владелец просил о каждом).
-    # Флаг alerted сбрасывается, когда путь снова заработал.
-    for path, text in (
-        (wb_client.web_catalog, "⚠️ <b>Веб-каталог WB упал</b> — розница идёт через api-ios (guardium).\n"
-                                "👉 Проверь прокси и логи «антибот»; для api-ios нужен свежий guardium."),
-        (wb_client.web_b2b, "⚠️ <b>Веб бизнес-цены WB упали</b> — беру через api-ios (Bearer).\n"
-                            "👉 Перелогинься: /wblogin."),
-    ):
-        if path.down and not path.alerted:
-            path.alerted = True
-            await alert_all(bot, text)
-    if wb_client.b2b_fail_streak >= 3 and not wb_client.bearer_alerted:
-        wb_client.bearer_alerted = True
-        await alert_all(bot, BEARER_ALERT)
-    elif wb_client.b2b_fail_streak == 0:
-        wb_client.bearer_alerted = False
+async def _check_health(bot) -> None:
+    """Веб-каталог выключился или guardium протухает — шумим один раз на каждое падение."""
+    path = wb_client.web_catalog  # флаг alerted сбрасывается, когда путь снова заработал
+    if path.down and not path.alerted:
+        path.alerted = True
+        await alert_all(bot, "⚠️ <b>Веб-каталог WB упал</b> — розница идёт через api-ios (guardium).\n"
+                             "👉 Проверь прокси и логи «антибот»; для api-ios нужен свежий guardium.")
     # guardium (каталог): шумим один раз, флаг сбрасывает set_guardium
     problem = _guardium_problem()
     if problem and not wb_client.guardium_alerted:
@@ -277,7 +261,7 @@ async def _monitoring_pass(bot) -> None:
     """Единый проход по ВСЕМ магазинам раз в monitor_interval_seconds.
 
     Каждый магазин каждый цикл: каталог (розница = готовая цена),
-    b2b — плюс detail с Bearer на все товары внутри sync_seller. Никаких
+    b2b — плюс detail под бизнес-аккаунтом владельца источника. Никаких
     приоритетов/триггеров/sweep — все магазины равны, всё свежее каждую минуту.
     Слоты разбирают ОБЩУЮ очередь магазинов (work-stealing): кто освободился —
     берёт следующего; завязший в 429 слот возьмёт меньше, его хвост подстрахуют
@@ -290,7 +274,7 @@ async def _monitoring_pass(bot) -> None:
                  start, end, now.hour)
         return
     async with Session() as s:
-        sellers = await repo.list_sellers(s)
+        sellers = await repo.monitored_supplier_ids(s)
     log.info("мониторинг: старт, магазинов %d", len(sellers))
     t0 = asyncio.get_event_loop().time()
 
@@ -308,17 +292,17 @@ async def _monitoring_pass(bot) -> None:
                 if fetched is None:  # [] = магазин пуст, это не сбой
                     failed.append((seller, slot))
             except Exception as e:
-                log.exception("синхронизация %s упала: %s", seller.supplier_id, e)
+                log.exception("синхронизация %s упала: %s", seller, e)
         return served
 
     async def _retry(seller, slot) -> None:
         try:
             fetched = await sync_and_notify(bot, seller, slot=slot)
             if fetched is None:
-                skipped.append(seller.supplier_id)
+                skipped.append(seller)
         except Exception as e:
-            log.exception("повтор %s упал: %s", seller.supplier_id, e)
-            skipped.append(seller.supplier_id)
+            log.exception("повтор %s упал: %s", seller, e)
+            skipped.append(seller)
 
     async with _pass_lock:  # весь проход не пересекается с ручной проверкой/сидом
         slots = wb_client.slots  # снапшот внутри лока (снаружи мог бы устареть)
@@ -338,7 +322,7 @@ async def _monitoring_pass(bot) -> None:
             else:  # слот один — повторить можно только им же
                 retries = [_retry(s, b) for s, b in failed]
             await asyncio.gather(*retries)
-        await _check_tokens_health(bot)
+        await _check_health(bot)
     took = asyncio.get_event_loop().time() - t0
     saved = len(failed) - len(skipped)  # спас повтор другим IP
     fails_by = {id(sl): 0 for sl in slots}
@@ -353,7 +337,7 @@ async def _monitoring_pass(bot) -> None:
 
 
 async def report_job(bot) -> None:
-    """Часовой отчёт по всем магазинам из БД (без обращения к WB).
+    """Часовой отчёт: каждому — по его магазинам, из БД (без обращения к WB).
 
     Шлём только в выбранные часы (МСК); список пуст — отчёт не нужен вовсе.
     """
@@ -367,12 +351,14 @@ async def report_job(bot) -> None:
     if hour not in selected:
         log.info("отчёт пропущен: %d не в списке %s", hour, hours_csv)
         return
+    data = []
     async with Session() as s:
-        sellers = await repo.list_sellers(s)
-        user_ids = await recipient_ids(s)
-        data = [(sl, await repo.get_active_products(s, sl.supplier_id)) for sl in sellers]
-    for seller, products in data:
-        await send_report_to(bot, user_ids, seller, products)
+        for uid in await recipient_ids(s):
+            for src in await repo.list_sources(s, uid):
+                if src.enabled:
+                    data.append((uid, src, await repo.source_products(s, src)))
+    for uid, src, products in data:
+        await send_report_to(bot, [uid], src, products)
 
 
 if __name__ == "__main__":  # self-check разбора часов и рабочего окна
@@ -394,6 +380,27 @@ if __name__ == "__main__":  # self-check разбора часов и рабоч
     assert "price" in kinds(detect_changes(1000, 5, SimpleNamespace(price=980, stock=5)))   # −2%
     assert "price" not in kinds(detect_changes(1000, 5, SimpleNamespace(price=995, stock=5)))  # −0.5%
     assert "price" not in kinds(detect_changes(1000, 5, SimpleNamespace(price=1200, stock=5)))  # рост
+    # _source_notes: розница по каталогу, бизнес — по цене СВОЕГО аккаунта
+    def np(nm, price, stock=5):
+        return NormProduct(nm_id=nm, name="x", brand=None, price=price, stock=stock, pics=0,
+                           supplier_id=1, shelf_price=price)
+    old = {1: SimpleNamespace(price=1000, stock=5), 2: SimpleNamespace(price=500, stock=5)}
+    fetched = [np(1, 900), np(2, 500, stock=0), np(3, 700)]  # 1 подешевел, 2 кончился, 3 новинка
+    retail = SimpleNamespace(b2b=False, user_id=10)
+    got = {p.nm_id: ev for _, p, ev in _source_notes(retail, fetched, old, None, {}, {})}
+    assert kinds(got[1]) == ["price"] and kinds(got[2]) == ["availability"] and got[3] is None, got
+    biz = SimpleNamespace(b2b=True, user_id=20)
+    acc = (7, "cookies")
+    # бизнес: 1 под аккаунтом 800 → 700 (снижение), у 2 цена не пришла — прежняя, без события цены
+    notes = _source_notes(biz, fetched, old, acc, {7: {1: 800, 2: 400}}, {7: {1: 700, 3: 650}})
+    got = {p.nm_id: (p, ev) for _, p, ev in notes}
+    assert got[1][0].price == 700 and kinds(got[1][1]) == ["price"] and not got[1][0].price_stale
+    assert got[2][0].price == 400 and got[2][0].price_stale and kinds(got[2][1]) == ["availability"]
+    assert got[3][0].price == 650 and got[3][1] is None
+    # бизнес без аккаунта: цен нет, только наличие и новинки; розничный товар не тронут
+    got = {p.nm_id: (p, ev) for _, p, ev in _source_notes(biz, fetched, old, None, {}, {})}
+    assert got[3][0].price is None and got[3][0].price_stale and 1 not in got
+    assert fetched[0].price == 900  # replace() не портит общий товар каталога
     # work-stealing: общий итератор — каждый магазин обслужен РОВНО одним воркером,
     # медленный воркер берёт меньше, быстрый подстраховывает его хвост
     async def _ws_demo():

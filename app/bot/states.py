@@ -17,6 +17,7 @@ class SetTokens(StatesGroup):
 
 
 class WbLogin(StatesGroup):
+    waiting_kind = State()   # бизнес или обычный аккаунт
     waiting_phone = State()  # номер аккаунта WB
     waiting_code = State()   # код из пуша в приложении WB
 

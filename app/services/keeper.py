@@ -1,78 +1,78 @@
-"""Keeper веб-сессии WB: хранит банку кук в БД, держит её живой, логинит аккаунт.
+"""Keeper аккаунтов WB: логин через Telegram, освежение сессий, хранение в wb_accounts.
 
-Сессия (storageState) лежит в app_settings. При старте грузится в клиент, фоновый
-джоб периодически её освежает (заход на сайт). Логин — через Telegram: юзер шлёт
-номер, бот вводит его в headless-браузере, код приходит пушем в приложение WB и
-юзер присылает его в чат.
+Сессия = storageState браузера ЦЕЛИКОМ (куки + localStorage: там Bearer wbx__tokenData,
+нужен лимиту и заказам), в БД — зашифрованной (app.crypto). У пользователя 1–10
+аккаунтов; бизнес-цены его источников идут под его бизнес-аккаунтом. Логин: юзер шлёт
+номер, бот вводит его в браузере, код приходит пушем в приложение WB, юзер шлёт его в чат.
 """
 import asyncio
-import json
 import logging
 
-from app.db import repo
+from app.crypto import decrypt_json, encrypt_json
+from app.db import models, repo
 from app.db.base import Session
-from app.services.monitor import alert_all
 from app.wb import web_session
-from app.wb.client import wb_client
 
 log = logging.getLogger(__name__)
 
-KEY = "wb_storage_state"
 CODE_TIMEOUT = 300  # сколько ждём код из чата, сек
+TOKEN_KEY = "wbx__tokenData"  # Bearer в localStorage www.wildberries.ru
 
 # ожидание кода из чата по telegram_id (логин — долгая корутина, код приходит отдельно)
 _pending_code: dict[int, asyncio.Future] = {}
 _login_tasks: dict[int, asyncio.Task] = {}
 
 
-async def _save(state: dict) -> None:
+def phone_mask(phone: str) -> str:
+    """10 цифр без кода страны → «+7 ••• •••-12-34» (номер целиком не храним)."""
+    return f"+7 ••• •••-{phone[-4:-2]}-{phone[-2:]}"
+
+
+def has_bearer(state: dict) -> bool:
+    return any(item.get("name") == TOKEN_KEY
+               for origin in state.get("origins") or [] for item in origin.get("localStorage") or [])
+
+
+async def save_login(uid: int, phone: str, kind: str, state: dict) -> models.WbAccount:
+    if not has_bearer(state):  # без Bearer не будет лимита и заказов (шаг account_state)
+        log.warning("keeper: в сессии нет %s — лимит/заказы аккаунта будут недоступны", TOKEN_KEY)
     async with Session() as s:
-        await repo.set_setting(s, KEY, json.dumps(state))
+        acc = await repo.save_account(s, uid, phone_mask(phone), kind, encrypt_json(state))
         await s.commit()
-
-
-async def load_into_client() -> None:
-    """При старте бота: поднять сохранённую веб-сессию в клиент."""
-    async with Session() as s:
-        raw = await repo.get_setting(s, KEY)
-    if raw:
-        wb_client.set_web_session(raw)
-        log.info("keeper: сессия аккаунта загружена из БД — бизнес-цены через веб")
-    else:
-        log.info("keeper: сессии аккаунта нет — бизнес-цены через api-ios (Bearer); /wblogin")
+        return acc
 
 
 async def refresh_job(bot) -> None:
-    """Периодически освежает веб-сессию (заход на сайт). Протухла → алерт на релогин."""
+    """Освежает сессии активных аккаунтов по очереди. Протухла → «нужен вход» владельцу."""
     async with Session() as s:
-        raw = await repo.get_setting(s, KEY)
-    if not raw:
-        return  # не залогинены — нечего освежать
-    try:
-        state = await web_session.refresh(raw)
-    except Exception as e:
-        log.warning("keeper: рефреш упал: %s", e)
-        return
-    if state is None:
-        wb_client.set_web_session("")  # куки аккаунта сняты → бизнес-цены через api-ios
-        await alert_all(bot, "‼️ <b>Сессия аккаунта WB протухла</b> — бизнес-цены ушли на api-ios (Bearer).\n"
-                             "👉 Войди заново: /wblogin")
-        return
-    await _save(state)
-    wb_client.set_web_session(state)
+        accounts = await repo.active_accounts(s)
+    for acc in accounts:
+        try:
+            state = await web_session.refresh(decrypt_json(acc.state_enc))
+        except Exception as e:
+            log.warning("keeper: рефреш аккаунта %s упал: %s", acc.id, e)
+            continue
+        async with Session() as s:
+            row = await s.get(models.WbAccount, acc.id)
+            if row is None:
+                continue
+            if state is None:
+                row.status = "relogin"
+            else:
+                row.state_enc = encrypt_json(state)
+            await s.commit()
+        if state is None:
+            log.warning("keeper: аккаунт %s (%s) разлогинен", acc.id, acc.label)
+            try:
+                await bot.send_message(acc.user_id, f"‼️ <b>Аккаунт WB {acc.label} разлогинен</b> — "
+                                                    "бизнес-цены под ним не идут.\n👉 Войди заново: /wblogin",
+                                       parse_mode="HTML")
+            except Exception:
+                pass
 
 
 # ---------- логин через Telegram ----------
-async def _do_login(phone: str, get_code) -> bool:
-    state = await web_session.login(phone, get_code)
-    if not state:
-        return False
-    await _save(state)
-    wb_client.set_web_session(state)
-    return True
-
-
-async def start_login(bot, uid: int, phone: str) -> str:
+async def start_login(bot, uid: int, phone: str, kind: str) -> str:
     """Запускает логин в фоне; код придёт из чата через submit_code. Возвращает статус."""
     if uid in _login_tasks and not _login_tasks[uid].done():
         return "already"
@@ -87,9 +87,12 @@ async def start_login(bot, uid: int, phone: str) -> str:
 
     async def run():
         try:
-            ok = await _do_login(phone, get_code)
-            msg = ("✅ Вошёл в WB — бизнес-цены идут через веб."
-                   if ok else "❌ Логин не удался (неверный код или антибот). Попробуй ещё раз: /wblogin")
+            state = await web_session.login(phone, get_code)
+            if state:
+                acc = await save_login(uid, phone, kind, state)
+                msg = f"✅ Вошёл в WB: аккаунт {acc.label} ({'бизнес' if kind == 'business' else 'обычный'})."
+            else:
+                msg = "❌ Логин не удался (неверный код или антибот). Попробуй ещё раз: /wblogin"
         except Exception as e:
             log.exception("keeper: логин упал")
             msg = f"❌ Ошибка логина: {type(e).__name__}"
@@ -118,7 +121,11 @@ def awaiting_code(uid: int) -> bool:
     return bool(fut and not fut.done())
 
 
-if __name__ == "__main__":  # self-check оркестрации кода (без браузера)
+if __name__ == "__main__":  # self-check: маска номера, Bearer в сессии, оркестрация кода
+    assert phone_mask("9161234567") == "+7 ••• •••-45-67"
+    assert has_bearer({"origins": [{"localStorage": [{"name": TOKEN_KEY, "value": "t"}]}]})
+    assert not has_bearer({"cookies": [], "origins": []})
+
     async def demo():
         uid = 1
         fut = asyncio.get_event_loop().create_future()

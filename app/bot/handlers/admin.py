@@ -8,7 +8,7 @@ from app.config import settings
 from app.db import repo
 from app.db.base import Session
 from app.services.backup import send_backup
-from app.services.monitor import _pass_lock, sync_seller
+from app.services.monitor import _pass_lock, sync_and_notify
 from app.wb.client import wb_client
 
 router = Router()
@@ -37,20 +37,19 @@ async def addseller(m: Message):
         await m.answer("Использование: /addseller <ID или ссылка на магазин>")
         return
     async with Session() as s:
-        if await repo.get_seller(s, sid):
+        if await repo.get_source(s, m.from_user.id, sid):
             await m.answer(f"Магазин {sid} уже в списке.")
             return
     info = await wb_client.fetch_supplier_info(sid)
     name = (info or {}).get("trademark") or (info or {}).get("supplierName")
     brand = (info or {}).get("trademark")
     async with Session() as s:
-        await repo.add_seller(s, sid, name=name, brand=brand, b2b=settings.wb_b2b)
+        await repo.add_source(s, m.from_user.id, sid, name=name, brand=brand, b2b=settings.wb_b2b)
         await s.commit()
-        seller = await repo.get_seller(s, sid)
     status = await m.answer(f"⏳ Добавляю «{name or sid}», загружаю текущий ассортимент...")
     try:
         async with _pass_lock:  # не пересекаемся с минутным джобом (флуд «новинок»)
-            fetched, _, _ = await sync_seller(seller, silent_seed=True)
+            fetched = await sync_and_notify(m.bot, sid)  # новый источник загрузится молча
         await status.edit_text(f"✅ Магазин «{name or sid}» добавлен. Товаров: {len(fetched or [])}.")
     except Exception as e:
         await status.edit_text(f"⚠️ Магазин добавлен, но первичная загрузка не удалась: {e}")
@@ -63,7 +62,7 @@ async def removeseller(m: Message):
         await m.answer("Использование: /removeseller <ID>")
         return
     async with Session() as s:
-        ok = await repo.remove_seller(s, sid)
+        ok = await repo.remove_source(s, m.from_user.id, sid)
         await s.commit()
     await m.answer("✅ Магазин удалён." if ok else "Магазин не найден.")
 

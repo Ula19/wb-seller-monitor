@@ -22,8 +22,8 @@ from app.db import repo
 from app.db.base import Session
 from app.emoji import esc, tge
 from app.services import keeper, reporting
-from app.services.monitor import _pass_lock, sync_seller
-from app.wb.client import bearer_user, guardium_expires_at, wb_client
+from app.services.monitor import _pass_lock, sync_and_notify
+from app.wb.client import guardium_expires_at, wb_client
 
 log = logging.getLogger(__name__)
 router = Router()
@@ -54,11 +54,22 @@ async def _deny_if_not_admin(cb: CallbackQuery) -> bool:
 # ---------- вход в аккаунт WB (веб-сессия для keeper) ----------
 @router.message(Command("wblogin"))
 async def cmd_wblogin(m: Message, state: FSMContext):
-    if m.from_user.id != settings.owner_id:
-        await m.answer("⛔ Только для владельца")
+    if not access.is_admin(m.from_user.id):
+        await m.answer("⛔ Нет доступа")
         return
+    if not settings.accounts_key:
+        await m.answer("⛔ На сервере не задан ACCOUNTS_KEY — сессию аккаунта не зашифровать.")
+        return
+    await state.set_state(WbLogin.waiting_kind)
+    await m.answer("🔐 Вход в аккаунт WB. Какой это аккаунт?", reply_markup=kb.account_kind_kb())
+
+
+@router.callback_query(WbLogin.waiting_kind, kb.AccKindCB.filter())
+async def wblogin_kind(cb: CallbackQuery, callback_data: kb.AccKindCB, state: FSMContext):
+    await state.update_data(kind="business" if callback_data.business else "retail")
     await state.set_state(WbLogin.waiting_phone)
-    await m.answer("🔐 Вход в аккаунт WB.\nПришли номер телефона (можно с +7 или без):")
+    await _edit(cb, "Пришли номер телефона аккаунта (можно с +7 или без):", None)
+    await cb.answer()
 
 
 @router.message(WbLogin.waiting_phone)
@@ -67,7 +78,8 @@ async def wblogin_phone(m: Message, state: FSMContext):
     if len(phone) != 10:
         await m.answer("Нужно 10 цифр номера (без кода страны). Пришли ещё раз:")
         return
-    await keeper.start_login(m.bot, m.from_user.id, phone)
+    kind = (await state.get_data()).get("kind", "business")
+    await keeper.start_login(m.bot, m.from_user.id, phone, kind)
     await state.set_state(WbLogin.waiting_code)
     await m.answer("Открываю WB и ввожу номер… Жди код: он придёт <b>пушем в приложение WB</b> "
                    "(и в колокольчик на сайте). Пришли код сюда:", parse_mode="HTML")
@@ -127,9 +139,8 @@ async def rb_tokens(m: Message, state: FSMContext):
         f"{tge('shop')} <b>Обновление токенов WB</b>\n\n"
         "Пришли одним сообщением токен из приложения WB (сними перехватом трафика):\n"
         "• <b>guardium</b> — заголовок <code>x-guardium-token</code>, начинается с "
-        "<code>1.1000.</code>. Нужен каталогу и бизнес-ценам, обновлять раз в ~3 дня.\n"
-        "• <b>Bearer</b> — заголовок <code>authorization</code>, начинается с "
-        "<code>Bearer eyJ</code>. Нужен бизнес-ценам, срока нет — только если WB разлогинит.",
+        "<code>1.1000.</code>. Запасной путь каталога (api-ios), обновлять раз в ~3 дня.\n"
+        "Бизнес-цены идут под твоим бизнес-аккаунтом — вход: /wblogin.",
         reply_markup=kb.cancel_kb(),
         parse_mode="HTML",
     )
@@ -153,16 +164,8 @@ async def tokens_input(m: Message, state: FSMContext):
         await m.answer(f"{tge('ok')} Guardium обновлён, действует до {exp:%d.%m %H:%M} МСК.",
                        parse_mode="HTML")
         return
-    user = bearer_user(raw)
-    if user:
-        await state.clear()
-        wb_client.set_bearer(raw)
-        await _save_setting("wb_bearer", wb_client.bearer)
-        await m.answer(f"{tge('ok')} Bearer обновлён (аккаунт {user}). "
-                       "Бизнес-цены подтянутся ближайшим циклом.", parse_mode="HTML")
-        return
     await m.answer(
-        "Не похоже ни на guardium (1.1000.…), ни на Bearer (eyJ…). "
+        "Не похоже на guardium (1.1000.…). "
         "Пришли ещё раз или нажмите Отмена.",
         reply_markup=kb.cancel_kb(),
     )
@@ -293,7 +296,7 @@ async def nav_sellers(cb: CallbackQuery, state: FSMContext):
 
 @router.callback_query(kb.Nav.filter(F.to == "list_sellers"))
 async def nav_list_sellers(cb: CallbackQuery):
-    text, markup = await views.view_list_sellers()
+    text, markup = await views.view_list_sellers(cb.from_user.id)
     await _edit(cb, text, markup)
     await cb.answer()
 
@@ -329,7 +332,7 @@ async def nav_stats(cb: CallbackQuery):
 @router.callback_query(kb.Nav.filter(F.to == "check_seller"))
 async def nav_check_seller(cb: CallbackQuery):
     async with Session() as s:
-        sellers = await repo.list_sellers(s)
+        sellers = await repo.list_sources(s, cb.from_user.id)
     if not sellers:
         await cb.answer("Список магазинов пуст", show_alert=True)
         return
@@ -345,7 +348,7 @@ BC_BRANDS_HINT = "Выберите бренды, затем «Показать �
 @router.callback_query(kb.Nav.filter(F.to == "check_brands"))
 async def nav_check_brands(cb: CallbackQuery, state: FSMContext):
     async with Session() as s:
-        sellers = await repo.list_sellers(s)
+        sellers = await repo.list_sources(s, cb.from_user.id)
     if not sellers:
         await cb.answer("Список магазинов пуст", show_alert=True)
         return
@@ -363,7 +366,7 @@ async def bc_toggle_seller(cb: CallbackQuery, callback_data: kb.BCSeller, state:
     sids.symmetric_difference_update({callback_data.sid})  # toggle
     await state.update_data(bc_sids=list(sids))
     async with Session() as s:
-        sellers = await repo.list_sellers(s)
+        sellers = await repo.list_sources(s, cb.from_user.id)
     await _edit(cb, BC_SELLERS_HINT, kb.brand_sellers_kb(sellers, sids))
     await cb.answer()
 
@@ -371,7 +374,7 @@ async def bc_toggle_seller(cb: CallbackQuery, callback_data: kb.BCSeller, state:
 @router.callback_query(kb.Nav.filter(F.to == "bc_all_sellers"))
 async def bc_all_sellers(cb: CallbackQuery, state: FSMContext):
     async with Session() as s:
-        sellers = await repo.list_sellers(s)
+        sellers = await repo.list_sources(s, cb.from_user.id)
     all_ids = {sl.supplier_id for sl in sellers}
     cur = set((await state.get_data()).get("bc_sids", []))
     new = set() if cur >= all_ids else all_ids  # все выбраны → снять, иначе выбрать все
@@ -427,10 +430,12 @@ async def nav_bc_run(cb: CallbackQuery, state: FSMContext):
     rows = []
     async with Session() as s:
         for sid in sids:
-            sl = await repo.get_seller(s, sid)
-            shop = (sl.name if sl and sl.name else None) or str(sid)
-            b2b = sl.b2b if sl else True
-            for p in await repo.get_active_products(s, sid):
+            sl = await repo.get_source(s, cb.from_user.id, sid)
+            if sl is None:
+                continue
+            shop = sl.name or str(sid)
+            b2b = sl.b2b
+            for p in await repo.source_products(s, sl):
                 hay = f"{p.brand or ''} {p.name or ''}".lower()
                 if any(n in hay for n in needles):
                     rows.append((p, shop, b2b))
@@ -446,7 +451,7 @@ async def nav_bc_run(cb: CallbackQuery, state: FSMContext):
 
 
 PRICE_HINT = (
-    f"{tge('clock')} Режим цены: 🏢 бизнес-цена (нужен Bearer) / 👤 розница. "
+    f"{tge('clock')} Режим цены: 🏢 бизнес-цена (под твоим бизнес-аккаунтом) / 👤 розница. "
     "Жми магазин, чтобы переключить:"
 )
 
@@ -456,7 +461,7 @@ async def nav_price_sellers(cb: CallbackQuery):
     if await _deny_if_not_admin(cb):
         return
     async with Session() as s:
-        sellers = await repo.list_sellers(s)
+        sellers = await repo.list_sources(s, cb.from_user.id)
     if not sellers:
         await cb.answer("Список магазинов пуст", show_alert=True)
         return
@@ -469,12 +474,12 @@ async def toggle_mode(cb: CallbackQuery, callback_data: kb.SellerCB):
     if await _deny_if_not_admin(cb):
         return
     async with Session() as s:
-        sl = await repo.get_seller(s, callback_data.sid)
+        sl = await repo.get_source(s, cb.from_user.id, callback_data.sid)
         new_b2b = not sl.b2b if sl else True
         if sl:
-            await repo.set_seller_b2b(s, callback_data.sid, new_b2b)
+            await repo.set_source_b2b(s, cb.from_user.id, callback_data.sid, new_b2b)
             await s.commit()
-        sellers = await repo.list_sellers(s)
+        sellers = await repo.list_sources(s, cb.from_user.id)
     await _edit(cb, PRICE_HINT, kb.sellers_price_list(sellers))
     await cb.answer(f"Режим: {reporting.mode_tag(new_b2b)}")
 
@@ -483,7 +488,7 @@ async def toggle_mode(cb: CallbackQuery, callback_data: kb.SellerCB):
 async def check_seller_do(cb: CallbackQuery, callback_data: kb.SellerCB):
     await cb.answer("Проверяю...")
     async with Session() as s:
-        seller = await repo.get_seller(s, callback_data.sid)
+        seller = await repo.get_source(s, cb.from_user.id, callback_data.sid)
     name = seller.name if seller and seller.name else callback_data.sid
     await _edit(cb, f"{tge('clock')} Проверяю магазин «{esc(name)}»...", None)
     ok = await views.run_checknow_one(cb.bot, cb.from_user.id, callback_data.sid)
@@ -517,7 +522,7 @@ async def add_seller_input(m: Message, state: FSMContext):
         )
         return
     async with Session() as s:
-        if await repo.get_seller(s, sid):
+        if await repo.get_source(s, m.from_user.id, sid):
             await state.clear()
             text, markup = await views.view_sellers(m.from_user.id)
             await m.answer(f"Магазин {sid} уже в списке.", reply_markup=markup)
@@ -535,14 +540,16 @@ async def add_seller_input(m: Message, state: FSMContext):
     )
 
 
-def _start_seed(status, seller, name, sid) -> None:
-    """Фоновая первичная загрузка ассортимента (у крупных — до 10+ мин)."""
+def _start_seed(bot, status, name, sid) -> None:
+    """Фоновая первичная загрузка ассортимента (у крупных — до 10+ мин).
+
+    Новый источник ещё не загружен (seeded_at пуст) → sync пометит его загруженным
+    молча; тем, кто уже следит за этим магазином, изменения уйдут как обычно.
+    """
     async def _seed():
         try:
-            # под _pass_lock: иначе минутный джоб видит магазин раньше, чем сид
-            # пометил товары известными, и рассылает ВЕСЬ ассортимент как «новинки»
-            async with _pass_lock:
-                fetched, _, _ = await sync_seller(seller, silent_seed=True)
+            async with _pass_lock:  # не пересекаемся с минутным проходом
+                fetched = await sync_and_notify(bot, sid)
             await status.edit_text(
                 f"{tge('ok')} Магазин «{esc(name or sid)}» загружен. Товаров: {len(fetched or [])}.",
                 parse_mode="HTML",
@@ -567,15 +574,16 @@ async def choose_price_mode(cb: CallbackQuery, callback_data: kb.PriceModeCB, st
         return
     b2b = bool(callback_data.b2b)
     async with Session() as s:
-        await repo.add_seller(s, sid, name=name, brand=brand, b2b=b2b)
+        await repo.add_source(s, cb.from_user.id, sid, name=name, brand=brand, b2b=b2b)
+        no_account = b2b and await repo.business_account(s, cb.from_user.id) is None
         await s.commit()
-        seller = await repo.get_seller(s, sid)
+    warn = "\n⚠️ Бизнес-аккаунта нет — бизнес-цен не будет, пока не войдёшь: /wblogin" if no_account else ""
     status = await cb.message.edit_text(
         f"{tge('clock')} Магазин «{esc(name or sid)}» ({reporting.mode_tag(b2b)}) добавлен. "
-        "Гружу ассортимент в фоне — пришлю, как закончу.",
+        f"Гружу ассортимент в фоне — пришлю, как закончу.{warn}",
         parse_mode="HTML",
     )
-    _start_seed(status, seller, name, sid)
+    _start_seed(cb.bot, status, name, sid)
     await cb.answer()
     text, markup = await views.view_sellers(cb.from_user.id)
     await cb.bot.send_message(cb.from_user.id, text, reply_markup=markup, parse_mode="HTML")
@@ -587,7 +595,7 @@ async def nav_del_seller(cb: CallbackQuery):
     if await _deny_if_not_admin(cb):
         return
     async with Session() as s:
-        sellers = await repo.list_sellers(s)
+        sellers = await repo.list_sources(s, cb.from_user.id)
     if not sellers:
         await cb.answer("Список магазинов пуст", show_alert=True)
         return
@@ -600,7 +608,7 @@ async def del_seller_ask(cb: CallbackQuery, callback_data: kb.SellerCB):
     if await _deny_if_not_admin(cb):
         return
     async with Session() as s:
-        sl = await repo.get_seller(s, callback_data.sid)
+        sl = await repo.get_source(s, cb.from_user.id, callback_data.sid)
     name = sl.name if sl and sl.name else callback_data.sid
     await _edit(cb, f"Точно удалить «{esc(name)}»?", kb.seller_delete_confirm(callback_data.sid))
     await cb.answer()
@@ -611,9 +619,9 @@ async def del_seller_do(cb: CallbackQuery, callback_data: kb.SellerCB):
     if await _deny_if_not_admin(cb):
         return
     async with Session() as s:
-        await repo.remove_seller(s, callback_data.sid)
+        await repo.remove_source(s, cb.from_user.id, callback_data.sid)
         await s.commit()
-        sellers = await repo.list_sellers(s)
+        sellers = await repo.list_sources(s, cb.from_user.id)
     await cb.answer("Удалён")
     if sellers:
         await _edit(cb, "Выберите магазин для удаления:", kb.sellers_delete_list(sellers))

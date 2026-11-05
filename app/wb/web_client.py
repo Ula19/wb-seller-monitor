@@ -2,12 +2,12 @@
 
 Два раздельных запроса, как и в мобильном api-ios:
 - розница: каталог продавца АНОНИМНО (только антибот-куки) — список, сток, розничная цена;
-- бизнес: detail с куками БИЗНЕС-аккаунта + b2b=true — бизнес-цена (только b2b-магазины).
+- бизнес: detail с куками бизнес-аккаунта + b2b=true — бизнес-цена. Куки передаёт
+  вызывающий: у каждого пользователя свой аккаунт, клиент их не хранит.
 
 WB пускает только «браузер»: нужна свежая антибот-кука x_wbaas_token (живёт минуты,
 иначе 498) и заголовки настоящего браузера (иначе 403). Их выпускает анонимный
-браузер (web_session.mint_antibot) — заранее по возрасту и сразу при 498. Куки
-аккаунта (живут неделями) даёт keeper. Ходим curl_cffi через выделенный прокси:
+браузер (web_session.mint_antibot) — заранее по возрасту и сразу при 498. Ходим curl_cffi через выделенный прокси:
 антибот-кука привязана к IP, с которого её выпустили.
 Основной путь бота; при сбое client.py откатывается на мобильный api-ios.
 """
@@ -20,7 +20,7 @@ from curl_cffi.requests import AsyncSession
 
 from app.config import settings
 from app.wb.parser import NormProduct, normalize
-from app.wb.web_session import SELLER_URL, account_cookies, curl_proxy, is_logged, mint_antibot, web_proxy
+from app.wb.web_session import SELLER_URL, curl_proxy, mint_antibot, web_proxy
 
 log = logging.getLogger(__name__)
 
@@ -61,7 +61,6 @@ def _items(r) -> list:
 
 class WebClient:
     def __init__(self) -> None:
-        self._account = ""      # куки бизнес-аккаунта (от keeper) — только для бизнес-detail
         self._antibot = ""      # куки антибота из браузера (x_wbaas_token…) — живут минуты
         self._headers: dict[str, str] = {}  # заголовки того же браузера
         self._minted_at = 0.0   # monotonic, когда выпустили антибот
@@ -77,16 +76,6 @@ class WebClient:
         """Розничный веб возможен: антибот выпускаем сами, нужен только прокси
         (прямой IP сервера антибот WB палит)."""
         return bool(web_proxy())
-
-    @property
-    def account_ready(self) -> bool:
-        """Есть залогиненный бизнес-аккаунт для бизнес-цен."""
-        return bool(self._account)
-
-    def set_session(self, storage_state) -> None:
-        """Куки аккаунта от keeper. Пустая строка — аккаунта нет."""
-        self._account = account_cookies(storage_state) if is_logged(storage_state) else ""
-        log.info("веб-клиент: куки аккаунта %s", "обновлены" if self._account else "очищены")
 
     def _ensure_session(self) -> AsyncSession:
         if self._session is None:
@@ -147,7 +136,7 @@ class WebClient:
             return True
 
     async def _get_items(self, what: str, url: str, params: dict, *,
-                         with_account: bool, referer: str | None = None) -> list | None:
+                         account: str = "", referer: str | None = None) -> list | None:
         """Один запрос → список products. None — антибот/сеть/не 200/битый JSON.
 
         498 = антибот-кука умерла → перевыпуск и ОДИН повтор.
@@ -157,7 +146,7 @@ class WebClient:
                 log.warning("%s: нет антибот-куки", what)
                 return None
             antibot = self._antibot
-            cookie = f"{antibot}; {self._account}" if with_account else antibot
+            cookie = f"{antibot}; {account}" if account else antibot
             headers = {**self._headers, "cookie": cookie}
             if referer:
                 headers["referer"] = referer
@@ -199,7 +188,7 @@ class WebClient:
             params = {**CATALOG_PARAMS, "supplier": supplier_id, "page": page,
                       "xsubject": ";".join(map(str, sorted(subjects)))}
             items = await self._get_items(f"веб-каталог {supplier_id} стр.{page}", CATALOG_URL,
-                                          params, with_account=False,
+                                          params,
                                           referer=SELLER_URL.format(supplier_id))
             if items is None:
                 return None  # ошибка на любой странице → не отдаём недолистанный хвост
@@ -214,19 +203,19 @@ class WebClient:
                 break
         return list(products.values())
 
-    async def fetch_b2b_items(self, nm_ids: list[int]) -> list | None:
-        """Бизнес-цены: сырые товары detail под бизнес-аккаунтом (пачками по 100).
+    async def fetch_b2b_items(self, nm_ids: list[int], account: str) -> list | None:
+        """Бизнес-цены: сырые товары detail под куками аккаунта `account` (пачками по 100).
 
-        None — аккаунта нет или любой запрос упал (client.py уйдёт на мобильный Bearer).
+        None — куки пусты или любой запрос упал.
         """
-        if not self._account:
+        if not account:
             return None
         items: list = []
         for i in range(0, len(nm_ids), DETAIL_CHUNK):
             chunk = nm_ids[i:i + DETAIL_CHUNK]
             params = {**B2B_PARAMS, "nm": ";".join(map(str, chunk))}
             got = await self._get_items(f"веб-бизнес-detail ({len(chunk)} шт.)",
-                                        DETAIL_URL, params, with_account=True)
+                                        DETAIL_URL, params, account=account)
             if got is None:
                 return None
             items.extend(got)
@@ -259,7 +248,6 @@ if __name__ == "__main__":  # self-check антибота: выпуск, TTL, 49
              patch("time.monotonic") as clock:
             clock.return_value = 1000.0
             # 1) первый запрос выпускает антибот; розница идёт БЕЗ кук аккаунта
-            c._account = "wbx-validation-key=acc"
             http.get.return_value = resp(200, [phone])
             assert [p.nm_id for p in await c.fetch_catalog(7)] == [1]
             assert mint.await_count == 1 and mint.await_args.args == (7,)  # на странице этого продавца
@@ -283,7 +271,7 @@ if __name__ == "__main__":  # self-check антибота: выпуск, TTL, 49
             http.get.side_effect = None
             # 4) бизнес-detail: свежий антибот + куки аккаунта
             http.get.return_value = resp(200, [phone])
-            assert len(await c.fetch_b2b_items([1])) == 1
+            assert len(await c.fetch_b2b_items([1], "wbx-validation-key=acc")) == 1
             assert http.get.await_args.kwargs["headers"]["cookie"] == "x_wbaas_token=t2; wbx-validation-key=acc"
             # 5) выпуск не удался → None (client.py уйдёт на api-ios), повтор не раньше паузы
             mint.side_effect = lambda sid: None

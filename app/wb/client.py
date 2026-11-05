@@ -2,8 +2,8 @@
 
 Розница и бизнес-цена — РАЗНЫЕ запросы, в обоих режимах:
 - розница (все магазины): каталог продавца анонимно — веб (web_client) или api-ios (guardium);
-- бизнес (b2b-магазины): detail под бизнес-аккаунтом — веб (куки) или api-ios (Bearer).
-Основной путь — веб; у каталога и бизнес-detail свой независимый fallback на api-ios.
+- бизнес: detail веба под куками бизнес-аккаунта владельца источника (business_prices).
+Каталог: основной путь — веб, запасной — api-ios (guardium).
 curl_cffi с имперсонацией остался для статики (static-basket) — мобильному API
 TLS-отпечаток не важен.
 """
@@ -18,7 +18,7 @@ import time
 from curl_cffi.requests import AsyncSession
 
 from app.config import settings
-from app.wb.parser import NormProduct, _delivery, _price, normalize
+from app.wb.parser import NormProduct, _price, normalize
 from app.wb.web_client import web_client
 
 log = logging.getLogger(__name__)
@@ -35,17 +35,6 @@ SUPPLIER_INFO_URL = "https://static-basket-01.wbbasket.ru/vol0/data/supplier-by-
 # slug -> supplier_id: страница /seller/<slug> — SPA, ID отдаёт «конструктор магазинов»
 SHOP_BY_SLUG_URL = "https://static-basket-01.wbcontent.net/vol0/constructor-api/shops/v3/{}.json"
 
-# Бизнес-цены (fallback веба): тот же detail, что шлёт приложение в бизнес-режиме
-# (снято из HAR 2026-10-28): b2b=true + mdg=3 + udg + Bearer аккаунта.
-B2B_DETAIL_URL = "https://api-ios.wildberries.ru/__internal/card/cards/v4/detail"
-B2B_PARAMS = {
-    "appType": 64, "curr": "rub", "spp": 40, "lang": "ru", "locale": "ru",
-    "ab_testing": "false", "hide_dflags": 1048576, "hide_dtype": 11,
-    "hide_vflags": 35188667056128, "loyalty": 1, "uclusters": 1,
-    "b2b": "true", "mdg": 3,
-}
-# Розница detail НЕ нужна: каталог уже даёт точную розничную цену (СПП у WB
-# стандартная, не персональная — аноним == аккаунт, проверено 4/4). enrich только для b2b.
 
 
 def _parse_proxies(raw: str) -> list[str]:
@@ -70,16 +59,6 @@ def guardium_expires_at(token: str) -> int | None:
         payload = base64.b64decode(token.split(".")[3]).decode()
         return int(payload.split("|")[3])
     except (IndexError, ValueError, UnicodeDecodeError):
-        return None
-
-
-def bearer_user(token: str) -> str | None:
-    """ID аккаунта из Bearer (JWT: заголовок.payload.подпись). Не JWT — None."""
-    try:
-        payload = token.removeprefix("Bearer ").strip().split(".")[1]
-        data = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
-        return str(data["user"])
-    except (IndexError, KeyError, ValueError, TypeError):
         return None
 
 
@@ -159,22 +138,11 @@ class WBClient:
         self._slots = self._make_slots()
         self._slot_rr = 0  # round-robin по слотам для запросов вне минутного прохода
         log.info("WB-клиент: слотов %d (прямой + прокси %d)", len(self._slots), len(self._proxies))
-        self.bearer = settings.wb_bearer.strip()  # Bearer аккаунта для бизнес-цен
-        self.b2b_fail_streak = 0  # подряд провалов b2b (нет Bearer / 401 / 403)
-        self.bearer_alerted = False  # уже предупредили о негодном Bearer
         self.guardium = settings.wb_guardium.strip()
         self.guardium_fail_streak = 0  # подряд 498 от каталога = guardium мёртв
         self.guardium_alerted = False
-        # Веб-пути (основные): куки от keeper. Каталог (розница) и бизнес-detail
-        # падают и поднимаются независимо, у каждого свой fallback на api-ios.
+        # веб-каталог (основной путь розницы) — со своим выключателем и fallback на api-ios
         self.web_catalog = _WebPath("веб-каталог (розница)")
-        self.web_b2b = _WebPath("веб-detail (бизнес-цены)")
-
-    def set_web_session(self, storage_state) -> None:
-        """Свежая банка кук от keeper — оба веб-пути пробуем заново."""
-        web_client.set_session(storage_state)
-        self.web_catalog.ok()
-        self.web_b2b.ok()
 
     def _make_slots(self) -> list[_Slot]:
         slots = [_Slot(self._make_session(None), None)]  # прямой IP сервера
@@ -201,14 +169,6 @@ class WBClient:
             headers=HEADERS, impersonate=IMPERSONATE, timeout=20, proxies=proxies,
             discard_cookies=True,  # куки ответов WB нам не нужны, не копим их
         )
-
-    def set_bearer(self, token: str) -> None:
-        """Новый Bearer подхватывается следующим же запросом бизнес-цен."""
-        token = token.strip()
-        self.bearer = token if token.startswith("Bearer ") else f"Bearer {token}"
-        self.b2b_fail_streak = 0
-        self.bearer_alerted = False
-        log.info("WB-клиент: Bearer обновлён")
 
     def set_guardium(self, token: str) -> None:
         """Новый guardium подхватывается следующим же запросом каталога."""
@@ -407,33 +367,18 @@ class WBClient:
                             supplier_id, slot.proxy or "direct", before_filter, sorted(subjects))
         return products
 
-    async def enrich_prices(self, products: list[NormProduct], slot: "_Slot | None" = None) -> set[int]:
-        """Бизнес-цена b2b-товаров — отдельным запросом detail под бизнес-аккаунтом.
+    async def business_prices(self, products: list[NormProduct], account: str) -> dict[int, int]:
+        """Бизнес-цены {nm_id: ₽} под куками аккаунта `account` (веб-detail, b2b=true).
 
-        Основной путь — веб (куки аккаунта), при сбое — api-ios (Bearer). Каталог
-        даёт только розницу, поэтому без detail бизнес-цены нет (monitor пометит stale).
-        Возвращает nm с реально полученной ценой.
+        Пусто — аккаунта нет или WB не ответил: monitor оставит прежнюю цену
+        и пометит её неподтверждённой. Запасного пути нет: общий Bearer дал бы
+        одну цену всем пользователям, а у каждого аккаунта она своя.
         """
-        if not products:
-            return set()
-        if web_client.account_ready and self.web_b2b.usable(time.monotonic()):
-            items = await web_client.fetch_b2b_items([p.nm_id for p in products])
-            if items is not None:
-                self.web_b2b.ok()
-                priced = self._apply_detail(products, items)
-                if priced:
-                    self.b2b_fail_streak = 0  # бизнес-цены приходят — Bearer-алерт не нужен
-                log.info("веб бизнес-цены применены: %d/%d", len(priced), len(products))
-                return priced
-            self.web_b2b.fail(time.monotonic())
-        return await self._enrich_prices_mobile(products, slot)
-
-    @staticmethod
-    def _apply_detail(products: list[NormProduct], items: list) -> set[int]:
-        """Цена и доставка из ответа detail поверх товаров. Возвращает nm с ценой."""
+        if not products or not account:
+            return {}
+        items = await web_client.fetch_b2b_items([p.nm_id for p in products], account)
         prices: dict[int, int] = {}
-        deliv: dict[int, tuple] = {}
-        for it in items:
+        for it in items or []:
             try:
                 nm = int(it["id"])
             except (KeyError, TypeError, ValueError):
@@ -441,51 +386,8 @@ class WBClient:
             val = _price(it)
             if val is not None:
                 prices[nm] = val
-            deliv[nm] = _delivery(it)
-        for p in products:
-            if p.nm_id in prices:
-                p.price = prices[p.nm_id]
-            if p.nm_id in deliv:
-                p.delivery_hours, p.from_seller = deliv[p.nm_id]
-        return set(prices)
-
-    async def _enrich_prices_mobile(self, products: list[NormProduct], slot: "_Slot | None" = None) -> set[int]:
-        """Бизнес-цена из мобильного detail (b2b=true + Bearer, батчи по 100) — fallback.
-
-        Без Bearer не ходим вовсе: detail без него отдаёт розницу, а её нельзя выдавать
-        за бизнес-цену — товары получат «цена не подтверждена».
-        """
-        nm_ids = [p.nm_id for p in products]
-        if not self.bearer:
-            self.b2b_fail_streak += 1
-            log.warning("b2b: Bearer не задан — бизнес-цены пропущены (%d товаров)", len(products))
-            return set()
-        slot = slot or self._next_slot()
-        headers = {**_mobile_headers(self.guardium), "authorization": self.bearer}
-        items: list = []
-        statuses: list[str] = []  # коды ответов по чанкам — для лога
-        for i in range(0, len(nm_ids), 100):
-            chunk = nm_ids[i:i + 100]
-            params = {**B2B_PARAMS, "dest": settings.wb_dest, "udg": settings.wb_b2b_udg,
-                      "nm": ";".join(map(str, chunk))}
-            r = await self._get(B2B_DETAIL_URL, params=params, headers=headers, slot=slot)
-            statuses.append("сеть" if r is None else str(r.status_code))
-            if r is None or r.status_code != 200:
-                continue  # 498 = guardium (алерт по каталогу), 401/403 считаем ниже
-            try:
-                items.extend(r.json().get("products") or [])
-            except Exception:
-                continue
-        priced = self._apply_detail(products, items)
-        # 401/403 = WB не принял Bearer (сессию отозвали) — копим счётчик для алерта.
-        # Сеть/429/498 — не про Bearer, счётчик не трогаем.
-        if any(code in ("401", "403") for code in statuses) and not priced:
-            self.b2b_fail_streak += 1
-        elif priced:
-            self.b2b_fail_streak = 0
-        log.info("api-ios бизнес-цены применены: %d/%d (ответы %s, слот %s)", len(priced),
-                 len(products), ",".join(statuses) or "-", slot.proxy or "direct")
-        return priced  # остальным monitor сохранит прежнюю цену
+        log.info("веб бизнес-цены: %d/%d", len(prices), len(products))
+        return prices
 
     async def resolve_seller_slug(self, slug: str) -> int | None:
         """supplier_id по slug-ссылке /seller/<slug> (для SEO-адресов без числа)."""
@@ -523,7 +425,6 @@ if __name__ == "__main__":  # self-check выбора пути: веб/api-ios, 
         mobile = AsyncMock(return_value=[prod(9)])
         c._fetch_catalog_mobile = mobile
         with patch("app.wb.web_client.web_proxy", lambda: "http://p:1"), \
-             patch.object(web_client, "_account", "acc"), \
              patch.object(web_client, "fetch_catalog", AsyncMock()) as web_cat, \
              patch.object(web_client, "fetch_b2b_items", AsyncMock()) as web_b2b, \
              patch("time.monotonic") as clock:
@@ -582,16 +483,16 @@ if __name__ == "__main__":  # self-check выбора пути: веб/api-ios, 
             calls = web_cat.await_count
             assert [p.nm_id for p in await c.fetch_seller_catalog(1)] == [1]
             assert web_cat.await_count == calls + 1 and not c.web_catalog.down
-            # 5) бизнес-цена: веб-detail кладёт СВОЮ цену поверх розницы
+            # 5) бизнес-цены — словарь под куками аккаунта; товары каталога не трогаем
             web_b2b.return_value = [{"id": 1, "sizes": [{"price": {"product": 9000}}]}]
             ps = [prod(1), prod(2)]
-            assert await c.enrich_prices(ps) == {1}
-            assert ps[0].price == 90 and ps[1].price == 100  # у nm=2 цены нет → monitor пометит stale
-            # 6) веб-detail упал → api-ios с Bearer; каталог при этом жив
+            assert await c.business_prices(ps, "acc") == {1: 90}
+            assert web_b2b.await_args.args == ([1, 2], "acc") and ps[0].price == 100
+            # 6) без аккаунта в WB не ходим; WB не ответил → пусто, каталог жив
+            calls = web_b2b.await_count
+            assert await c.business_prices(ps, "") == {} and web_b2b.await_count == calls
             web_b2b.return_value = None
-            c.bearer = ""
-            assert await c.enrich_prices([prod(1)]) == set()
-            assert c.b2b_fail_streak == 1 and c.web_b2b.fails == 1 and not c.web_catalog.down
+            assert await c.business_prices(ps, "acc") == {} and not c.web_catalog.down
         print("ok")
 
     asyncio.run(demo())

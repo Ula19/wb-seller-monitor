@@ -25,11 +25,11 @@ async def view_sellers(uid: int):
     return f"{tge('shop')} Магазины:", kb.sellers_menu(access.is_admin(uid))
 
 
-async def view_list_sellers():
+async def view_list_sellers(uid: int):
     async with Session() as s:
-        sellers = await repo.list_sellers(s)
+        sellers = await repo.list_sources(s, uid)
         counts = {
-            sl.supplier_id: await repo.count_active_products(s, sl.supplier_id)
+            sl.supplier_id: await repo.count_active_items(s, sl.supplier_id)
             for sl in sellers
         }
     if not sellers:
@@ -70,16 +70,15 @@ async def view_stats():
 async def run_checknow_one(bot, user_id: int, supplier_id: int) -> bool:
     """Внеочередная проверка одного магазина + отчёт запросившему."""
     async with Session() as s:
-        seller = await repo.get_seller(s, supplier_id)
-    if not seller:
-        return False
+        if not await repo.get_source(s, user_id, supplier_id):
+            return False
     try:
         async with _pass_lock:  # не пересекаемся с джобами/сидом
-            await sync_and_notify(bot, seller)  # b2b и так обогащается целиком каждый вызов
+            await sync_and_notify(bot, supplier_id)
     except Exception:
         pass
     async with Session() as s:
-        seller = await repo.get_seller(s, supplier_id)
-        products = await repo.get_active_products(s, supplier_id)
-    await send_report_to(bot, [user_id], seller, products)
+        src = await repo.get_source(s, user_id, supplier_id)
+        products = await repo.source_products(s, src)
+    await send_report_to(bot, [user_id], src, products)
     return True

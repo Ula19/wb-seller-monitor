@@ -9,5 +9,5 @@ router = Router()
 
 @router.message(Command("listsellers"))
 async def listsellers(m: Message):
-    text, markup = await views.view_list_sellers()
+    text, markup = await views.view_list_sellers(m.from_user.id)
     await m.answer(text, reply_markup=markup)
