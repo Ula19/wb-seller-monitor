@@ -17,6 +17,7 @@ from app.db.base import Session
 from app.services import reporting
 from app.wb.client import guardium_expires_at, wb_client
 from app.wb.parser import NormProduct
+from app.wallet import best_offer, offer_text
 from app.wb.web_session import account_cookies, is_logged
 
 log = logging.getLogger(__name__)
@@ -88,6 +89,42 @@ def _source_notes(src, fetched, old, acc, biz_old, biz_new) -> list:
     return notes
 
 
+async def _check_targets(s, sources, fetched, accounts, biz_new) -> list:
+    """Цели ₽ по ценам ЭТОГО цикла — тем же, что идут в обычные пуши о цене: розница — витрина
+    каталога, бизнес — бизнес-цена, пришедшая сейчас (не пришла → цель не трогаем). Кошелёк — от
+    той же витрины. Пуш — только на пересечении вниз и при остатке > 0. → [(src, товар, [("target", цель, offer)])]
+    """
+    targets = await repo.seller_targets(s, sources[0].supplier_id)
+    if not targets:
+        return []
+    by_nm = {p.nm_id: p for p in fetched}
+    src_by_user = {src.user_id: src for src in sources}
+    wallets: dict[int, list] = {}
+    hits = []
+    for t in targets:
+        p, src = by_nm.get(t.nm_id), src_by_user.get(t.user_id)
+        if src is None:
+            continue  # пользователь не следит за продавцом (или выключил) — цель спит
+        if p is None:  # пропал из выдачи = нет в наличии: сбрасываем, возвращение ниже цели снова даст пуш
+            t.below = False
+            continue
+        if src.b2b:
+            acc = accounts.get(t.user_id)
+            own = biz_new.get(acc[0], {}).get(p.nm_id) if acc else None
+            if own is None:
+                continue  # бизнес-цена не подтверждена в этом цикле — цель не трогаем
+        else:
+            own = p.shelf_price
+        if t.user_id not in wallets:
+            wallets[t.user_id] = [a for a in await repo.user_accounts(s, t.user_id) if a.status == "active"]
+        offer = best_offer(own, src.b2b, p.shelf_price, wallets[t.user_id])
+        below = offer is not None and p.stock > 0 and offer[0] <= t.price
+        if below and not t.below:
+            hits.append((src, replace(p, price=offer[0]), [("target", t.price, offer)]))
+        t.below = below
+    return hits
+
+
 async def sync_seller(supplier_id: int, *, slot=None):
     """Тянет каталог продавца и пишет снимок. Возвращает (продавец, товары, заметки).
 
@@ -130,6 +167,7 @@ async def sync_seller(supplier_id: int, *, slot=None):
             for src in sources:
                 if src.seeded_at is not None:
                     notes += _source_notes(src, fetched, old, accounts.get(src.user_id), biz_old, biz_new)
+            notes += await _check_targets(s, sources, fetched, accounts, biz_new)
             await repo.mark_seeded(s, [src.id for src in sources if src.seeded_at is None])
             await repo.touch_seller(s, supplier_id)
             await s.commit()
@@ -145,8 +183,13 @@ async def notify(bot, seller, notes) -> None:
     """Каждая заметка — отдельным сообщением владельцу источника."""
     name = seller.name or str(seller.supplier_id)
     for src, p, events in notes:
-        text = (reporting.new_caption(name, p, src.b2b) if events is None
-                else reporting.change_caption(name, p, events, src.b2b))
+        if events is None:
+            text = reporting.new_caption(name, p, src.b2b)
+        elif events[0][0] == "target":
+            _, target, offer = events[0]
+            text = reporting.target_caption(name, p, target, offer_text(offer))
+        else:
+            text = reporting.change_caption(name, p, events, src.b2b)
         for uid in settings.superadmins:  # одно пространство: цены и новинки — всем из списка
             try:
                 await bot.send_message(uid, text, parse_mode="HTML", reply_markup=reporting.wb_button(p.url))

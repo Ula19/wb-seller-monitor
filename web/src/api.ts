@@ -35,6 +35,7 @@ export type Item = {
   nm_id: number; name: string; brand: string | null; url: string; supplier_id: number; seller: string | null;
   b2b: boolean; price: number | null; price_stale: boolean; shelf_price: number | null;
   wallet_price: number | null; wallet_account: string | null; price_24h: number | null; is_new: boolean;
+  best_price: number | null; best_how: string | null; target: number | null; below_target: boolean;
   stock: number; delivery_hours: number | null;
 };
 export type FeedEvent = {

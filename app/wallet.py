@@ -25,6 +25,30 @@ def wallet_price(price: int | None, accounts) -> tuple[int, object] | None:
     return best
 
 
+def best_offer(own: int | None, b2b: bool, shelf: int | None, accounts) -> tuple[int, str, object] | None:
+    """Лучшая цена, по которой можно купить → (цена, откуда, аккаунт|None). Её сравнивают с целью.
+
+    own — цена источника, ПОДТВЕРЖДЁННАЯ: розница = витрина каталога, бизнес = бизнес-цена этого
+    цикла (неподтверждённую не передавать — цель по ней не срабатывает). Кошелёк — от той же витрины.
+    откуда: business | retail | wallet.
+    """
+    offers = []
+    if own:
+        offers.append((own, "business" if b2b else "retail", None))
+    if w := wallet_price(shelf, accounts):
+        offers.append((w[0], "wallet", w[1]))
+    return min(offers, key=lambda o: o[0]) if offers else None
+
+
+def offer_text(offer) -> str:
+    """Подпись к цене: «с Кошельком −6% · аккаунт …23-82» / «бизнес-цена» / «витрина»."""
+    price, kind, acc = offer
+    if kind == "wallet":
+        label = acc.label or ""
+        return f"с Кошельком −{acc.wallet_pct}% · аккаунт …{label[-5:]}"
+    return "бизнес-цена" if kind == "business" else "витрина"
+
+
 if __name__ == "__main__":
     from types import SimpleNamespace as A
 
@@ -38,4 +62,12 @@ if __name__ == "__main__":
     assert wallet_price(1000, [lim]) == (940, lim) and wallet_price(1001, [lim]) is None  # граница — до скидки
     b2b = A(label="бизнес", wallet_pct=None, limit_left=None, max_order=None, max_rid=None)
     assert wallet_price(1000, [b2b]) is None and wallet_price(None, [six]) is None
+    # лучшая цена для цели: кошелёк дешевле витрины; бизнес дешевле кошелька; без своей цены — только кошелёк
+    six.label = "+7 ••• •••-23-82"
+    assert best_offer(121581, False, 121581, [six]) == (114286, "wallet", six)
+    assert offer_text(best_offer(121581, False, 121581, [six])) == "с Кошельком −6% · аккаунт …23-82"
+    assert best_offer(100000, True, 121581, [six]) == (100000, "business", None)
+    assert best_offer(None, True, 121581, []) is None  # бизнес не подтверждён, кошелька нет — сравнивать не с чем
+    assert best_offer(700000, False, 700000, [six]) == (700000, "retail", None)  # не влезает в лимит
+    assert offer_text((1, "business", None)) == "бизнес-цена" and offer_text((1, "retail", None)) == "витрина"
     print("ok")

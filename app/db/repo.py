@@ -228,6 +228,31 @@ async def source_products(s, src: models.Source) -> list[NormProduct]:
     return out
 
 
+# ---------- цели ₽ ----------
+async def user_targets(s, uid: int) -> dict[int, models.Target]:
+    res = await s.execute(select(models.Target).where(models.Target.user_id == uid))
+    return {t.nm_id: t for t in res.scalars().all()}
+
+
+async def seller_targets(s, supplier_id: int) -> list[models.Target]:
+    """Цели всех пользователей на товары продавца (для проверки после синка)."""
+    res = await s.execute(select(models.Target).join(models.Item, models.Item.nm_id == models.Target.nm_id)
+                          .where(models.Item.supplier_id == supplier_id))
+    return list(res.scalars().all())
+
+
+async def set_target(s, uid: int, nm_id: int, price: int) -> None:
+    """Новая/изменённая цель начинает «с чистого листа»: below=False — уже ниже → пуш на ближайшем цикле."""
+    stmt = pg_insert(models.Target).values(user_id=uid, nm_id=nm_id, price=price, below=False)
+    await s.execute(stmt.on_conflict_do_update(
+        index_elements=[models.Target.user_id, models.Target.nm_id], set_={"price": price, "below": False}))
+
+
+async def delete_target(s, uid: int, nm_id: int) -> bool:
+    res = await s.execute(delete(models.Target).where(models.Target.user_id == uid, models.Target.nm_id == nm_id))
+    return res.rowcount > 0
+
+
 # ---------- аккаунты WB ----------
 async def business_account(s, uid: int) -> models.WbAccount | None:
     """Бизнес-аккаунт пользователя для бизнес-цен (если их несколько — первый)."""

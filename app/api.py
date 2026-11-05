@@ -26,7 +26,7 @@ from sqlalchemy.exc import IntegrityError
 from app.config import settings
 from app.db import models, repo
 from app.db.base import Session
-from app.wallet import wallet_price
+from app.wallet import best_offer, offer_text, wallet_price
 
 COOKIE = "wbm_session"
 SESSION_TTL = 30 * 86400
@@ -222,15 +222,22 @@ async def items(seller_id: int | None = None, q: str = "", in_stock: bool = Fals
     rows = [(src, p) for src in srcs for p in await repo.source_products(s, src)
             if not (q and q not in f"{p.name} {p.brand or ''} {p.nm_id}".lower()) and not (in_stock and not p.stock)]
     ago = await repo.price_ago(s, [p.nm_id for _, p in rows], datetime.now(timezone.utc) - timedelta(days=1))
+    targets = await repo.user_targets(s, u.telegram_id)
     out = []
     for src, p in rows:
         w = wallet_price(p.shelf_price, accounts)
         p24, new = ago.get(p.nm_id, (None, False))
+        # лучшая цена — как в пуше «ниже цели» (неподтверждённая бизнес-цена не в счёт)
+        best = best_offer(None if p.price_stale else p.price, src.b2b, p.shelf_price, accounts)
+        t = targets.get(p.nm_id)
         out.append({"nm_id": p.nm_id, "name": p.name, "brand": p.brand, "url": p.url,
                     "supplier_id": src.supplier_id, "seller": src.name, "b2b": src.b2b,
                     "price": p.price, "price_stale": p.price_stale, "shelf_price": p.shelf_price,
                     "wallet_price": w[0] if w else None, "wallet_account": w[1].label if w else None,
                     "price_24h": None if new else p24, "is_new": new,
+                    "best_price": best[0] if best else None, "best_how": offer_text(best) if best else None,
+                    "target": t.price if t else None,
+                    "below_target": bool(t and best and p.stock > 0 and best[0] <= t.price),
                     "stock": p.stock, "delivery_hours": p.delivery_hours})
     return out
 
@@ -241,6 +248,29 @@ async def feed(limit: int = Query(100, ge=1, le=500), u=Depends(user), s=Depends
     return [{"nm_id": r.nm_id, "name": r.name, "supplier_id": r.supplier_id, "event": r.event,
              "price": r.price, "stock": r.stock, "old_price": r.old_price, "old_stock": r.old_stock,
              "at": r.at} for r in await repo.feed(s, u.telegram_id, limit)]
+
+
+# ---------- цели ₽ ----------
+class TargetIn(BaseModel):
+    price: int = Field(gt=0, le=100_000_000)
+
+
+@app.put("/api/targets/{nm_id}")
+async def put_target(nm_id: int, body: TargetIn, u=Depends(user), s=Depends(db)):
+    item = await s.get(models.Item, nm_id)
+    if item is None or not await repo.get_source(s, u.telegram_id, item.supplier_id):
+        raise HTTPException(404, "товара нет среди ваших продавцов")
+    await repo.set_target(s, u.telegram_id, nm_id, body.price)
+    await s.commit()
+    return {"nm_id": nm_id, "target": body.price}
+
+
+@app.delete("/api/targets/{nm_id}")
+async def delete_target(nm_id: int, u=Depends(user), s=Depends(db)):
+    if not await repo.delete_target(s, u.telegram_id, nm_id):
+        raise HTTPException(404, "цели нет")
+    await s.commit()
+    return {"ok": True}
 
 
 # ---------- аккаунты WB ----------

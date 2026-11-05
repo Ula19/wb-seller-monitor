@@ -175,6 +175,21 @@ def change_caption(seller_name: str, p, events, b2b: bool = True) -> str:
     return "\n".join(lines)
 
 
+def target_caption(seller_name: str, p, target: int, how: str) -> str:
+    """🎯 Ниже цели: p.price — лучшая цена (откуда — в how: «с Кошельком −6% · аккаунт …23-82»)."""
+    return "\n".join([
+        "🎯 <b>Ниже цели</b>",
+        "",
+        f"Магазин: {esc(seller_name)}",
+        esc(p.name),
+        f"Артикул: {p.nm_id}",
+        "",
+        f"Цена: <b>{fmt_price(p.price)}</b> · {esc(how)}",
+        f"Цель: {fmt_price(target)}",
+        f"Остаток: {fmt_stock(p.stock)}",
+    ])
+
+
 # --- грубый разбор названия для группировки/сортировки (модель · память · цвет) ---
 # ponytail: эвристика под «модель <RAM> <ROM> <цвет>»; экзотику разложит хуже,
 # апгрейд — словарь моделей по брендам, если понадобится.

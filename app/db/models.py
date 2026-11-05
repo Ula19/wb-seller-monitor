@@ -183,6 +183,24 @@ class AccountPrice(Base):
     priced_at: Mapped[datetime] = _now()
 
 
+class Target(Base):
+    """Цель ₽ на товар: пуш, когда лучшая цена (витрина/бизнес/с Кошельком) опустится до неё.
+
+    below — сейчас ниже цели (и в наличии): пуш только на пересечении вниз, без повторов;
+    цена выше или товар кончился — сбрасывается, следующее пересечение снова даст пуш.
+    """
+
+    __tablename__ = "targets"
+
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.telegram_id", ondelete="CASCADE"), primary_key=True)
+    nm_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("items.nm_id", ondelete="CASCADE"), primary_key=True)
+    price: Mapped[int] = mapped_column(Integer)
+    below: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    created_at: Mapped[datetime] = _now()
+
+
 class WbLoginRequest(Base):
     """Заявка сайта на вход в аккаунт WB. api пишет, worker выполняет (браузер есть только у него).
 

@@ -104,6 +104,22 @@ td.num, th.num { text-align: right; white-space: nowrap; }
 tr:last-child td { border-bottom: 0; }
 td.name { min-width: 240px; max-width: 420px; }
 tr.dim td { opacity: .55; }
+tr.hit td { background: var(--ok-soft); }
+
+/* цель ₽ */
+.target-cell { white-space: nowrap; }
+.tgt { display: inline-flex; gap: 6px; align-items: center; font-variant-numeric: tabular-nums; }
+.tgt .x { border: 0; background: none; color: var(--muted); cursor: pointer; padding: 0 2px; }
+.tgt .x:hover { color: var(--bad); }
+.tgt-quick { display: inline-flex; gap: 4px; }
+.mini {
+  border: 1px solid var(--line); background: #fff; border-radius: 6px; padding: 2px 7px; font-size: 12px;
+  cursor: pointer; color: var(--muted);
+}
+.mini:hover { border-color: var(--accent); color: var(--accent); }
+.tgt-edit { display: inline-flex; gap: 4px; }
+.tgt-edit input { width: 96px; padding: 4px 8px; }
+.btn.sm { padding: 4px 10px; }
 .pad { padding: 16px; margin: 0; }
 
 .badge { display: inline-block; border-radius: 6px; padding: 1px 7px; font-size: 12px; white-space: nowrap; }
@@ -156,6 +172,12 @@ tr.dim td { opacity: .55; }
   border-radius: 50%; animation: spin .8s linear infinite; vertical-align: -1px;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* ноутбук: таблице товаров нужна вся ширина — лента уходит под неё */
+@media (max-width: 1500px) {
+  .with-feed { grid-template-columns: minmax(0, 1fr); }
+  .feed-side { position: static; max-height: none; }
+}
 
 /* телефон: меню вниз, лента под товарами */
 @media (max-width: 768px) {
