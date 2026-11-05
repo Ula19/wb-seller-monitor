@@ -54,6 +54,7 @@ def parse_balance(d: dict) -> dict:
     disc = d.get("discount") or {}
     lim, exp = disc.get("monthly_limit"), disc.get("expenses")
     return {"limit_left": _rub(lim - exp) if isinstance(lim, int) and isinstance(exp, int) else None,
+            "monthly_limit": _rub(lim),
             "max_order": _rub(disc.get("max_order_price")), "max_rid": _rub(disc.get("max_rid_price")),
             "wallet_balance": _rub(d.get("wallet_balance_rub")), "bonus_balance": _rub(d.get("bonus_balance"))}
 
@@ -126,7 +127,7 @@ async def fetch(state: dict) -> dict:
 if __name__ == "__main__":  # self-check на формах ответов из HAR (суммы в копейках)
     b = parse_balance({"wallet_balance_rub": 428500, "bonus_balance": 20100, "discount": {
         "expenses": 23355900, "monthly_limit": 100000000, "max_order_price": 100000000, "max_rid_price": 50000000}})
-    assert b == {"limit_left": 766441, "max_order": 1000000, "max_rid": 500000,
+    assert b == {"limit_left": 766441, "monthly_limit": 1000000, "max_order": 1000000, "max_rid": 500000,
                  "wallet_balance": 4285, "bonus_balance": 201}, b
     assert parse_balance({})["limit_left"] is None  # бизнес-аккаунт без полей — не падаем
     assert parse_grade({"payload": {"payments": [{"wctype_id": 2}, {"wctype_id": 1, "discount_value": 6,

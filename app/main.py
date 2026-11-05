@@ -43,6 +43,13 @@ async def main() -> None:
     await on_startup()
 
     bot = Bot(settings.bot_token)
+    try:  # имя бота нужно виджету входа на сайте (api в Telegram не ходит — берёт из БД)
+        me = await bot.get_me()
+        async with Session() as s:
+            await repo.set_setting(s, repo.BOT_USERNAME_KEY, me.username)
+            await s.commit()
+    except Exception as e:
+        log.warning("имя бота для сайта не сохранено: %s", e)
     dp = Dispatcher(storage=MemoryStorage())
     dp.message.outer_middleware(AuthMiddleware())
     dp.callback_query.outer_middleware(AuthMiddleware())

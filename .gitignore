@@ -37,3 +37,8 @@ scratch_report/
 
 # макеты дизайна сайта
 design/
+
+# сайт: зависимости и сборка (собирается в Docker), скриншоты проверок
+web/node_modules/
+web/dist/
+.playwright-mcp/

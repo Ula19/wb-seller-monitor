@@ -1,0 +1,23 @@
+# в образ — только код. Секреты идут через env_file, HAR/APK с живыми токенами — никогда.
+.env
+.git
+.venv
+venv
+__pycache__
+*.pyc
+*.md
+!README.md
+logs.txt
+price.txt
+wb_buy.har
+scratch_har
+scratch_apk
+scratch_report
+*.har
+design
+browser
+.idea
+.claude
+.playwright-mcp
+web/node_modules
+web/dist

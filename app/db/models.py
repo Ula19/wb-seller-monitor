@@ -142,6 +142,7 @@ class WbAccount(Base):
     # состояние (account_api, раз в 10 мин), рубли; у бизнес-аккаунта может быть NULL
     wallet_pct: Mapped[int | None] = mapped_column(Integer, nullable=True)  # % Кошелька
     limit_left: Mapped[int | None] = mapped_column(Integer, nullable=True)  # остаток месячного лимита скидки
+    monthly_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)  # месячный лимит, сброс 1-го числа
     max_order: Mapped[int | None] = mapped_column(Integer, nullable=True)  # разовый лимит заказа
     max_rid: Mapped[int | None] = mapped_column(Integer, nullable=True)  # лимит позиции
     wallet_balance: Mapped[int | None] = mapped_column(Integer, nullable=True)

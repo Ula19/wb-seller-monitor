@@ -12,11 +12,12 @@ import hmac
 import json
 import re
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -129,6 +130,13 @@ async def auth_password(body: PasswordAuth, resp: Response):
     return _login(resp, settings.owner_id)
 
 
+@app.get("/api/config")
+async def config(s=Depends(db)):
+    """Без входа: странице входа нужны имя бота для виджета и есть ли запасной пароль."""
+    return {"bot_username": await repo.get_setting(s, repo.BOT_USERNAME_KEY),
+            "password_enabled": len(settings.site_password) >= MIN_PASSWORD}
+
+
 @app.post("/api/logout")
 async def logout(resp: Response):
     resp.delete_cookie(COOKIE)
@@ -205,17 +213,19 @@ async def items(seller_id: int | None = None, q: str = "", in_stock: bool = Fals
     srcs = [x for x in await repo.list_sources(s, u.telegram_id) if seller_id in (None, x.supplier_id)]
     accounts = [a for a in await repo.user_accounts(s, u.telegram_id) if a.status == "active"]
     q = q.strip().lower()
+    rows = [(src, p) for src in srcs for p in await repo.source_products(s, src)
+            if not (q and q not in f"{p.name} {p.brand or ''} {p.nm_id}".lower()) and not (in_stock and not p.stock)]
+    ago = await repo.price_ago(s, [p.nm_id for _, p in rows], datetime.now(timezone.utc) - timedelta(days=1))
     out = []
-    for src in srcs:
-        for p in await repo.source_products(s, src):
-            if (q and q not in f"{p.name} {p.brand or ''}".lower()) or (in_stock and not p.stock):
-                continue
-            w = wallet_price(p.shelf_price, accounts)
-            out.append({"nm_id": p.nm_id, "name": p.name, "brand": p.brand, "url": p.url,
-                        "supplier_id": src.supplier_id, "seller": src.name, "b2b": src.b2b,
-                        "price": p.price, "price_stale": p.price_stale, "shelf_price": p.shelf_price,
-                        "wallet_price": w[0] if w else None, "wallet_account": w[1].label if w else None,
-                        "stock": p.stock, "delivery_hours": p.delivery_hours})
+    for src, p in rows:
+        w = wallet_price(p.shelf_price, accounts)
+        p24, new = ago.get(p.nm_id, (None, False))
+        out.append({"nm_id": p.nm_id, "name": p.name, "brand": p.brand, "url": p.url,
+                    "supplier_id": src.supplier_id, "seller": src.name, "b2b": src.b2b,
+                    "price": p.price, "price_stale": p.price_stale, "shelf_price": p.shelf_price,
+                    "wallet_price": w[0] if w else None, "wallet_account": w[1].label if w else None,
+                    "price_24h": None if new else p24, "is_new": new,
+                    "stock": p.stock, "delivery_hours": p.delivery_hours})
     return out
 
 
@@ -228,7 +238,7 @@ async def feed(limit: int = Query(100, ge=1, le=500), u=Depends(user), s=Depends
 
 
 # ---------- аккаунты WB ----------
-ACC_FIELDS = ("id", "label", "phone_mask", "kind", "status", "wallet_pct", "limit_left", "max_order",
+ACC_FIELDS = ("id", "label", "phone_mask", "kind", "status", "wallet_pct", "limit_left", "monthly_limit", "max_order",
               "max_rid", "wallet_balance", "bonus_balance", "state_at")
 ORDER_FIELDS = ("rid", "nm_id", "name", "brand", "price", "dst_office_id", "status_name", "group_id",
                 "status_at", "ordered_at", "expiry_at")
@@ -310,5 +320,13 @@ async def status(u=Depends(user), s=Depends(db)):
     return {"worker_alive": alive, "last_pass": last, "sellers": sellers_n, "items": items_n}
 
 
-if WEB_DIST.is_dir():  # собранный сайт с того же origin: без CORS
-    app.mount("/", StaticFiles(directory=WEB_DIST, html=True), name="web")
+@app.get("/{path:path}", include_in_schema=False)
+async def site(path: str):
+    """Собранный сайт с того же origin (без CORS). Любой не-/api путь без файла → index.html:
+    маршруты React (ссылки из пушей, F5 на /items) обрабатывает сам сайт."""
+    if path == "api" or path.startswith("api/") or not WEB_DIST.is_dir():
+        raise HTTPException(404)
+    f = (WEB_DIST / path).resolve()
+    if path and f.is_file() and f.is_relative_to(WEB_DIST.resolve()):
+        return FileResponse(f)
+    return FileResponse(WEB_DIST / "index.html")

@@ -184,6 +184,19 @@ async def feed(s, uid: int, limit: int = 100) -> list:
     return list(res.all())
 
 
+async def price_ago(s, nm_ids, at: datetime) -> dict[int, tuple[int | None, bool]]:
+    """nm_id → (розничная цена на момент `at`, товар новее `at`). Новому Δ не считаем."""
+    nm_ids = list(nm_ids)
+    if not nm_ids:
+        return {}
+    h = models.PriceHistory
+    last = (select(h.price).where(h.nm_id == models.Item.nm_id, h.at <= at)
+            .order_by(h.at.desc(), h.id.desc()).limit(1).scalar_subquery())
+    res = await s.execute(select(models.Item.nm_id, last, models.Item.first_seen_at > at)
+                          .where(models.Item.nm_id.in_(nm_ids)))
+    return {nm: (price, new) for nm, price, new in res.all()}
+
+
 async def count_active_items(s, supplier_id: int) -> int:
     return await s.scalar(select(func.count()).select_from(models.Item).where(
         models.Item.supplier_id == supplier_id, models.Item.is_active.is_(True))) or 0
@@ -275,7 +288,7 @@ async def upsert_account_prices(s, account_id: int, prices: dict[int, int]) -> N
         set_={"price": stmt.excluded.price, "priced_at": stmt.excluded.priced_at}))
 
 
-ACCOUNT_STATE_FIELDS = ("wallet_pct", "limit_left", "max_order", "max_rid", "wallet_balance", "bonus_balance")
+ACCOUNT_STATE_FIELDS = ("wallet_pct", "limit_left", "monthly_limit", "max_order", "max_rid", "wallet_balance", "bonus_balance")
 
 
 async def save_account_state(s, account_id: int, st: dict) -> None:
@@ -326,6 +339,7 @@ async def fail_stale_logins(s) -> int:
 
 # ---------- настройки (key-value) ----------
 HEARTBEAT_KEY = "monitor_last_pass"  # пульс worker'а: пишет мониторинг, читает /api/status
+BOT_USERNAME_KEY = "bot_username"  # для Telegram-виджета на сайте: пишет worker при старте
 
 async def get_setting(s, key: str) -> str | None:
     row = await s.get(models.AppSetting, key)

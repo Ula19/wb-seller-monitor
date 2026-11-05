@@ -1,3 +1,11 @@
+# сайт (React): собираем отдельно, в итоговый образ попадает только web/dist
+FROM node:22-alpine AS web
+WORKDIR /web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+COPY web/ ./
+RUN npm run build
+
 FROM python:3.12-slim
 
 WORKDIR /app
@@ -13,6 +21,7 @@ RUN apt-get update \
     && patchright install --with-deps chromium
 
 COPY . .
+COPY --from=web /web/dist /app/web/dist
 
 # виртуальный дисплей для headful-браузера keeper'а. Xvfb запускаем сами в фоне:
 # xvfb-run в Docker виснет навсегда, ожидая от Xvfb сигнал готовности.
