@@ -1,0 +1,39 @@
+__pycache__/
+*.pyc
+.env
+.venv/
+venv/
+*.xlsx
+.DS_Store
+
+
+.claude/
+.idea/
+
+# логи и выгрузки с сервера, пробы разведчика
+logs.txt
+price.txt
+scripts/*_probe.py
+
+# .md не трекаем, кроме README (правило №25)
+*.md
+!README.md
+
+
+# HAR с живыми токенами — НЕ коммитить
+wb_buy.har/
+scratch_har/
+*.har
+
+# APK для реверса — не коммитить
+scratch_apk/
+*.apk
+*.xapk
+*.apkm
+*.dex
+
+# security-репорт — не коммитить
+scratch_report/
+
+# макеты дизайна сайта
+design/
