@@ -308,14 +308,15 @@ def apply_profile(acc: models.WbAccount, profile: dict | None) -> None:
 
 
 async def save_account(s, uid: int, phone_mask: str, kind: str, state_enc: bytes,
-                       profile: dict | None = None) -> models.WbAccount:
-    """Вход в аккаунт: тот же номер у пользователя — обновляем, иначе новый аккаунт."""
+                       profile: dict | None = None, proxy_id: int | None = None) -> models.WbAccount:
+    """Вход в аккаунт: тот же номер у пользователя — обновляем, иначе новый аккаунт.
+    Прокси — тот, через который вошли (смена прокси = перелогин)."""
     acc = await s.scalar(select(models.WbAccount).where(
         models.WbAccount.user_id == uid, models.WbAccount.phone_mask == phone_mask))
     if acc is None:
-        acc = models.WbAccount(user_id=uid, phone_mask=phone_mask, label=phone_mask)
+        acc = models.WbAccount(user_id=uid, phone_mask=phone_mask)
         s.add(acc)
-    acc.kind, acc.state_enc, acc.status = kind, state_enc, "active"
+    acc.kind, acc.state_enc, acc.status, acc.proxy_id = kind, state_enc, "active", proxy_id
     apply_profile(acc, profile)
     await s.flush()
     return acc

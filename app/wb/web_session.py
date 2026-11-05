@@ -39,6 +39,19 @@ def web_proxy() -> str | None:
     return first[0] if first else None
 
 
+class ProxyDown(Exception):
+    """Сеть до WB через прокси аккаунта не работает (таймаут, обрыв, 407). Сессия при этом цела —
+    не relogin, а «прокси не отвечает»."""
+
+
+async def _open_home(page) -> None:
+    """Главная WB; сбой навигации (net::ERR_PROXY…, ERR_TUNNEL…, таймаут) = прокси не отвечает."""
+    try:
+        await page.goto(HOME_URL, wait_until="domcontentloaded")
+    except Exception as e:
+        raise ProxyDown(f"{type(e).__name__}: {str(e).splitlines()[0][:160]}") from e
+
+
 def curl_proxy(url: str | None) -> str | None:
     """curl_cffi к socks5-прокси требует socks5h (remote DNS), иначе ошибка 97."""
     if url and url.startswith("socks5://"):
@@ -151,21 +164,22 @@ async def _profile(page) -> dict | None:
         return None
 
 
-async def login(phone: str, get_code) -> dict | None:
+async def login(phone: str, get_code, proxy: str | None = None) -> dict | None:
     """Логин аккаунта WB по телефону. get_code() — корутина, возвращает код из пуша.
+    proxy — прокси аккаунта (нет — общий web_proxy()).
 
-    Возвращает storageState (банку кук) или None, если логин не удался.
+    Возвращает storageState (банку кук) или None, если логин не удался. ProxyDown — прокси не отвечает.
     """
     from patchright.async_api import async_playwright
 
-    proxy = _pw_proxy(web_proxy())
+    proxy = _pw_proxy(proxy or web_proxy())
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=False, proxy=proxy, args=LAUNCH_ARGS)
         try:
             ctx = await browser.new_context(locale="ru-RU")
             page = await ctx.new_page()
             # прогрев: сначала главная (антибот-куки), потом строгая страница логина
-            await page.goto(HOME_URL, wait_until="domcontentloaded")
+            await _open_home(page)
             await asyncio.sleep(6)
             await page.goto(LOGIN_URL, wait_until="domcontentloaded")
             try:
@@ -201,23 +215,24 @@ async def login(phone: str, get_code) -> dict | None:
             await browser.close()
 
 
-async def refresh(storage_state: dict | str) -> dict | None:
+async def refresh(storage_state: dict | str, proxy: str | None = None) -> dict | None:
     """Поддержание сессии: заходим на сайт с куками, возвращаем обновлённую банку.
 
-    None — если сессия протухла (разлогинило). Зовётся по таймеру и при 401/403.
+    None — если сессия протухла (разлогинило). ProxyDown — прокси не отвечает (сессия не тронута).
+    Зовётся по таймеру и при 401/403.
     """
     from patchright.async_api import async_playwright
 
     if isinstance(storage_state, str):
         storage_state = json.loads(storage_state)
     storage_state = {k: v for k, v in storage_state.items() if k in ("cookies", "origins")}
-    proxy = _pw_proxy(web_proxy())
+    proxy = _pw_proxy(proxy or web_proxy())
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=False, proxy=proxy, args=LAUNCH_ARGS)
         try:
             ctx = await browser.new_context(locale="ru-RU", storage_state=storage_state)
             page = await ctx.new_page()
-            await page.goto(HOME_URL, wait_until="domcontentloaded")
+            await _open_home(page)
             await asyncio.sleep(5)
             state = await ctx.storage_state()
             # по кукам сайта, а не по слову «Войти» — оно есть и на залогиненной странице

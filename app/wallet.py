@@ -41,11 +41,11 @@ def best_offer(own: int | None, b2b: bool, shelf: int | None, accounts) -> tuple
 
 
 def offer_text(offer) -> str:
-    """Подпись к цене: «с Кошельком −6% · аккаунт …23-82» / «бизнес-цена» / «витрина»."""
+    """Подпись к цене: «с Кошельком −6% · аккаунт Анна …23-82» / «бизнес-цена» / «витрина»."""
     price, kind, acc = offer
     if kind == "wallet":
-        label = acc.label or ""
-        return f"с Кошельком −{acc.wallet_pct}% · аккаунт …{label[-5:]}"
+        name = acc.label or acc.name
+        return f"с Кошельком −{acc.wallet_pct}% · аккаунт {name + ' ' if name else ''}…{acc.phone_mask[-5:]}"
     return "бизнес-цена" if kind == "business" else "витрина"
 
 
@@ -63,9 +63,13 @@ if __name__ == "__main__":
     b2b = A(label="бизнес", wallet_pct=None, limit_left=None, max_order=None, max_rid=None)
     assert wallet_price(1000, [b2b]) is None and wallet_price(None, [six]) is None
     # лучшая цена для цели: кошелёк дешевле витрины; бизнес дешевле кошелька; без своей цены — только кошелёк
-    six.label = "+7 ••• •••-23-82"
+    six.label, six.name, six.phone_mask = None, None, "+7 ••• •••-23-82"
     assert best_offer(121581, False, 121581, [six]) == (114286, "wallet", six)
     assert offer_text(best_offer(121581, False, 121581, [six])) == "с Кошельком −6% · аккаунт …23-82"
+    six.name = "Антон"  # имя из WB — пока своё не задано
+    assert offer_text(best_offer(121581, False, 121581, [six])) == "с Кошельком −6% · аккаунт Антон …23-82"
+    six.label = "Анна"  # своё имя с сайта главнее
+    assert offer_text(best_offer(121581, False, 121581, [six])) == "с Кошельком −6% · аккаунт Анна …23-82"
     assert best_offer(100000, True, 121581, [six]) == (100000, "business", None)
     assert best_offer(None, True, 121581, []) is None  # бизнес не подтверждён, кошелька нет — сравнивать не с чем
     assert best_offer(700000, False, 700000, [six]) == (700000, "retail", None)  # не влезает в лимит

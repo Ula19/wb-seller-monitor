@@ -59,6 +59,11 @@ export type Account = {
   status: "active" | "relogin" | "off"; wallet_pct: number | null; limit_left: number | null;
   monthly_limit: number | null; max_order: number | null; max_rid: number | null;
   wallet_balance: number | null; bonus_balance: number | null; state_at: string | null; orders: Order[];
+  title: string; proxy: { id: number; label: string; server: string; exit_ip: string | null } | null;
+};
+export type Proxy = {
+  id: number; label: string; server: string; exit_ip: string | null; ok: boolean | null; error: string | null;
+  checking: boolean; checked_at: string | null; created_at: string; used_by: string[];
 };
 export type LoginRequest = {
   id: number; status: "new" | "running" | "wait_code" | "done" | "error"; kind: string;

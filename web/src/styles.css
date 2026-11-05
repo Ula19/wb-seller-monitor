@@ -195,3 +195,5 @@ tr.hit td { background: var(--ok-soft); }
   .search { flex-basis: 100%; }
   td.name { min-width: 170px; }
 }
+.nowrap { white-space: nowrap; }
+.link:disabled { opacity: .4; cursor: default; }

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, ApiError, rub, time, type Account, type LoginRequest, type Order } from "../api";
+import { api, ApiError, rub, time, type Account, type LoginRequest, type Order, type Proxy } from "../api";
 
 const GROUP: Record<number, string> = { 1: "оформлен", 2: "сборка", 3: "в пути", 5: "в ПВЗ" };
 const ACTIVE = ["new", "running", "wait_code"];
@@ -18,6 +18,11 @@ function Connect({ onDone }: { onDone: () => void }) {
   const [code, setCode] = useState("");
   const [error, setError] = useState("");
   const [sent, setSent] = useState<number | null>(null);  // заявка, по которой код уже отправлен
+  const proxies = useQuery({ queryKey: ["proxies"], queryFn: () => api<Proxy[]>("/proxies") });
+  const good = (proxies.data ?? []).filter((p) => p.ok);
+  const [proxyId, setProxyId] = useState<string | null>(null);  // null — ещё не выбирали: первый свободный
+  const pid = proxyId ?? String((good.find((p) => !p.used_by.length) ?? good[0])?.id ?? "");
+  const chosen = good.find((p) => String(p.id) === pid);
   // статус заявки: worker берёт её раз в 2 с, открывает WB в браузере, ждёт код
   const req = useQuery({
     queryKey: ["login"], queryFn: () => api<LoginRequest>("/accounts/login"),
@@ -27,7 +32,7 @@ function Connect({ onDone }: { onDone: () => void }) {
   const active = !!r && ACTIVE.includes(r.status);
   const fail = (e: unknown) => setError(e instanceof ApiError ? e.message : "ошибка");
   const start = useMutation({
-    mutationFn: () => api("/accounts/login", { method: "POST", body: { phone, kind } }),
+    mutationFn: () => api("/accounts/login", { method: "POST", body: { phone, kind, proxy_id: pid ? Number(pid) : null } }),
     onSuccess: () => { setError(""); qc.invalidateQueries({ queryKey: ["login"] }); },
     onError: fail,
   });
@@ -50,7 +55,13 @@ function Connect({ onDone }: { onDone: () => void }) {
             <option value="retail">Обычный (розница)</option>
             <option value="business">Бизнес</option>
           </select>
+          <select value={pid} onChange={(e) => setProxyId(e.target.value)}>
+            {good.map((p) => <option key={p.id} value={p.id}>{p.label} · {p.exit_ip}{p.used_by.length ? ` — занят: ${p.used_by.join(", ")}` : ""}</option>)}
+            <option value="">Без прокси</option>
+          </select>
           <button className="btn" disabled={start.isPending || phone.replace(/\D/g, "").length < 10}>Получить код</button>
+          {!chosen ? <p className="full up-t small">Без прокси вход пойдёт через IP мониторинга. Свой прокси — в разделе «Прокси».</p>
+            : chosen.used_by.length > 0 && <p className="full up-t small">Прокси уже занят: {chosen.used_by.join(", ")} — аккаунты окажутся на одном IP.</p>}
         </form>
       ) : r.status === "wait_code" && sent !== r.id ? (
         <form className="add" onSubmit={(e) => { e.preventDefault(); send.mutate(); }}>
@@ -85,6 +96,29 @@ function Orders({ orders }: { orders: Order[] }) {
   );
 }
 
+function Title({ a }: { a: Account }) {
+  const qc = useQueryClient();
+  const [edit, setEdit] = useState<string | null>(null);
+  const save = useMutation({
+    mutationFn: () => api(`/accounts/${a.id}`, { method: "PATCH", body: { label: edit } }),
+    onSuccess: () => { setEdit(null); qc.invalidateQueries({ queryKey: ["accounts"] }); },
+  });
+  if (edit !== null) return (
+    <form className="tgt-edit" onSubmit={(e) => { e.preventDefault(); save.mutate(); }}>
+      <input autoFocus maxLength={64} placeholder={a.name ?? "Имя"} value={edit} onChange={(e) => setEdit(e.target.value)} />
+      <button className="btn sm" disabled={save.isPending}>OK</button>
+      <button type="button" className="link" onClick={() => setEdit(null)}>✕</button>
+    </form>
+  );
+  return (
+    <span>
+      <b>{a.label ?? a.name ?? "Без имени"}</b>{" "}
+      <button className="mini" title="Своё имя аккаунта" onClick={() => setEdit(a.label ?? "")}>✎</button>
+      {a.name && a.name !== a.label && <span className="muted small"> {a.label ? `в WB: ${a.name}` : "(имя из WB)"}</span>}
+    </span>
+  );
+}
+
 function Card({ a }: { a: Account }) {
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
@@ -99,8 +133,10 @@ function Card({ a }: { a: Account }) {
     <div className="card acc">
       <div className="acc-head">
         <div>
-          <b>{a.name ?? "Без имени"}</b> <span className="muted">· {a.phone ?? a.phone_mask}</span>
+          <Title a={a} /> <span className="muted nowrap">· {a.phone ?? a.phone_mask}</span>
           <div className="muted small">{a.kind === "business" ? "Бизнес" : "Обычный"} · обновлён {time(a.state_at)}</div>
+          <div className="small">{a.proxy ? <span className="muted">прокси: {a.proxy.label} · {a.proxy.exit_ip ?? a.proxy.server}</span>
+            : <span className="up-t">без своего прокси — IP мониторинга</span>}</div>
         </div>
         <span className={`pill ${a.status === "active" ? (low ? "warn" : "ok") : "bad"}`}>
           {a.status === "active" ? (low ? "лимит почти исчерпан" : "активен") : a.status === "relogin" ? "нужен вход" : "выключен"}
@@ -125,7 +161,7 @@ function Card({ a }: { a: Account }) {
       <div className="acc-foot">
         <button className="link" onClick={() => setOpen(!open)}>Заказы ({a.orders.length}) {open ? "▴" : "▾"}</button>
         <button className="link danger" onClick={() => confirm(
-          `Удалить аккаунт ${[a.name, a.phone ?? a.phone_mask].filter(Boolean).join(" ")}?\n\n`
+          `Удалить аккаунт ${[a.label ?? a.name, a.phone ?? a.phone_mask].filter(Boolean).join(" ")}?\n\n`
           + "Сессия удалится, бизнес-цены и заказы под ним перестанут обновляться. Вход — заново по коду.") && del.mutate()}>Удалить</button>
       </div>
       {open && <Orders orders={a.orders} />}

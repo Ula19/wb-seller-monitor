@@ -24,9 +24,11 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
 from app.config import settings
+from app.crypto import encrypt_json
 from app.db import models, repo
 from app.db.base import Session
 from app.wallet import best_offer, offer_text, wallet_price
+from app.wb.proxy_check import is_parser_proxy, parse_proxy
 
 COOKIE = "wbm_session"
 SESSION_TTL = 30 * 86400
@@ -246,8 +248,8 @@ async def items(seller_id: int | None = None, q: str = "", in_stock: bool = Fals
 
 
 def acc_title(a) -> str:
-    """Как называть аккаунт на сайте: имя из WB, иначе метка/маска."""
-    return a.name or a.label or a.phone_mask
+    """Как называть аккаунт на сайте: своё имя, иначе имя из WB, иначе маска номера."""
+    return a.title
 
 
 @app.get("/api/feed")
@@ -333,7 +335,25 @@ async def accounts(u=Depends(user), s=Depends(db)):
     orders: dict[int, list] = {}
     for o in await repo.account_orders(s, [a.id for a in accs]):
         orders.setdefault(o.account_id, []).append({f: getattr(o, f) for f in ORDER_FIELDS})
-    return [{**{f: getattr(a, f) for f in ACC_FIELDS}, "orders": orders.get(a.id, [])} for a in accs]
+    proxies = {p.id: p for p in await s.scalars(select(models.Proxy))}
+    return [{**{f: getattr(a, f) for f in ACC_FIELDS}, "title": a.title, "orders": orders.get(a.id, []),
+             "proxy": (p := proxies.get(a.proxy_id)) and {"id": p.id, "label": p.label, "server": p.server,
+                                                         "exit_ip": p.exit_ip}} for a in accs]
+
+
+class AccountIn(BaseModel):
+    label: str | None = Field(None, max_length=64)
+
+
+@app.patch("/api/accounts/{account_id}")
+async def rename_account(account_id: int, body: AccountIn, u=Depends(user), s=Depends(db)):
+    """Своё имя аккаунта (главнее имени из WB). Пусто — вернуть имя из WB."""
+    acc = await s.get(models.WbAccount, account_id)
+    if acc is None or acc.user_id != u.telegram_id:
+        raise HTTPException(404, "нет такого аккаунта")
+    acc.label = (body.label or "").strip() or None
+    await s.commit()
+    return {"ok": True, "title": acc.title}
 
 
 @app.delete("/api/accounts/{account_id}")
@@ -349,6 +369,7 @@ async def delete_account(account_id: int, u=Depends(user), s=Depends(db)):
 class LoginIn(BaseModel):
     phone: str
     kind: Literal["business", "retail"]
+    proxy_id: int | None = None  # None — вход через общий прокси (IP парсера)
 
 
 class CodeIn(BaseModel):
@@ -366,7 +387,13 @@ async def start_login(body: LoginIn, u=Depends(user), s=Depends(db)):
     phone = phone[1:] if len(phone) == 11 and phone[0] in "78" else phone
     if len(phone) != 10:
         raise HTTPException(422, "нужен номер РФ: 10 цифр после +7")
-    s.add(models.WbLoginRequest(user_id=u.telegram_id, phone=phone, kind=body.kind))
+    if body.proxy_id is not None:  # занятый — можно (сайт предупреждает), непроверенный — нет
+        p = await s.get(models.Proxy, body.proxy_id)
+        if p is None:
+            raise HTTPException(404, "нет такого прокси")
+        if p.ok is not True:
+            raise HTTPException(409, "прокси не прошёл проверку — нажмите «Проверить» в разделе «Прокси»")
+    s.add(models.WbLoginRequest(user_id=u.telegram_id, phone=phone, kind=body.kind, proxy_id=body.proxy_id))
     try:
         await s.commit()
     except IntegrityError:  # частичный уникальный индекс: одна активная заявка на пользователя
@@ -389,6 +416,62 @@ async def login_code(body: CodeIn, u=Depends(user), s=Depends(db)):
     if r is None or r.status != "wait_code":
         raise HTTPException(409, "код сейчас не ждём")
     r.code = code
+    await s.commit()
+    return {"ok": True}
+
+
+# ---------- прокси аккаунтов (проверяет worker: api в сеть не ходит) ----------
+PROXY_FIELDS = ("id", "label", "server", "exit_ip", "ok", "error", "checking", "checked_at", "created_at")
+
+
+class ProxyIn(BaseModel):
+    label: str = Field(min_length=1, max_length=64)
+    url: str = Field(max_length=512)
+
+
+@app.get("/api/proxies")
+async def proxies(u=Depends(user), s=Depends(db)):
+    """Список; used_by — кто на нём (занятый не блокируем: аккаунты на одном IP — предупреждение)."""
+    used: dict[int, list[str]] = {}
+    for a in await repo.user_accounts(s, u.telegram_id):
+        if a.proxy_id:
+            used.setdefault(a.proxy_id, []).append(a.title)
+    rows = await s.scalars(select(models.Proxy).order_by(models.Proxy.id))
+    return [{**{f: getattr(p, f) for f in PROXY_FIELDS}, "used_by": used.get(p.id, [])} for p in rows]
+
+
+@app.post("/api/proxies", status_code=201)
+async def add_proxy(body: ProxyIn, u=Depends(user), s=Depends(db)):
+    try:
+        url, server = parse_proxy(body.url)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    if is_parser_proxy(url):
+        raise HTTPException(422, "это прокси мониторинга (WB_PROXIES/WB_WEB_PROXY) — аккаунту нужен свой")
+    p = models.Proxy(label=body.label.strip(), server=server, url_enc=encrypt_json(url), checking=True)
+    s.add(p)
+    await s.commit()  # worker проверит сразу
+    return {f: getattr(p, f) for f in PROXY_FIELDS} | {"used_by": []}
+
+
+@app.post("/api/proxies/{proxy_id}/check")
+async def check_proxy(proxy_id: int, u=Depends(user), s=Depends(db)):
+    p = await s.get(models.Proxy, proxy_id)
+    if p is None:
+        raise HTTPException(404, "нет такого прокси")
+    p.checking = True
+    await s.commit()
+    return {"ok": True}
+
+
+@app.delete("/api/proxies/{proxy_id}")
+async def delete_proxy(proxy_id: int, u=Depends(user), s=Depends(db)):
+    p = await s.get(models.Proxy, proxy_id)
+    if p is None:
+        raise HTTPException(404, "нет такого прокси")
+    if busy := [a.title for a in await s.scalars(select(models.WbAccount).where(models.WbAccount.proxy_id == p.id))]:
+        raise HTTPException(409, f"прокси занят: {', '.join(busy)} — сначала перелогиньте аккаунт с другим прокси")
+    await s.delete(p)
     await s.commit()
     return {"ok": True}
 

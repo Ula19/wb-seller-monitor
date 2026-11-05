@@ -122,6 +122,25 @@ class Source(Base):
         return self.seller.name if self.seller else None
 
 
+class Proxy(Base):
+    """Прокси аккаунтов WB (вводятся на сайте). url с логином/паролем — только зашифрованным
+    (app.crypto), server = host:port для показа. Проверку (внешний IP, доступность WB) делает
+    worker: api ставит checking, worker пишет exit_ip/ok/error."""
+
+    __tablename__ = "proxies"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    label: Mapped[str] = mapped_column(String(64))
+    server: Mapped[str] = mapped_column(String(128))
+    url_enc: Mapped[bytes] = mapped_column(LargeBinary)
+    exit_ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    error: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    checking: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = _now()
+
+
 class WbAccount(Base):
     """Аккаунт WB пользователя (1–10 на пользователя).
 
@@ -134,7 +153,7 @@ class WbAccount(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("users.telegram_id", ondelete="CASCADE"), index=True)
-    label: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    label: Mapped[str | None] = mapped_column(String(64), nullable=True)  # своё имя с сайта
     phone_mask: Mapped[str] = mapped_column(String(32))  # ключ «тот же аккаунт» при повторном входе
     # профиль из WB (www/webapi/personalinfo): при входе и на рефреше сессии
     name: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -155,6 +174,14 @@ class WbAccount(Base):
     wallet_balance: Mapped[int | None] = mapped_column(Integer, nullable=True)
     bonus_balance: Mapped[int | None] = mapped_column(Integer, nullable=True)
     state_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # свой выход в WB: вход, рефреш, состояние, personalinfo. Меняется только перелогином
+    proxy_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("proxies.id", ondelete="RESTRICT"), nullable=True, index=True)
+
+    @property
+    def title(self) -> str:
+        """Как называть аккаунт: своё имя с сайта, иначе имя из WB, иначе маска номера."""
+        return self.label or self.name or self.phone_mask
 
 
 class AccountOrder(Base):
@@ -230,6 +257,8 @@ class WbLoginRequest(Base):
     error: Mapped[str | None] = mapped_column(String(256), nullable=True)
     account_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("wb_accounts.id", ondelete="SET NULL"), nullable=True)
+    proxy_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("proxies.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped[datetime] = _now()
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

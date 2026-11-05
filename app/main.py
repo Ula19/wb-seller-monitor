@@ -79,13 +79,15 @@ async def main() -> None:
         next_run_time=datetime.now(timezone.utc) + timedelta(minutes=1),
     )
     scheduler.start()
-    login_task = asyncio.create_task(keeper.login_requests_loop())  # вход в WB по заявкам сайта
+    login_task = asyncio.create_task(keeper.login_requests_loop(bot))  # вход в WB по заявкам сайта
+    proxy_task = asyncio.create_task(keeper.proxy_checks_loop())  # «Проверить» прокси с сайта
 
     try:
         await dp.start_polling(bot)
     finally:
         scheduler.shutdown(wait=False)
         login_task.cancel()
+        proxy_task.cancel()
         await wb_client.close()
         await bot.session.close()
 

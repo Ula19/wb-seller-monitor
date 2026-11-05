@@ -9,8 +9,9 @@ import re
 from datetime import datetime, timezone
 
 from curl_cffi.requests import AsyncSession
+from curl_cffi.requests.exceptions import RequestException
 
-from app.wb.web_session import curl_proxy, web_proxy
+from app.wb.web_session import ProxyDown, curl_proxy, web_proxy
 
 BALANCE_URL = "https://wb-balance.wildberries.ru/wb-balance/api/v1/balance/full-balance"
 GRADE_URL = "https://user-grade.wildberries.ru/api/v6/grade?curr=RUB&uf_loc=ru"
@@ -118,18 +119,24 @@ def apply_statuses(orders: list[dict], d) -> None:
         o["status_at"] = _ts((st.get("date") or 0) / 1e9)
 
 
-async def fetch(state: dict) -> dict:
-    """Баланс, лимит, % Кошелька и активные заказы. Unauthorized на 401, прочие сбои — исключением."""
+async def fetch(state: dict, proxy: str | None = None) -> dict:
+    """Баланс, лимит, % Кошелька и активные заказы. Unauthorized на 401, ProxyDown — сеть через прокси
+    не работает (таймаут, обрыв, 407), прочие сбои — исключением. proxy — прокси аккаунта."""
     token = bearer(state)
     if not token:  # не 401: сессия может быть жива (бизнес-цены идут по кукам) — просто нечем спросить
         raise NoBearer()
     auth = {**HEADERS, "Authorization": f"Bearer {token}"}
     vkey = next((c["value"] for c in state.get("cookies") or [] if c.get("name") == "wbx-validation-key"), None)
-    proxy = curl_proxy(web_proxy())  # тот же выход, что у браузера аккаунта
+    proxy = curl_proxy(proxy or web_proxy())  # тот же выход, что у браузера аккаунта
     async with AsyncSession(impersonate="chrome", timeout=20,
                             proxies={"http": proxy, "https": proxy} if proxy else None) as s:
         async def call(method, url, **kw):
-            r = await s.request(method, url, **kw)
+            try:
+                r = await s.request(method, url, **kw)
+            except RequestException as e:  # до ответа WB не дошли: таймаут, обрыв, CONNECT 407
+                raise ProxyDown(f"{type(e).__name__}: {str(e)[:160]}") from e
+            if r.status_code == 407:
+                raise ProxyDown("407 Proxy Authentication Required")
             if r.status_code == 401:
                 raise Unauthorized(url.split("/")[2])
             r.raise_for_status()

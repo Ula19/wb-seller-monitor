@@ -7,6 +7,7 @@
 """
 import asyncio
 import logging
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 
@@ -14,7 +15,8 @@ from app.config import settings
 from app.crypto import decrypt_json, encrypt_json
 from app.db import models, repo
 from app.db.base import Session
-from app.wb import account_api, web_session
+from app.wb import account_api, proxy_check, web_session
+from app.wb.web_session import ProxyDown
 
 log = logging.getLogger(__name__)
 
@@ -23,6 +25,8 @@ CODE_TIMEOUT = 300  # сколько ждём код из чата, сек
 # ожидание кода из чата по telegram_id (логин — долгая корутина, код приходит отдельно)
 _pending_code: dict[int, asyncio.Future] = {}
 _login_tasks: dict[int, asyncio.Task] = {}
+# ponytail: в памяти — после рестарта worker'а пуш «прокси не отвечает» может прийти ещё раз
+_proxy_down: set[int] = set()
 
 
 def phone_mask(phone: str) -> str:
@@ -34,12 +38,22 @@ def has_bearer(state: dict) -> bool:
     return account_api.bearer(state) is not None
 
 
-async def save_login(uid: int, phone: str, kind: str, state: dict) -> models.WbAccount:
+async def proxy_url(proxy_id: int | None) -> str | None:
+    """Адрес прокси аккаунта (расшифрованный); нет своего — None (тогда общий web_proxy())."""
+    if proxy_id is None:
+        return None
+    async with Session() as s:
+        p = await s.get(models.Proxy, proxy_id)
+    return decrypt_json(p.url_enc) if p else None
+
+
+async def save_login(uid: int, phone: str, kind: str, state: dict,
+                     proxy_id: int | None = None) -> models.WbAccount:
     profile = state.pop(account_api.PROFILE_KEY, None)  # профиль — в колонки, не в сессию
     if not has_bearer(state):  # без Bearer не будет лимита и заказов (шаг account_state)
         log.warning("keeper: в сессии нет Bearer сайта — лимит/заказы появятся после рефреша, если он его допишет")
     async with Session() as s:
-        acc = await repo.save_account(s, uid, phone_mask(phone), kind, encrypt_json(state), profile)
+        acc = await repo.save_account(s, uid, phone_mask(phone), kind, encrypt_json(state), profile, proxy_id)
         await s.commit()
         return acc
 
@@ -52,19 +66,35 @@ async def _relogin(bot, acc: models.WbAccount) -> None:
             return
         row.status = "relogin"
         await s.commit()
-    log.warning("keeper: аккаунт %s (%s) разлогинен", acc.id, acc.label)
+    log.warning("keeper: аккаунт %s (%s) разлогинен", acc.id, acc.title)
     where = f"на сайте https://{settings.site_domain}/accounts" if settings.site_domain else "/wblogin"
     for uid in settings.superadmins:  # одно пространство — всем из списка
         try:
-            await bot.send_message(uid, f"‼️ <b>Аккаунт WB {acc.label} разлогинен</b> — бизнес-цены, лимит "
+            await bot.send_message(uid, f"‼️ <b>Аккаунт WB {acc.title} разлогинен</b> — бизнес-цены, лимит "
                                         f"и заказы под ним не идут.\n👉 Войдите заново: {where}", parse_mode="HTML")
         except Exception:
             pass
 
 
+async def _proxy_alert(bot, acc: models.WbAccount, e: Exception) -> None:
+    """Сеть через прокси аккаунта не работает: сессия цела, НЕ relogin. Пуш один раз до восстановления."""
+    log.warning("keeper: аккаунт %s (%s): прокси не отвечает: %s", acc.id, acc.title, e)
+    if acc.id in _proxy_down:
+        return
+    _proxy_down.add(acc.id)
+    where = f"https://{settings.site_domain}/proxies" if settings.site_domain else "раздел «Прокси» на сайте"
+    for uid in settings.superadmins:
+        try:
+            await bot.send_message(uid, f"⚠️ <b>Прокси аккаунта WB {acc.title} не отвечает</b> — лимит, заказы и "
+                                        f"рефреш сессии под ним не идут. Сессия цела, входить заново не нужно.\n"
+                                        f"👉 Проверьте прокси: {where}", parse_mode="HTML")
+        except Exception:
+            pass
+
+
 async def _refresh(acc: models.WbAccount, state: dict) -> dict | None:
-    """Браузерный рефреш сессии; живая → сохраняем. None — протухла."""
-    new = await web_session.refresh(state)
+    """Браузерный рефреш сессии; живая → сохраняем. None — протухла. ProxyDown — прокси не отвечает."""
+    new = await web_session.refresh(state, await proxy_url(acc.proxy_id))
     if new is not None:
         profile = new.pop(account_api.PROFILE_KEY, None)
         async with Session() as s:
@@ -83,6 +113,9 @@ async def refresh_job(bot) -> None:
     for acc in accounts:
         try:
             state = await _refresh(acc, decrypt_json(acc.state_enc))
+        except ProxyDown as e:
+            await _proxy_alert(bot, acc, e)
+            continue
         except Exception as e:
             log.warning("keeper: рефреш аккаунта %s упал: %s", acc.id, e)
             continue
@@ -91,42 +124,52 @@ async def refresh_job(bot) -> None:
 
 
 async def state_job(bot) -> None:
-    """Лимит, % Кошелька, балансы и активные заказы всех активных аккаунтов.
-
-    401 = детектор разлогина, но не сразу: access живёт 30 дн., сначала один рефреш
-    и повтор; relogin — только если и после рефреша 401.
-    """
+    """Лимит, % Кошелька, балансы и активные заказы всех активных аккаунтов."""
     async with Session() as s:
         accounts = await repo.active_accounts(s)
     for acc in accounts:
-        state = decrypt_json(acc.state_enc)
+        await poll_account(bot, acc)
+
+
+async def poll_account(bot, acc: models.WbAccount) -> None:
+    """Состояние одного аккаунта (по таймеру и сразу после входа).
+
+    401 = детектор разлогина, но не сразу: access живёт 30 дн., сначала один рефреш
+    и повтор; relogin — только если и после рефреша 401. Прокси не отвечает — не relogin.
+    """
+    state = decrypt_json(acc.state_enc)
+    proxy = await proxy_url(acc.proxy_id)
+    try:
         try:
-            try:
-                st = await account_api.fetch(state)
-            except (account_api.Unauthorized, account_api.NoBearer) as e:
-                log.info("keeper: аккаунт %s: %s, освежаю сессию и повторяю",
-                         acc.id, f"401 ({e})" if isinstance(e, account_api.Unauthorized) else "нет Bearer")
-                state = await _refresh(acc, state)
-                if state is None:
-                    await _relogin(bot, acc)
-                    continue
-                st = await account_api.fetch(state)
-        except account_api.Unauthorized:
-            await _relogin(bot, acc)
-            continue
-        except account_api.NoBearer:  # сессия жива (рефреш прошёл), бизнес-цены по кукам идут — не relogin
-            log.warning("keeper: аккаунт %s: Bearer нет и после рефреша — лимит/заказы недоступны", acc.id)
-            continue
-        except Exception as e:
-            log.warning("keeper: состояние аккаунта %s не получено: %s: %s", acc.id, type(e).__name__, str(e)[:200])
-            continue
-        async with Session() as s:
-            await repo.save_account_state(s, acc.id, st)
-            await s.commit()
-        log.info("keeper: аккаунт %s: Кошелёк %s%%, лимит %s ₽, заказов %d", acc.label,
-                 st.get("wallet_pct") if st.get("wallet_pct") is not None else "—",
-                 f"{st['limit_left']:,}".replace(",", " ") if st.get("limit_left") is not None else "—",
-                 len(st["orders"]))
+            st = await account_api.fetch(state, proxy)
+        except (account_api.Unauthorized, account_api.NoBearer) as e:
+            log.info("keeper: аккаунт %s: %s, освежаю сессию и повторяю",
+                     acc.id, f"401 ({e})" if isinstance(e, account_api.Unauthorized) else "нет Bearer")
+            state = await _refresh(acc, state)
+            if state is None:
+                await _relogin(bot, acc)
+                return
+            st = await account_api.fetch(state, proxy)
+    except ProxyDown as e:
+        await _proxy_alert(bot, acc, e)
+        return
+    except account_api.Unauthorized:
+        await _relogin(bot, acc)
+        return
+    except account_api.NoBearer:  # сессия жива (рефреш прошёл), бизнес-цены по кукам идут — не relogin
+        log.warning("keeper: аккаунт %s: Bearer нет и после рефреша — лимит/заказы недоступны", acc.id)
+        return
+    except Exception as e:
+        log.warning("keeper: состояние аккаунта %s не получено: %s: %s", acc.id, type(e).__name__, str(e)[:200])
+        return
+    _proxy_down.discard(acc.id)
+    async with Session() as s:
+        await repo.save_account_state(s, acc.id, st)
+        await s.commit()
+    log.info("keeper: аккаунт %s: Кошелёк %s%%, лимит %s ₽, заказов %d", acc.title,
+             st.get("wallet_pct") if st.get("wallet_pct") is not None else "—",
+             f"{st['limit_left']:,}".replace(",", " ") if st.get("limit_left") is not None else "—",
+             len(st["orders"]))
 
 
 # ---------- вход по заявке с сайта (wb_login_requests) ----------
@@ -142,7 +185,7 @@ async def _set_request(req_id: int, **values) -> None:
             await s.commit()
 
 
-async def process_login_request() -> bool:
+async def process_login_request(bot=None) -> bool:
     """Берёт самую старую новую заявку и ведёт вход до конца. False — заявок нет.
 
     Один вход за раз на процесс: остальные ждут в new («в очереди» на сайте).
@@ -171,16 +214,20 @@ async def process_login_request() -> bool:
                 return code
         return None
 
+    acc = None
     try:
-        state = await web_session.login(req.phone, get_code)
+        state = await web_session.login(req.phone, get_code, await proxy_url(req.proxy_id))
         if state:
-            acc = await save_login(req.user_id, req.phone, req.kind, state)
+            acc = await save_login(req.user_id, req.phone, req.kind, state, req.proxy_id)
             status, error, acc_id = "done", None, acc.id
         else:
             status, acc_id = "error", None
             error = ("неверный код или WB не пустил — попробуйте ещё раз" if got
                      else f"код не введён за {CODE_TIMEOUT // 60} мин" if asked
                      else "WB не показал форму входа (антибот) — попробуйте позже")
+    except ProxyDown as e:
+        log.warning("keeper: вход по заявке %s: прокси не отвечает: %s", req.id, e)
+        status, error, acc_id = "error", "прокси не отвечает — проверьте его в разделе «Прокси»", None
     except Exception as e:
         log.exception("keeper: вход по заявке %s упал", req.id)
         status, error, acc_id = "error", f"ошибка входа: {type(e).__name__}", None
@@ -189,10 +236,14 @@ async def process_login_request() -> bool:
         await s.commit()
     log.info("keeper: заявка на вход %s (пользователь %s): %s%s", req.id, req.user_id, status,
              f" — {error}" if error else "")
+    if acc is not None:  # карточка на сайте заполняется сразу, а не через 10 минут
+        async with Session() as s:
+            acc = await s.get(models.WbAccount, acc.id)
+        await poll_account(bot, acc)
     return True
 
 
-async def login_requests_loop() -> None:
+async def login_requests_loop(bot) -> None:
     """Фоновая задача worker'а: заявки на вход с сайта (браузер есть только тут)."""
     async with Session() as s:
         if n := await repo.fail_stale_logins(s):
@@ -200,10 +251,43 @@ async def login_requests_loop() -> None:
         await s.commit()
     while True:
         try:
-            if await process_login_request():
+            if await process_login_request(bot):
                 continue  # сразу следующую из очереди
         except Exception:
             log.exception("keeper: цикл заявок на вход")
+        await asyncio.sleep(LOGIN_POLL_SEC)
+
+
+# ---------- проверка прокси по кнопке с сайта (proxies.checking) ----------
+async def process_proxy_check() -> bool:
+    """Самый старый прокси с checking: внешний IP ×2, IP мониторинга, доступность WB. False — проверять нечего."""
+    async with Session() as s:
+        p = await s.scalar(select(models.Proxy).where(models.Proxy.checking).order_by(models.Proxy.id).limit(1))
+        if p is None:
+            return False
+        pid, url = p.id, decrypt_json(p.url_enc)
+    try:
+        res = await proxy_check.check(url)
+    except Exception as e:  # иначе checking висит и цикл крутит одно и то же
+        res = {"exit_ip": None, "ok": False, "error": f"проверка упала: {type(e).__name__}"}
+    async with Session() as s:
+        row = await s.get(models.Proxy, pid)
+        if row is not None:
+            row.exit_ip, row.ok, row.error = res["exit_ip"], res["ok"], res["error"]
+            row.checking, row.checked_at = False, datetime.now(timezone.utc)
+            await s.commit()
+    log.info("keeper: прокси %s: %s", pid, "ок, IP " + res["exit_ip"] if res["ok"] else res["error"])
+    return True
+
+
+async def proxy_checks_loop() -> None:
+    """Фоновая задача worker'а: отдельно от входа, чтобы проверка не ждала код из чата."""
+    while True:
+        try:
+            if await process_proxy_check():
+                continue
+        except Exception:
+            log.exception("keeper: цикл проверки прокси")
         await asyncio.sleep(LOGIN_POLL_SEC)
 
 
@@ -226,7 +310,7 @@ async def start_login(bot, uid: int, phone: str, kind: str) -> str:
             state = await web_session.login(phone, get_code)
             if state:
                 acc = await save_login(uid, phone, kind, state)
-                msg = f"✅ Вошёл в WB: аккаунт {acc.label} ({'бизнес' if kind == 'business' else 'обычный'})."
+                msg = f"✅ Вошёл в WB: аккаунт {acc.title} ({'бизнес' if kind == 'business' else 'обычный'})."
             else:
                 msg = "❌ Логин не удался (неверный код или антибот). Попробуй ещё раз: /wblogin"
         except Exception as e:
