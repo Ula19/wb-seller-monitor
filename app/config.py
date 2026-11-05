@@ -5,7 +5,10 @@ class Settings(BaseSettings):
     """Настройки берутся из переменных окружения / .env (см. .env.example)."""
 
     bot_token: str
-    owner_id: int
+    # кто входит на сайт и получает пуши: Telegram ID через запятую. Одно общее пространство:
+    # данные принадлежат ПЕРВОМУ (owner_id), остальные из списка работают с ними же.
+    # ponytail: одно пространство, команды — при продаже доступа
+    superadmin_ids: str = ""
     database_url: str = "postgresql+asyncpg://wb:wb@db:5432/wb"
 
     # параметры запросов к WB
@@ -81,6 +84,19 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8", extra="ignore"
     )
+
+
+    @property
+    def superadmins(self) -> list[int]:
+        ids = [int(x) for x in self.superadmin_ids.replace(" ", "").split(",") if x]
+        if not ids:
+            raise RuntimeError("SUPERADMIN_IDS не задан в .env (Telegram ID через запятую, первый — владелец данных)")
+        return ids
+
+    @property
+    def owner_id(self) -> int:
+        """Владелец данных пространства = первый из SUPERADMIN_IDS; ему же бэкап и системные алерты."""
+        return self.superadmins[0]
 
 
 settings = Settings()

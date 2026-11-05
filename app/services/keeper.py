@@ -10,6 +10,7 @@ import logging
 
 from sqlalchemy import select
 
+from app.config import settings
 from app.crypto import decrypt_json, encrypt_json
 from app.db import models, repo
 from app.db.base import Session
@@ -51,12 +52,13 @@ async def _relogin(bot, acc: models.WbAccount) -> None:
         row.status = "relogin"
         await s.commit()
     log.warning("keeper: аккаунт %s (%s) разлогинен", acc.id, acc.label)
-    try:
-        await bot.send_message(acc.user_id, f"‼️ <b>Аккаунт WB {acc.label} разлогинен</b> — "
-                                            "бизнес-цены, лимит и заказы под ним не идут.\n👉 Войди заново: /wblogin",
-                               parse_mode="HTML")
-    except Exception:
-        pass
+    where = f"на сайте https://{settings.site_domain}/accounts" if settings.site_domain else "/wblogin"
+    for uid in settings.superadmins:  # одно пространство — всем из списка
+        try:
+            await bot.send_message(uid, f"‼️ <b>Аккаунт WB {acc.label} разлогинен</b> — бизнес-цены, лимит "
+                                        f"и заказы под ним не идут.\n👉 Войдите заново: {where}", parse_mode="HTML")
+        except Exception:
+            pass
 
 
 async def _refresh(acc: models.WbAccount, state: dict) -> dict | None:

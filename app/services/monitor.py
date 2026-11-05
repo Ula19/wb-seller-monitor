@@ -28,9 +28,6 @@ log = logging.getLogger(__name__)
 _pass_lock = asyncio.Lock()
 
 
-async def recipient_ids(s) -> list[int]:
-    """Получатели системных алертов: владелец (из .env) + whitelist из БД, без дублей."""
-    return list({settings.owner_id, *await repo.list_user_ids(s)})
 
 
 def detect_changes(old_price, old_stock, p):
@@ -150,11 +147,11 @@ async def notify(bot, seller, notes) -> None:
     for src, p, events in notes:
         text = (reporting.new_caption(name, p, src.b2b) if events is None
                 else reporting.change_caption(name, p, events, src.b2b))
-        try:
-            await bot.send_message(src.user_id, text, parse_mode="HTML",
-                                   reply_markup=reporting.wb_button(p.url))
-        except Exception as e:
-            log.warning("уведомление не доставлено %s: %s", src.user_id, e)
+        for uid in settings.superadmins:  # одно пространство: цены и новинки — всем из списка
+            try:
+                await bot.send_message(uid, text, parse_mode="HTML", reply_markup=reporting.wb_button(p.url))
+            except Exception as e:
+                log.warning("уведомление не доставлено %s: %s", uid, e)
 
 
 async def sync_and_notify(bot, supplier_id: int, slot=None) -> list[NormProduct] | None:
@@ -200,13 +197,11 @@ def _guardium_problem() -> str | None:
 
 
 async def alert_all(bot, text: str) -> None:
-    async with Session() as s:
-        user_ids = await recipient_ids(s)
-    for uid in user_ids:
-        try:
-            await bot.send_message(uid, text, parse_mode="HTML")
-        except Exception as e:
-            log.warning("алерт не доставлен %s: %s", uid, e)
+    """Системные алерты (веб-каталог, guardium, зависание) — только владельцу (первый ID)."""
+    try:
+        await bot.send_message(settings.owner_id, text, parse_mode="HTML")
+    except Exception as e:
+        log.warning("алерт не доставлен %s: %s", settings.owner_id, e)
 
 
 async def _check_health(bot) -> None:
@@ -369,14 +364,11 @@ async def report_job(bot) -> None:
     if hour not in selected:
         log.info("отчёт пропущен: %d не в списке %s", hour, hours_csv)
         return
-    data = []
-    async with Session() as s:
-        for uid in await recipient_ids(s):
-            for src in await repo.list_sources(s, uid):
-                if src.enabled:
-                    data.append((uid, src, await repo.source_products(s, src)))
-    for uid, src, products in data:
-        await send_report_to(bot, [uid], src, products)
+    async with Session() as s:  # одно пространство: отчёт по магазинам владельца — всем из списка
+        data = [(src, await repo.source_products(s, src))
+                for src in await repo.list_sources(s, settings.owner_id) if src.enabled]
+    for src, products in data:
+        await send_report_to(bot, settings.superadmins, src, products)
 
 
 if __name__ == "__main__":  # self-check разбора часов и рабочего окна

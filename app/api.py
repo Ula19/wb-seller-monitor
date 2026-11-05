@@ -12,6 +12,7 @@ import hmac
 import json
 import re
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
@@ -83,12 +84,20 @@ async def db():
         yield s
 
 
-async def user(request: Request, s=Depends(db)) -> models.User:
+@dataclass
+class Viewer:
+    id: int  # кто вошёл
+    telegram_id: int  # чьи данные: владелец пространства (первый из SUPERADMIN_IDS)
+
+
+async def user(request: Request) -> Viewer:
+    """Одно общее пространство: любой из SUPERADMIN_IDS работает с данными владельца.
+    Список читается на каждом запросе — убрали ID из .env и перезапустили api, доступ закрыт."""
+    # ponytail: одно пространство, команды — при продаже доступа
     uid = read_session(request.cookies.get(COOKIE))
-    u = await s.get(models.User, uid) if uid else None
-    if u is None:
+    if uid is None or uid not in settings.superadmins:
         raise HTTPException(401, "нужен вход")
-    return u
+    return Viewer(id=uid, telegram_id=settings.owner_id)
 
 
 class TelegramAuth(BaseModel):
@@ -102,16 +111,12 @@ class TelegramAuth(BaseModel):
 
 
 @app.post("/api/auth/telegram")
-async def auth_telegram(body: TelegramAuth, resp: Response, s=Depends(db)):
+async def auth_telegram(body: TelegramAuth, resp: Response):
     uid = check_telegram(body.model_dump(), settings.bot_token)
     if uid is None:
         raise HTTPException(401, "подпись Telegram не прошла")
-    u = await s.get(models.User, uid)
-    if u is None:
-        raise HTTPException(403, "доступа нет — попросите владельца добавить вас")
-    if body.username and u.username != body.username:
-        u.username = body.username
-        await s.commit()
+    if uid not in settings.superadmins:
+        raise HTTPException(403, f"доступа нет — передайте владельцу ваш Telegram ID: {uid}")
     return _login(resp, uid)
 
 
@@ -145,7 +150,8 @@ async def logout(resp: Response):
 
 @app.get("/api/me")
 async def me(u=Depends(user)):
-    return {"id": u.telegram_id, "username": u.username, "role": u.role}
+    return {"id": u.id, "owner_id": u.telegram_id, "username": None,
+            "role": "owner" if u.id == u.telegram_id else "admin"}
 
 
 # ---------- продавцы ----------

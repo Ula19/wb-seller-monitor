@@ -4,6 +4,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from app.bot import views
+from app.bot.middlewares import start_text
 from app.config import settings
 from app.emoji import tge
 
@@ -22,7 +23,7 @@ async def stale_callback(cb: CallbackQuery):
 async def start(m: Message, state: FSMContext):
     await state.clear()
     if settings.site_domain:  # v2: всё управление на сайте, бот — уведомления (меню пока в /menu)
-        await m.answer(f"Управление мониторингом — на сайте: https://{settings.site_domain}")
+        await m.answer(start_text(m.from_user.id))
         return
     text, markup = await views.view_main(m.from_user.id)
     await m.answer(
