@@ -387,7 +387,7 @@ async def start_login(body: LoginIn, u=Depends(user), s=Depends(db)):
     phone = phone[1:] if len(phone) == 11 and phone[0] in "78" else phone
     if len(phone) != 10:
         raise HTTPException(422, "нужен номер РФ: 10 цифр после +7")
-    if body.proxy_id is not None:  # занятый — можно (сайт предупреждает), непроверенный — нет
+    if body.proxy_id is not None:  # один прокси на несколько аккаунтов — норма, непроверенный — нет
         p = await s.get(models.Proxy, body.proxy_id)
         if p is None:
             raise HTTPException(404, "нет такого прокси")
@@ -431,7 +431,7 @@ class ProxyIn(BaseModel):
 
 @app.get("/api/proxies")
 async def proxies(u=Depends(user), s=Depends(db)):
-    """Список; used_by — кто на нём (занятый не блокируем: аккаунты на одном IP — предупреждение)."""
+    """Список; used_by — кто на нём (один прокси на несколько аккаунтов — норма)."""
     used: dict[int, list[str]] = {}
     for a in await repo.user_accounts(s, u.telegram_id):
         if a.proxy_id:
@@ -470,7 +470,7 @@ async def delete_proxy(proxy_id: int, u=Depends(user), s=Depends(db)):
     if p is None:
         raise HTTPException(404, "нет такого прокси")
     if busy := [a.title for a in await s.scalars(select(models.WbAccount).where(models.WbAccount.proxy_id == p.id))]:
-        raise HTTPException(409, f"прокси занят: {', '.join(busy)} — сначала перелогиньте аккаунт с другим прокси")
+        raise HTTPException(409, f"на прокси аккаунты: {', '.join(busy)} — сначала перелогиньте их на другой прокси")
     await s.delete(p)
     await s.commit()
     return {"ok": True}

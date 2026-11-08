@@ -21,11 +21,11 @@ function Row({ p }: { p: Proxy }) {
       <td><b>{p.label}</b><div className="muted small">{p.server}</div></td>
       <td>{proxyState(p)}{p.error && <div className="err small">{p.error}</div>}</td>
       <td className="num">{p.exit_ip ?? "—"}<div className="muted small">{p.checked_at ? time(p.checked_at) : ""}</div></td>
-      <td>{p.used_by.length ? <>занят: {p.used_by.join(", ")}{p.used_by.length > 1 && <div className="up-t small">аккаунты на одном IP</div>}</> : <span className="muted">свободен</span>}</td>
+      <td>{p.used_by.length ? p.used_by.join(", ") : <span className="muted">нет аккаунтов</span>}</td>
       <td className="num">
         <button className="link" disabled={p.checking || check.isPending} onClick={() => check.mutate()}>Проверить</button>
         {" · "}
-        <button className="link danger" disabled={!!p.used_by.length} title={p.used_by.length ? "занятый прокси удалить нельзя" : ""}
+        <button className="link danger" disabled={!!p.used_by.length} title={p.used_by.length ? "сначала перелогиньте аккаунты на другой прокси" : ""}
           onClick={() => confirm(`Удалить прокси «${p.label}»?`) && del.mutate()}>Удалить</button>
         {err && <div className="err small">{err}</div>}
       </td>
@@ -52,8 +52,9 @@ export default function Proxies() {
     <section>
       <h1>Прокси</h1>
       <p className="lead">
-        У каждого аккаунта WB — свой постоянный IP: через него идут вход, обновление сессии, лимит и заказы.
-        Не тот, что у мониторинга. После входа прокси аккаунта не меняется — сменить можно только повторным входом.
+        Через прокси аккаунта идут вход, обновление сессии, лимит и заказы. На одном прокси может быть несколько
+        аккаунтов — так распределяйте нагрузку. Прокси мониторинга (.env) сюда не добавляется.
+        Сменить прокси у аккаунта — повторным входом.
       </p>
       <form className="card add" onSubmit={(e) => { e.preventDefault(); add.mutate(); }}>
         <input placeholder="Метка, например «Анна RU»" value={label} onChange={(e) => setLabel(e.target.value)} />
@@ -68,7 +69,7 @@ export default function Proxies() {
       ) : (
         <div className="table-wrap">
           <table>
-            <thead><tr><th>Прокси</th><th>Проверка</th><th className="num">Внешний IP</th><th>Аккаунт</th><th /></tr></thead>
+            <thead><tr><th>Прокси</th><th>Проверка</th><th className="num">Внешний IP</th><th>Аккаунты</th><th /></tr></thead>
             <tbody>{rows.map((p) => <Row key={p.id} p={p} />)}</tbody>
           </table>
         </div>

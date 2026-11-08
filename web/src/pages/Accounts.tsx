@@ -20,8 +20,8 @@ function Connect({ onDone }: { onDone: () => void }) {
   const [sent, setSent] = useState<number | null>(null);  // заявка, по которой код уже отправлен
   const proxies = useQuery({ queryKey: ["proxies"], queryFn: () => api<Proxy[]>("/proxies") });
   const good = (proxies.data ?? []).filter((p) => p.ok);
-  const [proxyId, setProxyId] = useState<string | null>(null);  // null — ещё не выбирали: первый свободный
-  const pid = proxyId ?? String((good.find((p) => !p.used_by.length) ?? good[0])?.id ?? "");
+  const [proxyId, setProxyId] = useState<string | null>(null);  // null — ещё не выбирали: первый проверенный
+  const pid = proxyId ?? String(good[0]?.id ?? "");
   const chosen = good.find((p) => String(p.id) === pid);
   // статус заявки: worker берёт её раз в 2 с, открывает WB в браузере, ждёт код
   const req = useQuery({
@@ -56,12 +56,11 @@ function Connect({ onDone }: { onDone: () => void }) {
             <option value="business">Бизнес</option>
           </select>
           <select value={pid} onChange={(e) => setProxyId(e.target.value)}>
-            {good.map((p) => <option key={p.id} value={p.id}>{p.label} · {p.exit_ip}{p.used_by.length ? ` — занят: ${p.used_by.join(", ")}` : ""}</option>)}
+            {good.map((p) => <option key={p.id} value={p.id}>{p.label} · {p.exit_ip}{p.used_by.length ? ` · аккаунтов: ${p.used_by.length}` : ""}</option>)}
             <option value="">Без прокси</option>
           </select>
           <button className="btn" disabled={start.isPending || phone.replace(/\D/g, "").length < 10}>Получить код</button>
-          {!chosen ? <p className="full up-t small">Без прокси вход пойдёт через IP мониторинга. Свой прокси — в разделе «Прокси».</p>
-            : chosen.used_by.length > 0 && <p className="full up-t small">Прокси уже занят: {chosen.used_by.join(", ")} — аккаунты окажутся на одном IP.</p>}
+          {!chosen && <p className="full up-t small">Без прокси вход пойдёт через IP мониторинга. Свой прокси — в разделе «Прокси».</p>}
         </form>
       ) : r.status === "wait_code" && sent !== r.id ? (
         <form className="add" onSubmit={(e) => { e.preventDefault(); send.mutate(); }}>
