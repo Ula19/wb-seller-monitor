@@ -171,8 +171,8 @@ class WbAccount(Base):
     monthly_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)  # месячный лимит, сброс 1-го числа
     max_order: Mapped[int | None] = mapped_column(Integer, nullable=True)  # разовый лимит заказа
     max_rid: Mapped[int | None] = mapped_column(Integer, nullable=True)  # лимит позиции
-    wallet_balance: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    bonus_balance: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    funds: Mapped[int | None] = mapped_column(Integer, nullable=True)  # ₽ в Кошельке WB (available_funds_rub)
+    vb_points: Mapped[int | None] = mapped_column(Integer, nullable=True)  # ВБ-баллы (не рубли)
     state_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # сбои прокси аккаунта подряд (опрос/рефреш); сброс — удачный опрос или новый вход
     proxy_fails: Mapped[int] = mapped_column(Integer, default=0, server_default="0")

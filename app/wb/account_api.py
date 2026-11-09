@@ -5,6 +5,7 @@ Bearer — localStorage www: `wbx__tokenData` или `wbid-oauth-sdk-access-toke
 wbx-validation-key, остальным хватает Bearer. Суммы WB — в копейках, наружу отдаём рубли.
 401 → Unauthorized: решение (рефреш / «войдите заново») — у вызывающего.
 """
+import logging
 import re
 from datetime import datetime, timezone
 
@@ -13,7 +14,10 @@ from curl_cffi.requests.exceptions import RequestException
 
 from app.wb.web_session import ProxyDown, curl_proxy, web_proxy
 
+log = logging.getLogger(__name__)
+
 BALANCE_URL = "https://wb-balance.wildberries.ru/wb-balance/api/v1/balance/full-balance"
+VB_URL = "https://loyalty-balances.wildberries.ru/public/api/v1/bonuses/info"  # ВБ-баллы, авторизация как у full-balance
 GRADE_URL = "https://user-grade.wildberries.ru/api/v6/grade?curr=RUB&uf_loc=ru"
 ORDERS_URL = ("https://wbxoofex.wildberries.ru/api/v2/orders"
               "?limit=100&exclude_delivery_types=777,778&exclude_b2b=true&offset=0")
@@ -58,7 +62,14 @@ def parse_balance(d: dict) -> dict:
     return {"limit_left": _rub(lim - exp) if isinstance(lim, int) and isinstance(exp, int) else None,
             "monthly_limit": _rub(lim),
             "max_order": _rub(disc.get("max_order_price")), "max_rid": _rub(disc.get("max_rid_price")),
-            "wallet_balance": _rub(d.get("wallet_balance_rub")), "bonus_balance": _rub(d.get("bonus_balance"))}
+            # деньги в Кошельке WB = сумма в шапке сайта (wallet_balance_rub + bonus_balance — оба в рублях)
+            "funds": _rub(d.get("available_funds_rub"))}
+
+
+def parse_vb(d) -> int | None:
+    """bonuses/info → ВБ-баллы (это баллы, не рубли)."""
+    v = ((d or {}).get("data") or {}).get("total_bonuses") if isinstance(d, dict) else None
+    return v if isinstance(v, int) else None
 
 
 def parse_grade(d: dict) -> int | None:
@@ -145,8 +156,13 @@ async def fetch(state: dict, proxy: str | None = None) -> dict:
             r.raise_for_status()
             return r.json()
 
-        out = parse_balance(await call("GET", BALANCE_URL, headers={
-            **auth, **({"Cookie": f"wbx-validation-key={vkey}"} if vkey else {})}))
+        with_vkey = {**auth, **({"Cookie": f"wbx-validation-key={vkey}"} if vkey else {})}
+        out = parse_balance(await call("GET", BALANCE_URL, headers=with_vkey))
+        try:  # баллы — не главное: их сбой не ломает опрос
+            out["vb_points"] = parse_vb(await call("GET", VB_URL, headers=with_vkey))
+        except Exception as e:
+            out["vb_points"] = None
+            log.warning("ВБ-баллы не получены: %s: %s", type(e).__name__, str(e)[:200])
         out["wallet_pct"] = parse_grade(await call("GET", GRADE_URL, headers=auth))
         orders = parse_orders(await call("GET", ORDERS_URL, headers=auth))
         if orders:  # одним запросом на все rid аккаунта
@@ -157,11 +173,15 @@ async def fetch(state: dict, proxy: str | None = None) -> dict:
 
 
 if __name__ == "__main__":  # self-check на формах ответов из HAR (суммы в копейках)
-    b = parse_balance({"wallet_balance_rub": 428500, "bonus_balance": 20100, "discount": {
+    b = parse_balance({"wallet_balance_rub": 428500, "bonus_balance": 20100, "available_funds_rub": 448600, "discount": {
         "expenses": 23355900, "monthly_limit": 100000000, "max_order_price": 100000000, "max_rid_price": 50000000}})
     assert b == {"limit_left": 766441, "monthly_limit": 1000000, "max_order": 1000000, "max_rid": 500000,
-                 "wallet_balance": 4285, "bonus_balance": 201}, b
-    assert parse_balance({})["limit_left"] is None  # бизнес-аккаунт без полей — не падаем
+                 "funds": 4486}, b
+    assert parse_balance({})["limit_left"] is None and parse_balance({})["funds"] is None  # бизнес без полей — не падаем
+    yana = parse_balance({"wallet_balance_rub": 594100, "bonus_balance": 19194700, "available_funds_rub": 19788800})
+    assert yana["funds"] == 197888 == 5941 + 191947, yana  # = сумма в шапке WB у Яны
+    assert parse_vb({"data": {"total_bonuses": 9094}, "state": 0}) == 9094
+    assert parse_vb({"state": 1}) is None and parse_vb(None) is None and parse_vb({"data": {"total_bonuses": "x"}}) is None
     assert parse_grade({"payload": {"payments": [{"wctype_id": 2}, {"wctype_id": 1, "discount_value": 6,
                                                                     "anonymous_discount": 3}]}}) == 6
     assert parse_grade({"state": 0}) is None
@@ -189,4 +209,50 @@ if __name__ == "__main__":  # self-check на формах ответов из H
     oauth = {"origin": WWW, "localStorage": [{"name": "wbid-oauth-sdk-access-token", "value": "eyJo.eyJo.o"}]}
     assert bearer({"origins": [sso, oauth]}) == "eyJo.eyJo.o"  # сессия с сервера 2026-11-05: только этот ключ
     assert bearer({"origins": [sso]}) is None  # SSO-токен id.wb.ru не подходит
+
+    # fetch на подменённой HTTP-сессии: баллы приходят; сбой именно их запроса — None, опрос идёт дальше
+    import asyncio
+    from unittest.mock import patch
+
+    class R:
+        def __init__(self, code, body):
+            self.status_code, self.body = code, body
+
+        def json(self):
+            return self.body
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise RuntimeError(f"HTTP {self.status_code}")
+
+    def session(vb):
+        bodies = {BALANCE_URL: R(200, {"available_funds_rub": 19788800}), VB_URL: vb,
+                  GRADE_URL: R(200, {"state": 0}), ORDERS_URL: R(200, {"data": []})}
+        seen = []
+
+        class S:
+            def __init__(self, **kw):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                pass
+
+            async def request(self, method, url, **kw):
+                seen.append((url, kw.get("headers", {}).get("Cookie")))
+                return bodies[url]
+        return S, seen
+
+    async def demo():
+        for vb, want in ((R(200, {"data": {"total_bonuses": 9094}, "state": 0}), 9094), (R(500, {}), None),
+                         (R(401, {}), None)):
+            S, seen = session(vb)
+            with patch(f"{__name__}.AsyncSession", S), patch(f"{__name__}.web_proxy", lambda: None):
+                out = await fetch({**st, "cookies": [{"name": "wbx-validation-key", "value": "vk"}]})
+            assert (out["funds"], out["vb_points"], out["orders"]) == (197888, want, []), out
+            assert (VB_URL, "wbx-validation-key=vk") in seen  # заголовки как у full-balance
+    with patch.object(log, "warning"):
+        asyncio.run(demo())
     print("ok")

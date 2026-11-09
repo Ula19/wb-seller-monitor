@@ -21,7 +21,7 @@ from app.wb.web_session import ProxyDown
 log = logging.getLogger(__name__)
 
 CODE_TIMEOUT = 300  # сколько ждём код с сайта, сек
-PROXY_ALERT_AFTER = 3  # пуш «прокси не отвечает» — после стольких сбоев подряд (один таймаут резидентного прокси — норма)
+PROXY_ALERT_AFTER = repo.PROXY_ALERT_AFTER  # один таймаут резидентного прокси — норма, пушим с третьего подряд
 
 
 def phone_mask(phone: str) -> str:

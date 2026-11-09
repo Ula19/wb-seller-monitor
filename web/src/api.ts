@@ -59,8 +59,8 @@ export type Account = {
   purchase_pct: number | null; kind: "business" | "retail";
   status: "active" | "relogin" | "off"; wallet_pct: number | null; limit_left: number | null;
   monthly_limit: number | null; max_order: number | null; max_rid: number | null;
-  wallet_balance: number | null; bonus_balance: number | null; state_at: string | null; orders: Order[];
-  proxy_fails: number; proxy_fail_at: string | null;
+  funds: number | null; vb_points: number | null; state_at: string | null; orders: Order[];
+  proxy_fails: number; proxy_fail_at: string | null; proxy_down: boolean;
   title: string; proxy: { id: number; label: string; server: string; exit_ip: string | null } | null;
 };
 export type Proxy = {

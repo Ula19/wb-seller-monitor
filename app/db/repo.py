@@ -150,6 +150,7 @@ async def add_history(s, products: list[NormProduct], event: str = "change") -> 
             [dict(nm_id=p.nm_id, price=p.shelf_price, stock=p.stock, event=event) for p in products]))
 
 
+PROXY_ALERT_AFTER = 3  # прокси аккаунта «не отвечает» (пуш, строка на сайте) — после стольких сбоев подряд
 MISS_TO_GONE = 3  # «пропал» после стольких циклов подряд без товара в выдаче (~3 мин)
 
 
@@ -342,7 +343,7 @@ async def upsert_account_prices(s, account_id: int, prices: dict[int, int]) -> N
         set_={"price": stmt.excluded.price, "priced_at": stmt.excluded.priced_at}))
 
 
-ACCOUNT_STATE_FIELDS = ("wallet_pct", "limit_left", "monthly_limit", "max_order", "max_rid", "wallet_balance", "bonus_balance")
+ACCOUNT_STATE_FIELDS = ("wallet_pct", "limit_left", "monthly_limit", "max_order", "max_rid", "funds", "vb_points")
 
 
 async def proxy_fail(s, account_id: int) -> int | None:

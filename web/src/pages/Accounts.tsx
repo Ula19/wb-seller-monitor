@@ -174,7 +174,9 @@ function Card({ a }: { a: Account }) {
     mutationFn: () => api(`/accounts/${a.id}`, { method: "DELETE" }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["accounts"] }),
   });
-  const low = a.monthly_limit && a.limit_left != null && a.limit_left < a.monthly_limit * 0.1;
+  const limitNote = a.limit_left === 0 ? <div className="bad-t small">лимит исчерпан — Кошелёк без скидки</div>
+    : a.monthly_limit && a.limit_left != null && a.limit_left < a.monthly_limit * 0.1
+      ? <div className="up-t small">лимит почти исчерпан</div> : null;
   const transit = visible(a.orders).filter((o) => o.group_id === 3).length;
   const pvz = visible(a.orders).filter((o) => o.group_id === 5).length;
   return (
@@ -185,16 +187,16 @@ function Card({ a }: { a: Account }) {
           <div className="muted small">{a.kind === "business" ? "Бизнес" : "Обычный"} · обновлён {time(a.state_at)}</div>
           <div className="small">{a.proxy ? <span className="muted">прокси: {a.proxy.label} · {a.proxy.exit_ip ?? a.proxy.server}</span>
             : <span className="up-t">без своего прокси — IP мониторинга</span>}</div>
-          {a.proxy_fails > 0 && <div className="small up-t">прокси не ответил {a.proxy_fails} раз подряд, последний {time(a.proxy_fail_at)}</div>}
+          {a.proxy_down && <div className="small up-t">прокси не ответил {a.proxy_fails} раз подряд, последний {time(a.proxy_fail_at)}</div>}
         </div>
-        <span className={`pill ${a.status === "active" ? (low ? "warn" : "ok") : "bad"}`}>
-          {a.status === "active" ? (low ? "лимит почти исчерпан" : "активен") : a.status === "relogin" ? "нужен вход" : "выключен"}
+        <span className={`pill ${a.status === "active" ? "ok" : "bad"}`}>
+          {a.status === "active" ? "активен" : a.status === "relogin" ? "нужен вход" : "выключен"}
         </span>
       </div>
       <div className="kv">
         <div><span>Кошелёк</span><b>{a.wallet_pct != null ? `−${a.wallet_pct}%` : "—"}</b></div>
-        <div><span>Баланс</span><b>{rub(a.wallet_balance)}</b></div>
-        <div><span>Бонусы</span><b>{rub(a.bonus_balance)}</b></div>
+        <div><span>Кошелёк WB</span><b>{rub(a.funds)}</b></div>
+        <div><span>ВБ-баллы</span><b>{a.vb_points != null ? a.vb_points.toLocaleString("ru-RU") : "—"}</b></div>
         <div><span>В пути / в ПВЗ</span><b>{transit} / {pvz}</b></div>
         <div><span>Процент выкупа</span><b>{a.purchase_pct != null ? `${a.purchase_pct}%` : "—"}</b></div>
       </div>
@@ -204,9 +206,10 @@ function Card({ a }: { a: Account }) {
           <div className="small">
             Остаток лимита скидки <b>{rub(a.limit_left)}</b> из {rub(a.monthly_limit)} · сброс {resetDate()}
             <div className="muted">заказ до {rub(a.max_order)}, позиция до {rub(a.max_rid)}</div>
+            {limitNote}
           </div>
         </div>
-      ) : a.limit_left != null && <p className="small">Остаток лимита скидки: <b>{rub(a.limit_left)}</b></p>}
+      ) : a.limit_left != null && <div className="small">Остаток лимита скидки: <b>{rub(a.limit_left)}</b>{limitNote}</div>}
       <div className="acc-foot">
         <button className="link" onClick={() => setOpen(!open)}>Заказы ({visible(a.orders).length}) {open ? "▴" : "▾"}</button>
         <button className="link danger" onClick={() => confirm(
@@ -227,8 +230,8 @@ export default function Accounts() {
     <section>
       <h1>Аккаунты</h1>
       <div className="tiles">
-        <div className="tile"><b>{rub(sum((a) => a.wallet_balance ?? 0))}</b><span>в Кошельках</span></div>
-        <div className="tile"><b>{rub(sum((a) => a.bonus_balance ?? 0))}</b><span>бонусы</span></div>
+        <div className="tile"><b>{rub(sum((a) => a.funds ?? 0))}</b><span>Кошелёк WB</span></div>
+        <div className="tile"><b>{sum((a) => a.vb_points ?? 0).toLocaleString("ru-RU")}</b><span>ВБ-баллы</span></div>
         <div className="tile"><b>{sum((a) => visible(a.orders).filter((o) => o.group_id === 3).length)}</b><span>в пути</span></div>
         <div className="tile"><b>{sum((a) => visible(a.orders).filter((o) => o.group_id === 5).length)}</b><span>в ПВЗ</span></div>
         <div className="tile"><b className={list.some((a) => a.status !== "active") ? "up-t" : ""}>{list.filter((a) => a.status !== "active").length}</b><span>требуют входа</span></div>

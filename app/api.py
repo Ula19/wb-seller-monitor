@@ -324,7 +324,7 @@ async def delete_target(nm_id: int, u=Depends(user), s=Depends(db)):
 
 # ---------- аккаунты WB ----------
 ACC_FIELDS = ("id", "label", "phone_mask", "name", "phone", "purchase_pct", "kind", "status", "wallet_pct", "limit_left", "monthly_limit", "max_order",
-              "max_rid", "wallet_balance", "bonus_balance", "state_at", "proxy_fails", "proxy_fail_at")
+              "max_rid", "funds", "vb_points", "state_at", "proxy_fails", "proxy_fail_at")
 ORDER_FIELDS = ("rid", "nm_id", "name", "brand", "price", "dst_office_id", "status_name", "group_id",
                 "status_at", "ordered_at", "expiry_at", "delivery_at", "paid", "office_address", "office_hours", "hidden")
 
@@ -337,6 +337,7 @@ async def accounts(u=Depends(user), s=Depends(db)):
         orders.setdefault(o.account_id, []).append({f: getattr(o, f) for f in ORDER_FIELDS})
     proxies = {p.id: p for p in await s.scalars(select(models.Proxy))}
     return [{**{f: getattr(a, f) for f in ACC_FIELDS}, "title": a.title, "orders": orders.get(a.id, []),
+             "proxy_down": a.proxy_fails >= repo.PROXY_ALERT_AFTER,  # порог тот же, что у пуша
              "proxy": (p := proxies.get(a.proxy_id)) and {"id": p.id, "label": p.label, "server": p.server,
                                                          "exit_ip": p.exit_ip}} for a in accs]
 
