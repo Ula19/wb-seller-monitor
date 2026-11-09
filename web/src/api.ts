@@ -62,6 +62,7 @@ export type Account = {
   monthly_limit: number | null; max_order: number | null; max_rid: number | null;
   funds: number | null; vb_points: number | null; state_at: string | null; orders: Order[];
   proxy_fails: number; proxy_fail_at: string | null; proxy_down: boolean; polling: boolean;
+  visit_error: string | null; site_lost: boolean;  // почему визит в браузере не удался; сессия сайта истекла
   title: string; proxy: { id: number; label: string; server: string; exit_ip: string | null } | null;
 };
 // страница аккаунта: + код получения на сегодня и счётчики вкладок

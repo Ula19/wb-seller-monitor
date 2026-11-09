@@ -108,8 +108,10 @@ WALLET_JS = """async () => {
   if (m) h.authorization = 'Bearer ' + m[0];
   const r = await fetch('/webapi/lk/mywallet/purchases/data', {method: 'POST', headers: h, credentials: 'include',
                                                                body: 'currency=RUB'});
-  return r.ok ? await r.json() : null;
-}"""
+  const text = await r.text();
+  if (!r.ok) return {ok: false, status: r.status, text: text.slice(0, 200)};
+  try { return {ok: true, data: JSON.parse(text)}; } catch (e) { return {ok: false, status: r.status, text: text.slice(0, 200)}; }
+}"""  # → {ok, data} или {ok: false, status, text} — чтобы в логе было видно, почему не вышло
 # код получения в ПВЗ: в API WB его нет — сайт считает в браузере (ежедневный, до 00:00 МСК); читаем текстом
 # 6 цифр, между тройками бывает пробел/неразрывный; (?!\d) — не прихватить число со следующей строки («12 ноября»)
 PICKUP_CODE_RE = re.compile(r"Код получения\s*(\d{3})[ \u00a0]?(\d{3})(?!\d)")

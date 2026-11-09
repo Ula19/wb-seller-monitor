@@ -67,7 +67,7 @@ function PickupButton({ g, a, sync }: { g: Pvz; a: AccountFull; sync: ReturnType
   if (sync.busy) return <span className="muted small"><span className="spin" /> Получаю код… (~30 с)</span>;
   return (
     <>
-      {asked && <span className="up-t small">код не получен — попробуйте ещё раз </span>}
+      {asked && <span className="up-t small">{a.visit_error ?? "код не получен — попробуйте ещё раз"} </span>}
       <button className="btn ok" onClick={() => { setAsked(true); sync.start(); }}>Готовы забрать</button>
     </>
   );
@@ -291,7 +291,7 @@ export default function Account() {
           <StatusDot a={a} /><Title a={a} />
           {a.wallet_pct != null && <span className="badge in">Кошелёк −{a.wallet_pct}%</span>}
           <span className={`pill ${a.status === "active" ? "ok" : "bad"}`}>{STATUS[a.status] ?? a.status}</span>
-          {a.status === "relogin" && <button className="btn sm" onClick={() => setRelogin({ a, n: Date.now() })}>Войти заново</button>}
+          {(a.status === "relogin" || a.site_lost) && <button className="btn sm" onClick={() => setRelogin({ a, n: Date.now() })}>Войти заново</button>}
         </div>
         <div className="acc-actions">
           <button className="btn ghost" disabled={a.polling || poll.isPending} onClick={() => poll.mutate()}>
@@ -306,6 +306,8 @@ export default function Account() {
         {a.proxy ? `прокси ${a.proxy.label} · ${a.proxy.exit_ip ?? a.proxy.server}` : <span className="up-t">без своего прокси — IP мониторинга</span>}
         {note && <span className="up-t"> · {note}</span>}
       </div>
+      {a.site_lost && a.status === "active" && <div className="small bad-t">{a.visit_error}: код получения и история
+        баланса не обновляются (лимит и заказы — обновляются)</div>}
       {a.proxy_down && <div className="small up-t">прокси не ответил {a.proxy_fails} раз подряд, последний {time(a.proxy_fail_at)}</div>}
       <div className="tiles acc-tiles">
         <div className="tile"><b>{rub(a.funds)}</b><span>Кошелёк WB</span></div>

@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import random
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from urllib.parse import urlparse
@@ -32,6 +33,13 @@ LAUNCH_ARGS = ["--no-sandbox", "--disable-dev-shm-usage"]
 SELLER_URL = "https://www.wildberries.ru/seller/{}"
 DELIVERY_URL = "https://www.wildberries.ru/lk/myorders/delivery"  # тут сайт показывает «Код получения NNN NNN»
 CODE_WAIT_SEC = 20  # SPA дорисовывает блок с кодом — ждём до стольких секунд
+SELECT_WAIT_SEC = 10  # экран «В какой аккаунт хотите войти?» дорисовывается не сразу
+SELECT_TITLE = "В какой аккаунт хотите войти?"
+PHONE_ON_PAGE = re.compile(r"\+7 \d{3} \d{3}-\d{2}-\d{2}")  # «+7 988 156-78-17» на экране выбора
+# почему визит не удался — keeper пишет в wb_accounts.visit_error, сайт показывает
+VISIT_SESSION = "сессия сайта WB истекла — войдите заново"
+VISIT_PAGE = "WB не открыл страницу — проверьте прокси"
+VISIT_NO_CODE = "на странице WB кода нет — товаров в ПВЗ нет?"
 # служебные заголовки запроса браузера, которые curl ставит сам (cookie — свои)
 SKIP_HEADERS = {"host", "content-length", "connection", "cookie"}
 CALLBACK_WAIT_SEC = 45  # после кода: ждём callback (и экран согласия WB ID у нового аккаунта)
@@ -369,32 +377,96 @@ async def _finish_login(ctx, page) -> dict:
                       else "код не принят — проверьте код")
 
 
-async def _visit(page, want_code: bool) -> dict:
-    """То, что WB считает/отдаёт только в браузере: код получения (страница доставок) и история баланса (mywallet).
-    Каждая часть отдельно: сбой одной не мешает другой и не ломает рефреш."""
-    from app.wb.account_api import WALLET_JS, parse_pickup_code
-    out = {"pickup_code": None, "balance": None}
-    if want_code:
+def _on_www(url: str) -> bool:
+    return urlparse(url).hostname == WWW_HOST
+
+
+async def _select_account(page, phone: str | None) -> bool:
+    """Экран WB ID «В какой аккаунт хотите войти?»: клик по номеру этого аккаунта (по последним 4 цифрам),
+    не нашёлся — по первому номеру в списке. «Нет нужного аккаунта» не трогаем. False — экрана нет."""
+    for _ in range(SELECT_WAIT_SEC):
+        if await _first_visible(page.get_by_text(SELECT_TITLE)):
+            break
+        await asyncio.sleep(1)
+    else:
+        return False
+    digits = re.sub(r"\D", "", phone or "")
+    tail = f"{digits[-4:-2]}-{digits[-2:]}" if len(digits) >= 4 else None
+    el = await _first_visible(page.get_by_text(tail)) if tail else None
+    picked = f"…{tail}"
+    if el is None:
+        el = await _first_visible(page.get_by_text(PHONE_ON_PAGE))
+        picked = "первый номер в списке"
+    if el is None:
+        return False
+    await asyncio.sleep(random.uniform(1, 2))
+    await el.click()
+    log.info("визит: WB ID попросил выбрать аккаунт — выбрал %s", picked)
+    return True
+
+
+async def _open_lk(ctx, page, phone: str | None) -> str | None:
+    """Открыть ЛК (страницу доставок) на www — заодно проверка, что сессия САЙТА жива (куки есть и у анонима,
+    главная открывается и анонимно). WB ID просит выбрать аккаунт — выбираем и доводим вход, как после кода.
+    → None — ЛК открыт; иначе причина (VISIT_SESSION / VISIT_PAGE)."""
+    try:
+        await page.goto(DELIVERY_URL, wait_until="domcontentloaded")
+        await asyncio.sleep(3)  # редирект на id.wb.ru бывает и после загрузки
+    except Exception as e:
+        log.warning("визит: ЛК не открылся: %s: %s", type(e).__name__, str(e)[:200])
+        return VISIT_PAGE
+    if _on_www(page.url):
+        return None
+    if urlparse(page.url).hostname == "id.wb.ru":
         try:
-            await page.goto(DELIVERY_URL, wait_until="domcontentloaded")
+            if await _select_account(page, phone):
+                await _finish_login(ctx, page)  # экран согласия → «Принять», callback, куки www
+                await page.goto(DELIVERY_URL, wait_until="domcontentloaded")
+                await asyncio.sleep(3)
+                if _on_www(page.url):
+                    return None
+        except Exception as e:  # LoginFailed и сбои навигации — одна причина: сайт не пустил
+            log.warning("визит: после выбора аккаунта вход не завершён: %s: %s", type(e).__name__, str(e)[:200])
+        log.warning("визит: сессия сайта истекла, страница %s: %s", page.url, (await _page_text(page))[:200])
+        return VISIT_SESSION
+    log.warning("визит: ЛК увёл на %s: %s", page.url, (await _page_text(page))[:200])
+    return VISIT_PAGE
+
+
+async def _visit(page, want_code: bool) -> dict:
+    """ЛК уже открыт (_open_lk): код получения со страницы доставок и история баланса (mywallet) — то, что WB
+    считает/отдаёт только в браузере. Части независимы: сбой одной не мешает другой и не ломает рефреш."""
+    from app.wb.account_api import WALLET_JS, parse_pickup_code
+    out = {"pickup_code": None, "balance": None, "error": None}
+    if want_code:
+        text = ""
+        try:
             for _ in range(CODE_WAIT_SEC):
                 await asyncio.sleep(1)
-                if code := parse_pickup_code(await page.evaluate("document.body ? document.body.innerText : ''")):
+                text = await page.evaluate("document.body ? document.body.innerText : ''")
+                if code := parse_pickup_code(text):
                     out["pickup_code"] = code
                     break
-            else:
-                log.info("визит: кода получения на странице нет (нечего забирать?)")
         except Exception as e:
             log.warning("визит: код получения не прочитан: %s: %s", type(e).__name__, str(e)[:200])
+        if not out["pickup_code"]:
+            i = (text or "").find("Доставк")  # начало блока заказов, иначе начало страницы
+            log.info("визит: кода получения нет, страница %s: %s", page.url,
+                     " ".join((text or "")[max(i, 0):max(i, 0) + 400].split())[:200])
+            out["error"] = VISIT_NO_CODE
     try:
-        out["balance"] = await asyncio.wait_for(page.evaluate(WALLET_JS), 20)
+        res = await asyncio.wait_for(page.evaluate(WALLET_JS), 20) or {}
+        if res.get("ok"):
+            out["balance"] = res.get("data")
+        else:
+            log.warning("визит: история баланса не получена: HTTP %s: %s", res.get("status"), (res.get("text") or "")[:200])
     except Exception as e:
         log.warning("визит: история баланса не получена: %s: %s", type(e).__name__, str(e)[:200])
     return out
 
 
 async def refresh(storage_state: dict | str, proxy: str | None = None, *,
-                  visit: bool = False, want_code: bool = False) -> dict | None:
+                  visit: bool = False, want_code: bool = False, phone: str | None = None) -> dict | None:
     """Поддержание сессии: заходим на сайт с куками, возвращаем обновлённую банку.
 
     None — если сессия протухла (разлогинило). ProxyDown — прокси не отвечает (сессия не тронута).
@@ -413,18 +485,25 @@ async def refresh(storage_state: dict | str, proxy: str | None = None, *,
             page = await ctx.new_page()
             await _open_home(page)
             await asyncio.sleep(5)
-            # по кукам сайта, а не по слову «Войти» — оно есть и на залогиненной странице
+            # кук сайта нет вовсе — разлогинило (relogin); по слову «Войти» нельзя — оно есть и у залогиненного
             if not is_logged(await ctx.storage_state()):
                 log.warning("веб-рефреш: сессия протухла (кук сайта нет)")
                 return None
-            log.info("веб-рефреш: сессия жива, куки обновлены")
             from app.wb.account_api import PROFILE_KEY, VISIT_KEY
             profile = await _profile(page)  # имя/телефон/выкуп обновляются вместе с сессией
-            extra = await _visit(page, want_code) if visit else None
+            # жива ли сессия САЙТА — по тому, открылся ли ЛК на www (главная открывается и анонимно).
+            # Не открылся — НЕ relogin: HTTP-опрос по Bearer при этом жив; причина уходит на сайт
+            error = await _open_lk(ctx, page, phone)
+            extra = {"pickup_code": None, "balance": None, "error": error}
+            if error:
+                log.warning("веб-рефреш: куки есть, но ЛК не открылся — %s (бизнес-цены могут идти анонимно)", error)
+            else:
+                log.info("веб-рефреш: сессия жива, ЛК открылся")
+                if visit:
+                    extra = await _visit(page, want_code)
             state = await ctx.storage_state()  # после визита: куки могли обновиться
             state[PROFILE_KEY] = profile
-            if visit:
-                state[VISIT_KEY] = extra
+            state[VISIT_KEY] = extra
             return state
         finally:
             await browser.close()
@@ -715,38 +794,106 @@ if __name__ == "__main__":  # self-check чистых функций (без б�
     with patch.object(log, "warning"), patch.object(log, "info"):
         asyncio.run(demo2())
 
-    # визит: код дорисовывается не сразу; история баланса — fetch из страницы; сбои — по отдельности
+    # визит: ЛК (с выбором аккаунта WB ID), код получения, история баланса; причины неудачи
     from app.wb.account_api import WALLET_JS
 
-    class VisitPage:
-        def __init__(self, texts, wallet=None, goto_fails=False):
-            self.texts, self.wallet, self.goto_fails, self.url, self.js = list(texts), wallet, goto_fails, "", []
+    CALLBACK = "https://www.wildberries.ru/wb-id/callback?code=z"
+    SELECT = "https://id.wb.ru/login/oauth2/authorize?prompt=select_account"
+
+    class Node:
+        def __init__(self, pg, key, on_click=None):
+            self.pg, self.key, self.on_click = pg, key, on_click
+
+        async def is_visible(self):
+            return True
+
+        async def click(self):
+            self.pg.clicks.append(self.key)
+            if self.on_click:
+                self.on_click()
+
+    class LkPage:
+        """redirect: куда уводит ЛК до выбора аккаунта; phones: номера на экране выбора; works: после выбора WB
+        доводит вход (callback + куки www); texts: что на странице доставок; wallet: ответ WALLET_JS."""
+        def __init__(self, redirect=None, phones=(), works=True, texts=("",), wallet=None, goto_fails=False):
+            self.redirect, self.phones, self.works, self.texts = redirect, list(phones), works, list(texts)
+            self.wallet = wallet if wallet is not None else {"ok": True, "data": {"value": 1}}
+            self.goto_fails, self.url, self.clicks, self.gotos, self.cookies = goto_fails, "", [], [], []
+            self.selected = False
 
         async def goto(self, url, **kw):
             if self.goto_fails:
                 raise TimeoutError("goto")
-            self.url = url
+            self.gotos.append(url)
+            self.url = self.redirect if (url == DELIVERY_URL and self.redirect and not self.selected) else url
+
+        def _pick(self):
+            self.selected = True
+            if self.works:
+                self.url = CALLBACK
+                self.cookies.append({"name": "wbx-validation-key", "value": "v", "domain": ".wildberries.ru"})
+
+        def get_by_text(self, what, exact=False):
+            if self.url != SELECT:
+                return Loc([])
+            if what == SELECT_TITLE:
+                return Loc([Node(self, "title")])
+            match = (lambda s: what.search(s)) if hasattr(what, "search") else (lambda s: what in s)
+            return Loc([Node(self, ph, self._pick) for ph in self.phones if match(ph)])
+
+        def get_by_role(self, role, name, exact=False):
+            return Loc([])  # экрана согласия в этих случаях нет
 
         async def evaluate(self, js):
-            self.js.append(js)
             if js == WALLET_JS:
-                if isinstance(self.wallet, Exception):
-                    raise self.wallet
                 return self.wallet
             return self.texts.pop(0) if len(self.texts) > 1 else self.texts[0]
 
+        async def inner_text(self, sel):
+            return "В какой аккаунт хотите войти? +7 988 156-78-17 Нет нужного аккаунта"
+
+    class LkCtx:
+        def __init__(self, pg):
+            self.pg = pg
+
+        async def storage_state(self):
+            return {"cookies": list(self.pg.cookies), "origins": []}
+
+    async def lk(pg, want_code=True, phone="+7 988 156-78-17"):
+        err = await _open_lk(LkCtx(pg), pg, phone)
+        return err, (await _visit(pg, want_code) if err is None else None)
+
     async def demo3():
         with patch.object(asyncio, "sleep", nosleep):
-            pg = VisitPage(["Загрузка…", "Мои доставки", "Код получения\n112\u00a0396\n12 ноября"], wallet={"value": {}})
-            assert await _visit(pg, True) == {"pickup_code": "112396", "balance": {"value": {}}}
-            assert pg.url == DELIVERY_URL and pg.js.count(WALLET_JS) == 1
-            pg = VisitPage(["Мои доставки — пусто"], wallet={"value": 1})  # кода нет — 20 проверок и дальше баланс
-            assert await _visit(pg, True) == {"pickup_code": None, "balance": {"value": 1}}
-            assert len(pg.js) == CODE_WAIT_SEC + 1
-            pg = VisitPage(["x"], wallet={"v": 2})  # плановый без заказов в ПВЗ: на страницу доставок не ходим
-            assert await _visit(pg, False) == {"pickup_code": None, "balance": {"v": 2}} and pg.url == ""
-            pg = VisitPage(["x"], wallet=RuntimeError("fetch"), goto_fails=True)  # оба упали — не падаем
-            assert await _visit(pg, True) == {"pickup_code": None, "balance": None}
-    with patch.object(log, "warning"), patch.object(log, "info"):
+            # обычный случай: ЛК на www, код дорисовался не сразу, баланс пришёл
+            pg = LkPage(texts=["Загрузка…", "Доставки\nКод получения\n112\u00a0396\n12 ноября"])
+            assert await lk(pg) == (None, {"pickup_code": "112396", "balance": {"value": 1}, "error": None})
+            # WB ID просит выбрать аккаунт: кликаем НАШ номер (…78-17), не первый; потом снова ЛК и код
+            pg = LkPage(redirect=SELECT, phones=["+7 900 111-22-33", "+7 988 156-78-17"],
+                        texts=["Код получения 554 433"])
+            assert await lk(pg) == (None, {"pickup_code": "554433", "balance": {"value": 1}, "error": None})
+            assert pg.clicks == ["+7 988 156-78-17"] and pg.gotos.count(DELIVERY_URL) == 2
+            # нашего номера на экране нет — первый в списке; «Нет нужного аккаунта» не номер — не жмём
+            pg = LkPage(redirect=SELECT, phones=["+7 900 111-22-33"], texts=["Код получения 554 433"])
+            assert (await lk(pg))[0] is None and pg.clicks == ["+7 900 111-22-33"]
+            # выбрали, но ни callback, ни кук сайта → «сессия сайта истекла»; баланс на id.wb.ru не трогаем
+            pg = LkPage(redirect=SELECT, phones=["+7 988 156-78-17"], works=False)
+            assert await lk(pg) == (VISIT_SESSION, None)
+            # страница не открылась (прокси) и увела не туда
+            assert await lk(LkPage(goto_fails=True)) == (VISIT_PAGE, None)
+            assert await lk(LkPage(redirect="https://www.wildberries.ru.evil/x")) == (VISIT_PAGE, None)
+            # ЛК открылся, кода нет → «товаров в ПВЗ нет?»; без want_code причины нет
+            err, out = await lk(LkPage(texts=["Доставки\nУ вас нет заказов"]))
+            assert err is None and out == {"pickup_code": None, "balance": {"value": 1}, "error": VISIT_NO_CODE}
+            assert (await lk(LkPage(), want_code=False))[1]["error"] is None
+            # баланс 405 — в лог статус и тело, сам баланс None
+            err, out = await lk(LkPage(texts=["Код получения 112 396"],
+                                       wallet={"ok": False, "status": 405, "text": "<html>405 Not Allowed</html>"}))
+            assert out["balance"] is None and out["pickup_code"] == "112396"
+    with patch.object(log, "warning") as warn, patch.object(log, "info") as info:
         asyncio.run(demo3())
+    logged = " ".join(str(c) for c in warn.call_args_list + info.call_args_list)
+    assert "405" in logged and "405 Not Allowed" in logged  # почему не пришёл баланс
+    assert "…78-17" in logged and "первый номер в списке" in logged  # что выбрали
+    assert "У вас нет заказов" in logged  # кусок страницы, где не нашёлся код
     print("ok")

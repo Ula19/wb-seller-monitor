@@ -24,7 +24,7 @@ export function StatusDot({ a }: { a: Account }) {
 
 /** Полоса лимита скидки + остаток; оранжевым при < 10 %, красным при 0. */
 export function Limit({ a, short = false }: { a: Account; short?: boolean }) {
-  if (a.limit_left == null) return <span className="muted">—</span>;
+  if (a.limit_left == null) return <div className="muted">—</div>;
   const low = a.limit_left === 0 ? "bad-t" : a.monthly_limit && a.limit_left < a.monthly_limit * 0.1 ? "up-t" : "";
   const pct = a.monthly_limit ? Math.max(0, Math.min(100, (a.limit_left / a.monthly_limit) * 100)) : null;
   return (

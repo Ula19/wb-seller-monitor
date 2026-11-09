@@ -114,8 +114,8 @@ async def _refresh(acc: models.WbAccount, *, visit: bool = False, want_code: boo
             row = await s.get(models.WbAccount, acc.id)
             if row is None:
                 raise AccountGone(acc.id)
-            state, proxy_id = decrypt_json(row.state_enc), row.proxy_id
-        new = await web_session.refresh(state, await proxy_url(proxy_id), visit=visit, want_code=want_code)
+            state, proxy_id, phone = decrypt_json(row.state_enc), row.proxy_id, row.phone
+        new = await web_session.refresh(state, await proxy_url(proxy_id), visit=visit, want_code=want_code, phone=phone)
         if new is None:
             return None
         profile = new.pop(account_api.PROFILE_KEY, None)
@@ -126,14 +126,17 @@ async def _refresh(acc: models.WbAccount, *, visit: bool = False, want_code: boo
             if row is not None:
                 row.state_enc = encrypt_json(new)
                 repo.apply_profile(row, profile)  # имя, полный телефон, процент выкупа — без перелогина
+                if seen:  # ЛК открывался — итог (None = всё хорошо) на сайт
+                    row.visit_error = seen.get("error")
                 if seen.get("pickup_code"):
                     row.pickup_code, row.pickup_code_date = seen["pickup_code"], repo.msk_today()
                 if ops:
                     await repo.upsert_balance_ops(s, acc.id, ops)
                 await s.commit()
-        if visit:
-            log.info("keeper: визит аккаунта %s: код получения %s, операций баланса %s", acc.title,
-                     "есть" if seen.get("pickup_code") else "нет", len(ops) if ops is not None else "—")
+        if visit or seen.get("error"):
+            log.info("keeper: визит аккаунта %s: код получения %s, операций баланса %s%s", acc.title,
+                     "есть" if seen.get("pickup_code") else "нет", len(ops) if ops is not None else "—",
+                     f" — {seen['error']}" if seen.get("error") else "")
         return new
 
 

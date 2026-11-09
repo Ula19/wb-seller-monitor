@@ -30,6 +30,7 @@ from app.db import models, repo
 from app.db.base import Session
 from app.wallet import best_offer, offer_text, wallet_price
 from app.wb import media
+from app.wb.web_session import VISIT_SESSION
 from app.wb.proxy_check import is_parser_proxy, parse_proxy
 
 COOKIE = "wbm_session"
@@ -326,7 +327,7 @@ async def delete_target(nm_id: int, u=Depends(user), s=Depends(db)):
 
 # ---------- аккаунты WB ----------
 ACC_FIELDS = ("id", "label", "phone_mask", "name", "phone", "purchase_pct", "kind", "status", "wallet_pct", "limit_left", "monthly_limit", "max_order",
-              "max_rid", "funds", "vb_points", "state_at", "proxy_fails", "proxy_fail_at", "polling")
+              "max_rid", "funds", "vb_points", "state_at", "proxy_fails", "proxy_fail_at", "polling", "visit_error")
 POLL_FRESH_SEC = 30  # ↻ не чаще: только что обновлённый опрашивать незачем
 ORDER_FIELDS = ("rid", "nm_id", "name", "brand", "price", "dst_office_id", "status_name", "group_id",
                 "status_at", "ordered_at", "expiry_at", "delivery_at", "paid", "office_address", "office_hours", "hidden")
@@ -347,6 +348,8 @@ async def _account_views(s, accs: list[models.WbAccount]) -> list[dict]:
     proxies = {p.id: p for p in await s.scalars(select(models.Proxy))}
     return [{**{f: getattr(a, f) for f in ACC_FIELDS}, "title": a.title, "orders": orders.get(a.id, []),
              "proxy_down": a.proxy_fails >= repo.PROXY_ALERT_AFTER,  # порог тот же, что у пуша
+             # куки есть, а ЛК WB не пускает: HTTP-опрос жив (не relogin), но бизнес-цены/код — нужен вход
+             "site_lost": a.visit_error == VISIT_SESSION,
              "proxy": (p := proxies.get(a.proxy_id)) and {"id": p.id, "label": p.label, "server": p.server,
                                                          "exit_ip": p.exit_ip}} for a in accs]
 
