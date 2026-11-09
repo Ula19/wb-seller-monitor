@@ -21,6 +21,7 @@ STATUSES_URL = "https://status-tracker.wb.ru/api/v6/statuses?lang=ru"
 TOKEN_KEYS = ("wbx__tokenData", "wbid-oauth-sdk-access-token")  # по порядку предпочтения
 WWW = "https://www.wildberries.ru"
 WALLET_WCTYPE = 1  # grade.payload.payments[]: способ оплаты «Кошелёк»
+PAY_STATE = {4: True, 1: False}  # rids[].pay_state: 4 оплачен, 1 не оплачен, прочее — не знаем
 JWT = re.compile(r"eyJ[\w-]+\.[\w-]+\.[\w-]+")
 HEADERS = {"Origin": "https://www.wildberries.ru", "Referer": "https://www.wildberries.ru/",
            "Accept": "application/json"}
@@ -95,12 +96,14 @@ def parse_orders(d: dict) -> list[dict]:
     out = []
     for order in d.get("data") or []:
         for r in order.get("rids") or []:
-            if not r.get("uid"):
+            if not r.get("uid") or r.get("pay_type") == 0:  # pay_type 0 — служебный «Пакет», не товар
                 continue
             out.append({"rid": r["uid"], "nm_id": r.get("nm_id"), "name": r.get("name"),
                         "brand": r.get("brand"), "price": _rub(r.get("price")),
                         "dst_office_id": r.get("dst_office_id") or order.get("dst_office_id"),
-                        "ordered_at": _ts(order.get("order_dt")), "expiry_at": _ts(r.get("expiry_dt"))})
+                        "ordered_at": _ts(order.get("order_dt")), "expiry_at": _ts(r.get("expiry_dt")),
+                        "delivery_at": _ts(r.get("delivery_time")),  # плановая доставка (верхняя граница срока)
+                        "paid": PAY_STATE.get(r.get("pay_state"))})
     return out
 
 
@@ -169,6 +172,12 @@ if __name__ == "__main__":  # self-check на формах ответов из H
     apply_statuses(o, [[{"rid": "eAe.a.0.0", "status_name": "Вы оформили заказ", "group_id": "1", "date": 1 * 10**18},
                         {"rid": "eAe.a.0.0", "status_name": "Едет в пункт выдачи", "group_id": "3", "date": 2 * 10**18}]])
     assert (o[0]["status_name"], o[0]["group_id"]) == ("Едет в пункт выдачи", 3) and o[1]["status_name"] is None
+    o = parse_orders({"data": [{"rids": [
+        {"uid": "p4", "pay_state": 4, "pay_type": 1, "delivery_time": 1794653000},
+        {"uid": "p1", "pay_state": 1, "pay_type": 1}, {"uid": "p2", "pay_state": 2},
+        {"uid": "bag", "pay_type": 0, "name": "Пакет", "pay_state": 4}]}]})
+    assert [(x["rid"], x["paid"]) for x in o] == [("p4", True), ("p1", False), ("p2", None)], o
+    assert o[0]["delivery_at"] == datetime(2026, 11, 14, 10, 43, 20, tzinfo=timezone.utc) and o[1]["delivery_at"] is None
     assert parse_profile({"value": {"isAuthenticated": True, "firstName": " Анна ", "purchasePercent": 94,
                                     "formattedPhoneMobile": "+7 916 123-45-67"}}) == \
         {"name": "Анна", "phone": "+7 916 123-45-67", "purchase_pct": 94}

@@ -354,12 +354,15 @@ async def save_account_state(s, account_id: int, st: dict) -> None:
         models.AccountOrder.rid.not_in([o["rid"] for o in orders]) if orders else true()))
     if orders:
         cols = ("nm_id", "name", "brand", "price", "dst_office_id", "status_name", "group_id",
-                "status_at", "ordered_at", "expiry_at")
+                "status_at", "ordered_at", "expiry_at", "delivery_at", "paid")
+        office = ("office_address", "office_hours")  # сбой справочника ПВЗ (None) не стирает сохранённый адрес
+        t = models.AccountOrder.__table__
         stmt = pg_insert(models.AccountOrder).values(
-            [{"account_id": account_id, "rid": o["rid"], **{c: o.get(c) for c in cols}} for o in orders])
-        await s.execute(stmt.on_conflict_do_update(
+            [{"account_id": account_id, "rid": o["rid"], **{c: o.get(c) for c in cols + office}} for o in orders])
+        await s.execute(stmt.on_conflict_do_update(  # hidden не трогаем — скрытие переживает опросы
             index_elements=[models.AccountOrder.account_id, models.AccountOrder.rid],
-            set_={c: stmt.excluded[c] for c in cols}))
+            set_={**{c: stmt.excluded[c] for c in cols},
+                  **{c: func.coalesce(stmt.excluded[c], t.c[c]) for c in office}}))
 
 
 # ---------- заявки на вход в аккаунт WB (сайт → worker) ----------

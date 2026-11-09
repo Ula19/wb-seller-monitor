@@ -15,7 +15,7 @@ from app.config import settings
 from app.crypto import decrypt_json, encrypt_json
 from app.db import models, repo
 from app.db.base import Session
-from app.wb import account_api, proxy_check, web_session
+from app.wb import account_api, pickups, proxy_check, web_session
 from app.wb.web_session import ProxyDown
 
 log = logging.getLogger(__name__)
@@ -163,6 +163,10 @@ async def poll_account(bot, acc: models.WbAccount) -> None:
         log.warning("keeper: состояние аккаунта %s не получено: %s: %s", acc.id, type(e).__name__, str(e)[:200])
         return
     _proxy_down.discard(acc.id)
+    if st.get("orders"):  # адрес и часы ПВЗ — в строку заказа: API в другом контейнере, кэша справочника не видит
+        offices = await pickups.lookup(o["dst_office_id"] for o in st["orders"])
+        for o in st["orders"]:
+            o["office_address"], o["office_hours"] = offices.get(o["dst_office_id"], (None, None))
     async with Session() as s:
         await repo.save_account_state(s, acc.id, st)
         await s.commit()

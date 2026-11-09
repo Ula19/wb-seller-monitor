@@ -51,7 +51,8 @@ export type Target = {
 export type Order = {
   rid: string; nm_id: number | null; name: string | null; brand: string | null; price: number | null;
   dst_office_id: number | null; status_name: string | null; group_id: number | null;
-  status_at: string | null; ordered_at: string | null; expiry_at: string | null;
+  status_at: string | null; ordered_at: string | null; expiry_at: string | null; delivery_at: string | null;
+  paid: boolean | null; office_address: string | null; office_hours: string | null; hidden: boolean;
 };
 export type Account = {
   id: number; label: string | null; phone_mask: string; name: string | null; phone: string | null;

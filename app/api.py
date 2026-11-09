@@ -326,7 +326,7 @@ async def delete_target(nm_id: int, u=Depends(user), s=Depends(db)):
 ACC_FIELDS = ("id", "label", "phone_mask", "name", "phone", "purchase_pct", "kind", "status", "wallet_pct", "limit_left", "monthly_limit", "max_order",
               "max_rid", "wallet_balance", "bonus_balance", "state_at")
 ORDER_FIELDS = ("rid", "nm_id", "name", "brand", "price", "dst_office_id", "status_name", "group_id",
-                "status_at", "ordered_at", "expiry_at")
+                "status_at", "ordered_at", "expiry_at", "delivery_at", "paid", "office_address", "office_hours", "hidden")
 
 
 @app.get("/api/accounts")
@@ -354,6 +354,22 @@ async def rename_account(account_id: int, body: AccountIn, u=Depends(user), s=De
     acc.label = (body.label or "").strip() or None
     await s.commit()
     return {"ok": True, "title": acc.title}
+
+
+class OrderIn(BaseModel):
+    hidden: bool
+
+
+@app.patch("/api/accounts/{account_id}/orders/{rid}")
+async def hide_order(account_id: int, rid: str, body: OrderIn, u=Depends(user), s=Depends(db)):
+    """Скрыть/вернуть позицию заказа на сайте; опрос keeper'а hidden не трогает."""
+    acc = await s.get(models.WbAccount, account_id)
+    o = await s.get(models.AccountOrder, (account_id, rid))
+    if acc is None or acc.user_id != u.telegram_id or o is None:
+        raise HTTPException(404, "нет такого заказа")
+    o.hidden = body.hidden
+    await s.commit()
+    return {"ok": True}
 
 
 @app.delete("/api/accounts/{account_id}")

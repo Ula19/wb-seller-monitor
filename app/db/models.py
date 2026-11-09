@@ -196,12 +196,17 @@ class AccountOrder(Base):
     name: Mapped[str | None] = mapped_column(String(512), nullable=True)
     brand: Mapped[str | None] = mapped_column(String(256), nullable=True)
     price: Mapped[int | None] = mapped_column(Integer, nullable=True)  # ₽
-    dst_office_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)  # ПВЗ, адрес — потом
+    dst_office_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)  # ПВЗ
     status_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     group_id: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 1 оформлен … 3 в пути, 5 в ПВЗ
     status_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     ordered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    expiry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expiry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)  # заберите до
+    delivery_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)  # ожидается до
+    paid: Mapped[bool | None] = mapped_column(Boolean, nullable=True)  # None — WB не сказал
+    office_address: Mapped[str | None] = mapped_column(String(256), nullable=True)  # из справочника ПВЗ (pickups)
+    office_hours: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    hidden: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")  # скрыт на сайте
 
 
 class AccountPrice(Base):

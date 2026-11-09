@@ -79,19 +79,41 @@ function Connect({ onDone }: { onDone: () => void }) {
   );
 }
 
-function Orders({ orders }: { orders: Order[] }) {
-  if (!orders.length) return <p className="muted small">Активных заказов нет.</p>;
+const ddmm = (iso: string) => new Date(iso).toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit" });
+const visible = (orders: Order[]) => orders.filter((o) => !o.hidden);
+
+function Orders({ accountId, orders }: { accountId: number; orders: Order[] }) {
+  const qc = useQueryClient();
+  const [showHidden, setShowHidden] = useState(false);
+  // rid с точками (eAe.dc18….0.0) — в URL кодируем
+  const toggle = useMutation({
+    mutationFn: (o: Order) => api(`/accounts/${accountId}/orders/${encodeURIComponent(o.rid)}`,
+      { method: "PATCH", body: { hidden: !o.hidden } }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["accounts"] }),
+  });
+  const hidden = orders.filter((o) => o.hidden);
+  const rows = showHidden ? orders : visible(orders);
+  const row = (o: Order) => (
+    <li key={o.rid} className={o.hidden ? "off" : undefined}>
+      <a href={`https://www.wildberries.ru/catalog/${o.nm_id}/detail.aspx`} target="_blank" rel="noreferrer">{o.name ?? `арт. ${o.nm_id}`}</a>
+      <span className="num">{rub(o.price)}</span>
+      <span className={`pill g${o.group_id ?? 0}`}>{o.status_name ?? GROUP[o.group_id ?? 0] ?? "—"}</span>
+      {o.paid === false && <span className="badge out">не оплачен</span>}
+      {o.paid === true && <span className="muted small">оплачен</span>}
+      {o.expiry_at ? <span className="muted small">заберите до {ddmm(o.expiry_at)}</span>
+        : o.delivery_at && <span className="muted small">ожидается до {ddmm(o.delivery_at)}</span>}
+      <button className="link small" disabled={toggle.isPending} onClick={() => toggle.mutate(o)}>{o.hidden ? "Вернуть" : "Скрыть"}</button>
+      {o.dst_office_id != null && <span className="pvz muted small">
+        ПВЗ: {o.office_address ? <>{o.office_address}{o.office_hours && ` · ${o.office_hours}`}</> : `№${o.dst_office_id}`}
+      </span>}
+    </li>
+  );
   return (
-    <ul className="orders">
-      {orders.map((o) => (
-        <li key={o.rid}>
-          <a href={`https://www.wildberries.ru/catalog/${o.nm_id}/detail.aspx`} target="_blank" rel="noreferrer">{o.name ?? `арт. ${o.nm_id}`}</a>
-          <span className="num">{rub(o.price)}</span>
-          <span className={`pill g${o.group_id ?? 0}`}>{o.status_name ?? GROUP[o.group_id ?? 0] ?? "—"}</span>
-          {o.expiry_at && <span className="muted small">заберите до {new Date(o.expiry_at).toLocaleDateString("ru-RU")}</span>}
-        </li>
-      ))}
-    </ul>
+    <>
+      {rows.length ? <ul className="orders">{rows.map(row)}</ul> : <p className="muted small">Активных заказов нет.</p>}
+      {hidden.length > 0 && <button className="link small" onClick={() => setShowHidden(!showHidden)}>
+        {showHidden ? "Убрать скрытые" : `Показать скрытые (${hidden.length})`}</button>}
+    </>
   );
 }
 
@@ -126,8 +148,8 @@ function Card({ a }: { a: Account }) {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["accounts"] }),
   });
   const low = a.monthly_limit && a.limit_left != null && a.limit_left < a.monthly_limit * 0.1;
-  const transit = a.orders.filter((o) => o.group_id === 3).length;
-  const pvz = a.orders.filter((o) => o.group_id === 5).length;
+  const transit = visible(a.orders).filter((o) => o.group_id === 3).length;
+  const pvz = visible(a.orders).filter((o) => o.group_id === 5).length;
   return (
     <div className="card acc">
       <div className="acc-head">
@@ -158,12 +180,12 @@ function Card({ a }: { a: Account }) {
         </div>
       ) : a.limit_left != null && <p className="small">Остаток лимита скидки: <b>{rub(a.limit_left)}</b></p>}
       <div className="acc-foot">
-        <button className="link" onClick={() => setOpen(!open)}>Заказы ({a.orders.length}) {open ? "▴" : "▾"}</button>
+        <button className="link" onClick={() => setOpen(!open)}>Заказы ({visible(a.orders).length}) {open ? "▴" : "▾"}</button>
         <button className="link danger" onClick={() => confirm(
           `Удалить аккаунт ${[a.label ?? a.name, a.phone ?? a.phone_mask].filter(Boolean).join(" ")}?\n\n`
           + "Сессия удалится, бизнес-цены и заказы под ним перестанут обновляться. Вход — заново по коду.") && del.mutate()}>Удалить</button>
       </div>
-      {open && <Orders orders={a.orders} />}
+      {open && <Orders accountId={a.id} orders={a.orders} />}
     </div>
   );
 }
@@ -179,8 +201,8 @@ export default function Accounts() {
       <div className="tiles">
         <div className="tile"><b>{rub(sum((a) => a.wallet_balance ?? 0))}</b><span>в Кошельках</span></div>
         <div className="tile"><b>{rub(sum((a) => a.bonus_balance ?? 0))}</b><span>бонусы</span></div>
-        <div className="tile"><b>{sum((a) => a.orders.filter((o) => o.group_id === 3).length)}</b><span>в пути</span></div>
-        <div className="tile"><b>{sum((a) => a.orders.filter((o) => o.group_id === 5).length)}</b><span>в ПВЗ</span></div>
+        <div className="tile"><b>{sum((a) => visible(a.orders).filter((o) => o.group_id === 3).length)}</b><span>в пути</span></div>
+        <div className="tile"><b>{sum((a) => visible(a.orders).filter((o) => o.group_id === 5).length)}</b><span>в ПВЗ</span></div>
         <div className="tile"><b className={list.some((a) => a.status !== "active") ? "up-t" : ""}>{list.filter((a) => a.status !== "active").length}</b><span>требуют входа</span></div>
       </div>
       <div className="acc-grid">
