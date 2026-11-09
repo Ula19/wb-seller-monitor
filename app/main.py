@@ -70,9 +70,17 @@ async def main() -> None:
     scheduler.add_job(report_job, "cron", minute=0, args=[bot], max_instances=1)
     scheduler.add_job(backup.backup_job, "cron", hour=settings.backup_hour, minute=30,
                       args=[bot], max_instances=1)
-    scheduler.add_job(  # освежаем веб-сессию, чтобы куки не протухли
-        keeper.refresh_job, "interval", hours=settings.web_refresh_hours,
+    scheduler.add_job(  # освежаем веб-сессию (куки бизнес-цен) + визит: код получения (меняется в 00:00) и баланс
+        keeper.refresh_job, "cron", hour=f"*/{settings.web_refresh_hours}", minute=5,  # 12 → 00:05 и 12:05 МСК
         args=[bot], max_instances=1,
+    )
+    scheduler.add_job(  # история заказов (полученные)
+        keeper.purchases_job, "interval", hours=1, args=[bot], max_instances=1,
+        next_run_time=datetime.now(timezone.utc) + timedelta(minutes=2),
+    )
+    scheduler.add_job(  # карта хостов картинок товаров для сайта
+        keeper.img_hosts_job, "interval", days=1, max_instances=1,
+        next_run_time=datetime.now(timezone.utc) + timedelta(seconds=30),
     )
     scheduler.add_job(  # лимит/% Кошелька/заказы аккаунтов; 401 → рефреш → «войдите заново»
         keeper.state_job, "interval", minutes=settings.account_poll_minutes, args=[bot], max_instances=1,
@@ -82,6 +90,7 @@ async def main() -> None:
     login_task = asyncio.create_task(keeper.login_requests_loop(bot))  # вход в WB по заявкам сайта
     proxy_task = asyncio.create_task(keeper.proxy_checks_loop())  # «Проверить» прокси с сайта
     poll_task = asyncio.create_task(keeper.account_polls_loop(bot))  # ↻ «Обновить» аккаунт с сайта
+    sync_task = asyncio.create_task(keeper.browser_syncs_loop(bot))  # визит в браузере по кнопке с сайта
 
     try:
         await dp.start_polling(bot)
@@ -90,6 +99,7 @@ async def main() -> None:
         login_task.cancel()
         proxy_task.cancel()
         poll_task.cancel()
+        sync_task.cancel()
         await wb_client.close()
         await bot.session.close()
 

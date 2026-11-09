@@ -1,13 +1,21 @@
 """Доступ к данным: запросы и CRUD-помощники (схема v2)."""
 
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import and_, delete, func, select, true, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.db import models
 from app.wb.parser import NormProduct
+
+
+MSK = timezone(timedelta(hours=3))  # у Москвы нет перехода на летнее время; tzdata в контейнере может не быть
+
+
+def msk_today():
+    """Сегодня по МСК: код получения действует до 00:00 МСК."""
+    return datetime.now(MSK).date()
 
 
 def _utcnow() -> datetime:
@@ -388,6 +396,8 @@ async def save_account_state(s, account_id: int, st: dict) -> int:
     await s.execute(delete(models.AccountOrder).where(
         models.AccountOrder.account_id == account_id,
         models.AccountOrder.rid.not_in([o["rid"] for o in orders]) if orders else true()))
+    if st.get("vb_ops"):  # None — история баллов не пришла: накопленное не трогаем
+        await upsert_vb_ops(s, account_id, st["vb_ops"])
     if orders:
         cols = ("nm_id", "name", "brand", "price", "dst_office_id", "status_name", "group_id",
                 "status_at", "ordered_at", "expiry_at", "delivery_at", "paid")
@@ -400,6 +410,39 @@ async def save_account_state(s, account_id: int, st: dict) -> int:
             set_={**{c: stmt.excluded[c] for c in cols},
                   **{c: func.coalesce(stmt.excluded[c], t.c[c]) for c in office}}))
     return was or 0
+
+
+
+async def _upsert(s, model, account_id: int, key: str, rows: list[dict], cols, keep=()) -> None:
+    """Вставка или обновление строк аккаунта по (account_id, key). keep — поля, которые пустое (None) не затирает."""
+    if not rows:
+        return
+    rows = list({r[key]: r for r in rows}.values())  # дубль ключа в одном ответе — иначе ON CONFLICT упадёт
+    t = model.__table__
+    stmt = pg_insert(model).values([{"account_id": account_id, key: r[key], **{c: r.get(c) for c in cols}} for r in rows])
+    await s.execute(stmt.on_conflict_do_update(
+        index_elements=[t.c.account_id, t.c[key]],
+        set_={c: func.coalesce(stmt.excluded[c], t.c[c]) if c in keep else stmt.excluded[c] for c in cols}))
+
+
+async def upsert_purchases(s, account_id: int, items: list[dict]) -> None:
+    await _upsert(s, models.AccountPurchase, account_id, "rid", items,
+                  ("nm_id", "name", "brand", "price", "dt", "office_id", "office_address", "office_hours"),
+                  keep=("office_address", "office_hours"))
+
+
+async def upsert_vb_ops(s, account_id: int, ops: list[dict]) -> None:
+    await _upsert(s, models.AccountVbOp, account_id, "tx_id", ops, ("title", "description", "dt", "operation", "amount"))
+
+
+async def upsert_balance_ops(s, account_id: int, ops: list[dict]) -> None:
+    await _upsert(s, models.AccountBalanceOp, account_id, "tx_id", ops, ("name", "op_type", "amount", "balance", "dt"))
+
+
+async def has_pickup_orders(s, account_id: int) -> bool:
+    """Есть ли заказы, которые ждут в ПВЗ (group 5) — плановому визиту есть смысл ждать код получения."""
+    return bool(await s.scalar(select(func.count()).select_from(models.AccountOrder).where(
+        models.AccountOrder.account_id == account_id, models.AccountOrder.group_id == 5)))
 
 
 # ---------- заявки на вход в аккаунт WB (сайт → worker) ----------

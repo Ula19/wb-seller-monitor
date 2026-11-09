@@ -13,14 +13,15 @@ import json
 import re
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 
 from app.config import settings
@@ -28,6 +29,7 @@ from app.crypto import encrypt_json
 from app.db import models, repo
 from app.db.base import Session
 from app.wallet import best_offer, offer_text, wallet_price
+from app.wb import media
 from app.wb.proxy_check import is_parser_proxy, parse_proxy
 
 COOKIE = "wbm_session"
@@ -330,9 +332,15 @@ ORDER_FIELDS = ("rid", "nm_id", "name", "brand", "price", "dst_office_id", "stat
                 "status_at", "ordered_at", "expiry_at", "delivery_at", "paid", "office_address", "office_hours", "hidden")
 
 
-@app.get("/api/accounts")
-async def accounts(u=Depends(user), s=Depends(db)):
-    accs = await repo.user_accounts(s, u.telegram_id)
+async def _my_account(s, u, account_id: int) -> models.WbAccount:
+    acc = await s.get(models.WbAccount, account_id)
+    if acc is None or acc.user_id != u.telegram_id:
+        raise HTTPException(404, "нет такого аккаунта")
+    return acc
+
+
+async def _account_views(s, accs: list[models.WbAccount]) -> list[dict]:
+    """Карточки аккаунтов: поля + активные заказы + прокси."""
     orders: dict[int, list] = {}
     for o in await repo.account_orders(s, [a.id for a in accs]):
         orders.setdefault(o.account_id, []).append({f: getattr(o, f) for f in ORDER_FIELDS})
@@ -343,12 +351,120 @@ async def accounts(u=Depends(user), s=Depends(db)):
                                                          "exit_ip": p.exit_ip}} for a in accs]
 
 
+@app.get("/api/accounts")
+async def accounts(u=Depends(user), s=Depends(db)):
+    return await _account_views(s, await repo.user_accounts(s, u.telegram_id))
+
+
+@app.get("/api/accounts/{account_id:int}")
+async def account(account_id: int, u=Depends(user), s=Depends(db)):
+    """Страница аккаунта: карточка + заказы + код получения (только сегодняшний — он действует до 00:00 МСК)
+    + счётчики вкладок."""
+    acc = await _my_account(s, u, account_id)
+    count = lambda m: s.scalar(select(func.count()).select_from(m).where(m.account_id == acc.id))
+    return {**(await _account_views(s, [acc]))[0], "browser_sync": acc.browser_sync,
+            "pickup_code": acc.pickup_code if acc.pickup_code_date == repo.msk_today() else None,
+            "counts": {"purchases": await count(models.AccountPurchase), "balance": await count(models.AccountBalanceOp),
+                       "vb": await count(models.AccountVbOp)}}
+
+
+PURCHASE_FIELDS = ("rid", "nm_id", "name", "brand", "price", "dt", "office_id", "office_address", "office_hours")
+
+
+def _msk_start(d: date) -> datetime:
+    return datetime.combine(d, dtime.min, repo.MSK)
+
+
+@app.get("/api/accounts/{account_id:int}/purchases")
+async def purchases(account_id: int, d_from: date | None = Query(None, alias="from"),
+                    d_to: date | None = Query(None, alias="to"), u=Depends(user), s=Depends(db)):
+    """История заказов (полученные), новые сверху; from/to — дни по МСК включительно."""
+    acc = await _my_account(s, u, account_id)
+    m = models.AccountPurchase
+    q = select(m).where(m.account_id == acc.id)
+    if d_from:
+        q = q.where(m.dt >= _msk_start(d_from))
+    if d_to:
+        q = q.where(m.dt < _msk_start(d_to + timedelta(days=1)))
+    return [{f: getattr(p, f) for f in PURCHASE_FIELDS} for p in await s.scalars(q.order_by(m.dt.desc().nulls_last()))]
+
+
+@app.get("/api/accounts/{account_id:int}/balance")
+async def balance_ops(account_id: int, u=Depends(user), s=Depends(db)):
+    """Операции баланса (копим из визитов в браузере) + свои заметки."""
+    acc = await _my_account(s, u, account_id)
+    m, n = models.AccountBalanceOp, models.BalanceNote
+    rows = await s.execute(select(m, n.text).outerjoin(n, (n.account_id == m.account_id) & (n.tx_id == m.tx_id))
+                           .where(m.account_id == acc.id).order_by(m.dt.desc().nulls_last()))
+    return [{"tx_id": o.tx_id, "name": o.name, "op_type": o.op_type, "amount": o.amount, "balance": o.balance,
+             "dt": o.dt, "note": note} for o, note in rows.all()]
+
+
+class NoteIn(BaseModel):
+    text: str = Field(max_length=1000)
+
+
+@app.put("/api/accounts/{account_id:int}/balance/{tx_id}/note")
+async def balance_note(account_id: int, tx_id: str, body: NoteIn, u=Depends(user), s=Depends(db)):
+    """Заметка к операции баланса; пустая — удалить."""
+    acc = await _my_account(s, u, account_id)
+    if await s.get(models.AccountBalanceOp, (acc.id, tx_id)) is None:
+        raise HTTPException(404, "нет такой операции")
+    text = body.text.strip()
+    if text:
+        stmt = pg_insert(models.BalanceNote).values(account_id=acc.id, tx_id=tx_id, text=text)
+        await s.execute(stmt.on_conflict_do_update(index_elements=["account_id", "tx_id"],
+                                                   set_={"text": text, "updated_at": func.now()}))
+    else:
+        await s.execute(delete(models.BalanceNote).where(models.BalanceNote.account_id == acc.id,
+                                                         models.BalanceNote.tx_id == tx_id))
+    await s.commit()
+    return {"ok": True}
+
+
+@app.get("/api/accounts/{account_id:int}/vb")
+async def vb_ops(account_id: int, u=Depends(user), s=Depends(db)):
+    acc = await _my_account(s, u, account_id)
+    m = models.AccountVbOp
+    return [{"tx_id": o.tx_id, "title": o.title, "description": o.description, "dt": o.dt, "operation": o.operation,
+             "amount": o.amount}
+            for o in await s.scalars(select(m).where(m.account_id == acc.id).order_by(m.dt.desc().nulls_last()))]
+
+
+@app.post("/api/accounts/{account_id:int}/sync")
+async def browser_sync(account_id: int, u=Depends(user), s=Depends(db)):
+    """Визит в браузере аккаунта (код получения + история баланса, ~30 с): worker откроет сайт WB под ним."""
+    acc = await _my_account(s, u, account_id)
+    if acc.status != "active":
+        raise HTTPException(409, "аккаунт не активен — нужен вход")
+    acc.browser_sync = True
+    await s.commit()
+    return {"ok": True}
+
+
+@app.post("/api/accounts/poll-all")
+async def poll_all(u=Depends(user), s=Depends(db)):
+    """«Обновить все»: ↻ для всех активных, кроме только что обновлённых."""
+    fresh = datetime.now(timezone.utc) - timedelta(seconds=POLL_FRESH_SEC)
+    m = models.WbAccount
+    res = await s.execute(update(m).where(
+        m.user_id == u.telegram_id, m.status == "active", m.polling.is_(False),
+        (m.state_at.is_(None)) | (m.state_at < fresh)).values(polling=True))
+    await s.commit()
+    return {"count": res.rowcount}
+
+
+@app.get("/api/img-hosts")
+async def img_hosts(u=Depends(user), s=Depends(db)):
+    """Карта basket-хостов картинок [[vol_from, vol_to, host], …] — кладёт worker раз в сутки."""
+    raw = await repo.get_setting(s, media.SETTING_KEY)
+    return json.loads(raw) if raw else []
+
+
 @app.post("/api/accounts/{account_id:int}/poll")
 async def poll_account(account_id: int, u=Depends(user), s=Depends(db)):
     """↻ «Обновить»: worker опросит аккаунт вне расписания (polling — как checking у прокси)."""
-    acc = await s.get(models.WbAccount, account_id)
-    if acc is None or acc.user_id != u.telegram_id:
-        raise HTTPException(404, "нет такого аккаунта")
+    acc = await _my_account(s, u, account_id)
     if acc.status != "active":
         raise HTTPException(409, "аккаунт не активен — нужен вход")
     if acc.polling:

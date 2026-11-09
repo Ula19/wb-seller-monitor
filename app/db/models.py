@@ -3,16 +3,19 @@
 Один скан WB обслуживает всех: items/price_history общие, sources — чьё и в каком
 режиме цены, бизнес-цена — у каждого бизнес-аккаунта своя (account_prices).
 """
-from datetime import datetime
+from datetime import date, datetime
+from decimal import Decimal
 
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    Date,
     DateTime,
     ForeignKey,
     Index,
     Integer,
     LargeBinary,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -177,6 +180,10 @@ class WbAccount(Base):
     # сбои прокси аккаунта подряд (опрос/рефреш); сброс — удачный опрос или новый вход
     proxy_fails: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     polling: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")  # ↻ с сайта: worker опросит
+    # визит в браузере аккаунта (код получения + история баланса): плановый в 00:05/12:05 МСК или по кнопке с сайта
+    browser_sync: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    pickup_code: Mapped[str | None] = mapped_column(String(16), nullable=True)  # код получения в ПВЗ
+    pickup_code_date: Mapped[date | None] = mapped_column(Date, nullable=True)  # день МСК, на который код (до 00:00)
     proxy_fail_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # свой выход в WB: вход, рефреш, состояние, personalinfo. Меняется только перелогином
     proxy_id: Mapped[int | None] = mapped_column(
@@ -186,6 +193,68 @@ class WbAccount(Base):
     def title(self) -> str:
         """Как называть аккаунт: своё имя с сайта, иначе имя из WB, иначе маска номера."""
         return self.label or self.name or self.phone_mask
+
+
+class AccountPurchase(Base):
+    """История заказов аккаунта: полученные позиции (astro purchases/list, status 32). Копим, не удаляем."""
+
+    __tablename__ = "account_purchases"
+
+    account_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("wb_accounts.id", ondelete="CASCADE"), primary_key=True)
+    rid: Mapped[str] = mapped_column(String(64), primary_key=True)
+    nm_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    name: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    brand: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    price: Mapped[int | None] = mapped_column(Integer, nullable=True)  # ₽ оплачено (со скидкой Кошелька)
+    dt: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)  # забрали
+    office_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    office_address: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    office_hours: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
+class AccountVbOp(Base):
+    """Операция ВБ-баллов (loyalty bonuses/history). operation: 1 начисление, 2 списание; amount — баллы."""
+
+    __tablename__ = "account_vb_ops"
+
+    account_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("wb_accounts.id", ondelete="CASCADE"), primary_key=True)
+    tx_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    title: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    description: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    dt: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    operation: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    amount: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class AccountBalanceOp(Base):
+    """Операция баланса Кошелька (mywallet в браузере; WB отдаёт 20 последних — копим у себя).
+    op_type: 0 приход, 1 расход; amount — ₽ со знаком (moneyIncome + bonusIncome)."""
+
+    __tablename__ = "account_balance_ops"
+
+    account_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("wb_accounts.id", ondelete="CASCADE"), primary_key=True)
+    tx_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    name: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    op_type: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    amount: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    balance: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    dt: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class BalanceNote(Base):
+    """Своя заметка к операции баланса (с сайта). Живёт отдельно — операции перезаписываются из WB."""
+
+    __tablename__ = "balance_notes"
+
+    account_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("wb_accounts.id", ondelete="CASCADE"), primary_key=True)
+    tx_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    text: Mapped[str] = mapped_column(String(1000))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
 class AccountOrder(Base):

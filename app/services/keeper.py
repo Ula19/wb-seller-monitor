@@ -1,4 +1,4 @@
-"""Keeper аккаунтов WB: логин через Telegram, освежение сессий, хранение в wb_accounts.
+"""Keeper аккаунтов WB: вход по заявкам сайта, освежение сессий, опросы, хранение в wb_accounts.
 
 Сессия = storageState браузера ЦЕЛИКОМ (куки + localStorage: там Bearer wbx__tokenData,
 нужен лимиту и заказам), в БД — зашифрованной (app.crypto). У пользователя 1–10
@@ -6,6 +6,7 @@
 номер, бот вводит его в браузере, код приходит пушем в приложение WB, юзер шлёт его в чат.
 """
 import asyncio
+import json
 import logging
 from datetime import datetime, timezone
 
@@ -15,7 +16,7 @@ from app.config import settings
 from app.crypto import decrypt_json, encrypt_json
 from app.db import models, repo
 from app.db.base import Session
-from app.wb import account_api, pickups, proxy_check, web_session
+from app.wb import account_api, media, pickups, proxy_check, web_session
 from app.wb.web_session import ProxyDown
 
 log = logging.getLogger(__name__)
@@ -88,27 +89,64 @@ async def _proxy_alert(bot, acc: models.WbAccount, e: Exception) -> None:
                          f"👉 Проверьте прокси: {where}")
 
 
-async def _refresh(acc: models.WbAccount, state: dict) -> dict | None:
-    """Браузерный рефреш сессии; живая → сохраняем. None — протухла. ProxyDown — прокси не отвечает."""
-    new = await web_session.refresh(state, await proxy_url(acc.proxy_id))
-    if new is not None:
+# один браузер на аккаунт за раз: два параллельных рефреша провернули бы wbid-refresh (он ротируется) — разлогин.
+# ponytail: замки в памяти одного worker'а; второй worker с браузером — нужен замок в БД (advisory lock)
+_acc_locks: dict[int, asyncio.Lock] = {}
+
+
+class AccountGone(Exception):
+    """Аккаунт удалили, пока до него шла очередь."""
+
+
+async def _attach_offices(rows: list[dict], key: str) -> None:
+    """Адрес и часы ПВЗ — в строки (API в другом контейнере, кэша справочника не видит)."""
+    offices = await pickups.lookup(r[key] for r in rows)
+    for r in rows:
+        r["office_address"], r["office_hours"] = offices.get(r[key], (None, None))
+
+
+async def _refresh(acc: models.WbAccount, *, visit: bool = False, want_code: bool = False) -> dict | None:
+    """Браузерный рефреш сессии; живая → сохраняем. None — протухла. ProxyDown — прокси не отвечает.
+    visit — заодно история баланса и (want_code) код получения. Сессию берём из БД уже под замком аккаунта:
+    предыдущий рефреш мог её обновить."""
+    async with _acc_locks.setdefault(acc.id, asyncio.Lock()):
+        async with Session() as s:
+            row = await s.get(models.WbAccount, acc.id)
+            if row is None:
+                raise AccountGone(acc.id)
+            state, proxy_id = decrypt_json(row.state_enc), row.proxy_id
+        new = await web_session.refresh(state, await proxy_url(proxy_id), visit=visit, want_code=want_code)
+        if new is None:
+            return None
         profile = new.pop(account_api.PROFILE_KEY, None)
+        seen = new.pop(account_api.VISIT_KEY, None) or {}
+        ops = account_api.parse_balance_history(seen["balance"]) if seen.get("balance") else None
         async with Session() as s:
             row = await s.get(models.WbAccount, acc.id)
             if row is not None:
                 row.state_enc = encrypt_json(new)
                 repo.apply_profile(row, profile)  # имя, полный телефон, процент выкупа — без перелогина
+                if seen.get("pickup_code"):
+                    row.pickup_code, row.pickup_code_date = seen["pickup_code"], repo.msk_today()
+                if ops:
+                    await repo.upsert_balance_ops(s, acc.id, ops)
                 await s.commit()
-    return new
+        if visit:
+            log.info("keeper: визит аккаунта %s: код получения %s, операций баланса %s", acc.title,
+                     "есть" if seen.get("pickup_code") else "нет", len(ops) if ops is not None else "—")
+        return new
 
 
 async def refresh_job(bot) -> None:
-    """Освежает сессии активных аккаунтов по очереди. Протухла → «нужен вход» владельцу."""
+    """Освежает сессии активных аккаунтов по очереди (00:05 и 12:05 МСК) и заодно визит: история баланса и код
+    получения — его ждём, только если есть заказы в ПВЗ. Протухла → «нужен вход» владельцу."""
     async with Session() as s:
         accounts = await repo.active_accounts(s)
     for acc in accounts:
         try:
-            state = await _refresh(acc, decrypt_json(acc.state_enc))
+            async with Session() as s:
+                want_code = await repo.has_pickup_orders(s, acc.id)
+            state = await _refresh(acc, visit=True, want_code=want_code)
         except ProxyDown as e:
             await _proxy_alert(bot, acc, e)
             continue
@@ -141,7 +179,7 @@ async def poll_account(bot, acc: models.WbAccount) -> None:
         except (account_api.Unauthorized, account_api.NoBearer) as e:
             log.info("keeper: аккаунт %s: %s, освежаю сессию и повторяю",
                      acc.id, f"401 ({e})" if isinstance(e, account_api.Unauthorized) else "нет Bearer")
-            state = await _refresh(acc, state)
+            state = await _refresh(acc)
             if state is None:
                 await _relogin(bot, acc)
                 return
@@ -158,10 +196,8 @@ async def poll_account(bot, acc: models.WbAccount) -> None:
     except Exception as e:
         log.warning("keeper: состояние аккаунта %s не получено: %s: %s", acc.id, type(e).__name__, str(e)[:200])
         return
-    if st.get("orders"):  # адрес и часы ПВЗ — в строку заказа: API в другом контейнере, кэша справочника не видит
-        offices = await pickups.lookup(o["dst_office_id"] for o in st["orders"])
-        for o in st["orders"]:
-            o["office_address"], o["office_hours"] = offices.get(o["dst_office_id"], (None, None))
+    if st.get("orders"):
+        await _attach_offices(st["orders"], "dst_office_id")
     async with Session() as s:
         fails = await repo.save_account_state(s, acc.id, st)
         await s.commit()
@@ -332,18 +368,81 @@ async def process_account_poll(bot) -> bool:
     return True
 
 
-async def account_polls_loop(bot) -> None:
-    """Фоновая задача worker'а: ↻ «Обновить» с сайта (плановый опрос — state_job по расписанию)."""
-    async with Session() as s:  # опрос, прерванный рестартом, уже не закончит никто
-        await s.execute(update(models.WbAccount).where(models.WbAccount.polling).values(polling=False))
+async def _flag_loop(flag, step, what: str) -> None:
+    """Фоновая задача worker'а для флага с сайта (polling, browser_sync): при старте снимаем зависший флаг
+    (работу, прерванную рестартом, уже не закончит никто), дальше берём по одному аккаунту."""
+    async with Session() as s:
+        await s.execute(update(models.WbAccount).where(flag).values({flag.key: False}))
         await s.commit()
     while True:
         try:
-            if await process_account_poll(bot):
+            if await step():
                 continue
         except Exception:
-            log.exception("keeper: цикл опроса аккаунтов по кнопке")
+            log.exception("keeper: цикл %s", what)
         await asyncio.sleep(LOGIN_POLL_SEC)
+
+
+async def account_polls_loop(bot) -> None:
+    """↻ «Обновить» с сайта (плановый опрос — state_job по расписанию)."""
+    await _flag_loop(models.WbAccount.polling, lambda: process_account_poll(bot), "опроса аккаунтов по кнопке")
+
+
+async def process_browser_sync(bot) -> bool:
+    """Визит в браузере по кнопке с сайта («Готовы забрать», «Обновить» баланса) — всегда с кодом получения:
+    товар мог прийти днём, после планового визита. False — некого."""
+    async with Session() as s:
+        acc = await s.scalar(select(models.WbAccount).where(models.WbAccount.browser_sync)
+                             .order_by(models.WbAccount.id).limit(1))
+        if acc is None:
+            return False
+    try:
+        try:
+            if await _refresh(acc, visit=True, want_code=True) is None:
+                await _relogin(bot, acc)
+        except ProxyDown as e:
+            await _proxy_alert(bot, acc, e)
+        except AccountGone:
+            pass
+    finally:  # иначе на сайте «Получаю код…» висит, а цикл крутит один и тот же аккаунт
+        async with Session() as s:
+            await s.execute(update(models.WbAccount).where(models.WbAccount.id == acc.id).values(browser_sync=False))
+            await s.commit()
+    return True
+
+
+async def browser_syncs_loop(bot) -> None:
+    await _flag_loop(models.WbAccount.browser_sync, lambda: process_browser_sync(bot), "визитов в браузере")
+
+
+async def purchases_job(bot=None) -> None:
+    """История заказов (полученные) всех активных аккаунтов — раз в час; копим по rid. Сбой одного — дальше."""
+    async with Session() as s:
+        accounts = await repo.active_accounts(s)
+    for acc in accounts:
+        try:
+            items = await account_api.fetch_purchases(decrypt_json(acc.state_enc), await proxy_url(acc.proxy_id))
+        except Exception as e:  # 401/прокси — разберётся опрос аккаунта (у него рефреш и тревоги)
+            log.warning("keeper: история заказов %s не получена: %s: %s", acc.title, type(e).__name__, str(e)[:200])
+            continue
+        await _attach_offices(items, "office_id")
+        async with Session() as s:
+            await repo.upsert_purchases(s, acc.id, items)
+            await s.commit()
+        log.info("keeper: история заказов %s: %d позиций", acc.title, len(items))
+
+
+async def img_hosts_job() -> None:
+    """Карта basket-хостов картинок — раз в сутки в app_settings (сайт собирает URL сам, API в сеть не ходит)."""
+    try:
+        hosts = await media.fetch_hosts()
+    except Exception as e:
+        log.warning("keeper: карта картинок не получена: %s: %s", type(e).__name__, str(e)[:200])
+        return
+    if hosts:
+        async with Session() as s:
+            await repo.set_setting(s, media.SETTING_KEY, json.dumps(hosts))
+            await s.commit()
 
 
 if __name__ == "__main__":  # self-check: маска номера, Bearer в сессии

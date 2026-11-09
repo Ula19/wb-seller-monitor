@@ -30,6 +30,8 @@ PHONE_SEL = "#phone-number input, input#phone-number, [data-test-id=phone_input]
 # в Docker под root chromium без песочницы не стартует; dev-shm мал — выносим в /tmp
 LAUNCH_ARGS = ["--no-sandbox", "--disable-dev-shm-usage"]
 SELLER_URL = "https://www.wildberries.ru/seller/{}"
+DELIVERY_URL = "https://www.wildberries.ru/lk/myorders/delivery"  # тут сайт показывает «Код получения NNN NNN»
+CODE_WAIT_SEC = 20  # SPA дорисовывает блок с кодом — ждём до стольких секунд
 # служебные заголовки запроса браузера, которые curl ставит сам (cookie — свои)
 SKIP_HEADERS = {"host", "content-length", "connection", "cookie"}
 CALLBACK_WAIT_SEC = 45  # после кода: ждём callback (и экран согласия WB ID у нового аккаунта)
@@ -367,11 +369,36 @@ async def _finish_login(ctx, page) -> dict:
                       else "код не принят — проверьте код")
 
 
-async def refresh(storage_state: dict | str, proxy: str | None = None) -> dict | None:
+async def _visit(page, want_code: bool) -> dict:
+    """То, что WB считает/отдаёт только в браузере: код получения (страница доставок) и история баланса (mywallet).
+    Каждая часть отдельно: сбой одной не мешает другой и не ломает рефреш."""
+    from app.wb.account_api import WALLET_JS, parse_pickup_code
+    out = {"pickup_code": None, "balance": None}
+    if want_code:
+        try:
+            await page.goto(DELIVERY_URL, wait_until="domcontentloaded")
+            for _ in range(CODE_WAIT_SEC):
+                await asyncio.sleep(1)
+                if code := parse_pickup_code(await page.evaluate("document.body ? document.body.innerText : ''")):
+                    out["pickup_code"] = code
+                    break
+            else:
+                log.info("визит: кода получения на странице нет (нечего забирать?)")
+        except Exception as e:
+            log.warning("визит: код получения не прочитан: %s: %s", type(e).__name__, str(e)[:200])
+    try:
+        out["balance"] = await asyncio.wait_for(page.evaluate(WALLET_JS), 20)
+    except Exception as e:
+        log.warning("визит: история баланса не получена: %s: %s", type(e).__name__, str(e)[:200])
+    return out
+
+
+async def refresh(storage_state: dict | str, proxy: str | None = None, *,
+                  visit: bool = False, want_code: bool = False) -> dict | None:
     """Поддержание сессии: заходим на сайт с куками, возвращаем обновлённую банку.
 
     None — если сессия протухла (разлогинило). ProxyDown — прокси не отвечает (сессия не тронута).
-    Зовётся по таймеру и при 401/403.
+    Зовётся по таймеру и при 401/403. visit — заодно визит (_visit): история баланса и, если want_code, код получения.
     """
     from patchright.async_api import async_playwright
 
@@ -386,14 +413,18 @@ async def refresh(storage_state: dict | str, proxy: str | None = None) -> dict |
             page = await ctx.new_page()
             await _open_home(page)
             await asyncio.sleep(5)
-            state = await ctx.storage_state()
             # по кукам сайта, а не по слову «Войти» — оно есть и на залогиненной странице
-            if not is_logged(state):
+            if not is_logged(await ctx.storage_state()):
                 log.warning("веб-рефреш: сессия протухла (кук сайта нет)")
                 return None
             log.info("веб-рефреш: сессия жива, куки обновлены")
-            from app.wb.account_api import PROFILE_KEY
-            state[PROFILE_KEY] = await _profile(page)  # имя/телефон/выкуп обновляются вместе с сессией
+            from app.wb.account_api import PROFILE_KEY, VISIT_KEY
+            profile = await _profile(page)  # имя/телефон/выкуп обновляются вместе с сессией
+            extra = await _visit(page, want_code) if visit else None
+            state = await ctx.storage_state()  # после визита: куки могли обновиться
+            state[PROFILE_KEY] = profile
+            if visit:
+                state[VISIT_KEY] = extra
             return state
         finally:
             await browser.close()
@@ -683,4 +714,39 @@ if __name__ == "__main__":  # self-check чистых функций (без б�
 
     with patch.object(log, "warning"), patch.object(log, "info"):
         asyncio.run(demo2())
+
+    # визит: код дорисовывается не сразу; история баланса — fetch из страницы; сбои — по отдельности
+    from app.wb.account_api import WALLET_JS
+
+    class VisitPage:
+        def __init__(self, texts, wallet=None, goto_fails=False):
+            self.texts, self.wallet, self.goto_fails, self.url, self.js = list(texts), wallet, goto_fails, "", []
+
+        async def goto(self, url, **kw):
+            if self.goto_fails:
+                raise TimeoutError("goto")
+            self.url = url
+
+        async def evaluate(self, js):
+            self.js.append(js)
+            if js == WALLET_JS:
+                if isinstance(self.wallet, Exception):
+                    raise self.wallet
+                return self.wallet
+            return self.texts.pop(0) if len(self.texts) > 1 else self.texts[0]
+
+    async def demo3():
+        with patch.object(asyncio, "sleep", nosleep):
+            pg = VisitPage(["Загрузка…", "Мои доставки", "Код получения\n112\u00a0396\n12 ноября"], wallet={"value": {}})
+            assert await _visit(pg, True) == {"pickup_code": "112396", "balance": {"value": {}}}
+            assert pg.url == DELIVERY_URL and pg.js.count(WALLET_JS) == 1
+            pg = VisitPage(["Мои доставки — пусто"], wallet={"value": 1})  # кода нет — 20 проверок и дальше баланс
+            assert await _visit(pg, True) == {"pickup_code": None, "balance": {"value": 1}}
+            assert len(pg.js) == CODE_WAIT_SEC + 1
+            pg = VisitPage(["x"], wallet={"v": 2})  # плановый без заказов в ПВЗ: на страницу доставок не ходим
+            assert await _visit(pg, False) == {"pickup_code": None, "balance": {"v": 2}} and pg.url == ""
+            pg = VisitPage(["x"], wallet=RuntimeError("fetch"), goto_fails=True)  # оба упали — не падаем
+            assert await _visit(pg, True) == {"pickup_code": None, "balance": None}
+    with patch.object(log, "warning"), patch.object(log, "info"):
+        asyncio.run(demo3())
     print("ok")

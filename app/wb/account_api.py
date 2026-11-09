@@ -7,6 +7,7 @@ wbx-validation-key, остальным хватает Bearer. Суммы WB — 
 """
 import logging
 import re
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from curl_cffi.requests import AsyncSession
@@ -18,6 +19,11 @@ log = logging.getLogger(__name__)
 
 BALANCE_URL = "https://wb-balance.wildberries.ru/wb-balance/api/v1/balance/full-balance"
 VB_URL = "https://loyalty-balances.wildberries.ru/public/api/v1/bonuses/info"  # ВБ-баллы, авторизация как у full-balance
+VB_HISTORY_URL = "https://loyalty-balances.wildberries.ru/public/api/v1/bonuses/history?limit=50&offset=0&currency_id=1"
+# история заказов: только полученные (status=32), листаем offset; Bearer + кука wbx-validation-key
+PURCHASES_URL = "https://astro.wildberries.ru/api/v1/shopper/api/v2/purchases/list?offset={offset}&status=32&limit={limit}"
+PURCHASES_PAGE = 100
+PURCHASES_MAX_PAGES = 50  # предохранитель: 5000 покупок
 GRADE_URL = "https://user-grade.wildberries.ru/api/v6/grade?curr=RUB&uf_loc=ru"
 ORDERS_URL = ("https://wbxoofex.wildberries.ru/api/v2/orders"
               "?limit=100&exclude_delivery_types=777,778&exclude_b2b=true&offset=0")
@@ -81,6 +87,7 @@ def parse_grade(d: dict) -> int | None:
 
 
 PROFILE_KEY = "wb_profile"  # web_session кладёт профиль в возвращаемый state; keeper забирает его оттуда
+VISIT_KEY = "wb_visit"  # так же — итог визита: {"pickup_code": str | None, "balance": ответ mywallet | None}
 # JS в странице www: сайт сам Bearer к personalinfo не добавит — берём из localStorage, как сайт
 PROFILE_JS = """async () => {
   const raw = localStorage.getItem('wbx__tokenData') || localStorage.getItem('wbid-oauth-sdk-access-token') || '';
@@ -90,6 +97,75 @@ PROFILE_JS = """async () => {
   const r = await fetch('/webapi/personalinfo', {method: 'POST', headers: h, credentials: 'include'});
   return r.ok ? await r.json() : null;
 }"""
+
+
+# в браузере аккаунта (за антиботом, как personalinfo): история баланса — 20 последних операций, копим у себя.
+# wb-balance/api/v2/balance/history НЕ трогаем — он требует СМС + PIN кошелька.
+WALLET_JS = """async () => {
+  const raw = localStorage.getItem('wbx__tokenData') || localStorage.getItem('wbid-oauth-sdk-access-token') || '';
+  const m = raw.match(/eyJ[\\w-]+\\.[\\w-]+\\.[\\w-]+/);
+  const h = {'x-requested-with': 'XMLHttpRequest', 'content-type': 'application/x-www-form-urlencoded; charset=UTF-8'};
+  if (m) h.authorization = 'Bearer ' + m[0];
+  const r = await fetch('/webapi/lk/mywallet/purchases/data', {method: 'POST', headers: h, credentials: 'include',
+                                                               body: 'currency=RUB'});
+  return r.ok ? await r.json() : null;
+}"""
+# код получения в ПВЗ: в API WB его нет — сайт считает в браузере (ежедневный, до 00:00 МСК); читаем текстом
+# 6 цифр, между тройками бывает пробел/неразрывный; (?!\d) — не прихватить число со следующей строки («12 ноября»)
+PICKUP_CODE_RE = re.compile(r"Код получения\s*(\d{3})[ \u00a0]?(\d{3})(?!\d)")
+
+
+def parse_pickup_code(text: str) -> str | None:
+    """«Код получения 112 396» → «112396»."""
+    m = PICKUP_CODE_RE.search(text or "")
+    return m.group(1) + m.group(2) if m else None
+
+
+def _iso(s) -> datetime | None:
+    try:
+        return datetime.fromisoformat(str(s).replace("Z", "+00:00")) if s else None
+    except ValueError:
+        return None
+
+
+def parse_purchases(d) -> list[dict]:
+    """astro purchases/list → полученные позиции. Цена = Price − PaymentSaleAmount (скидка Кошелька), копейки → ₽;
+    Dt — дата статуса, для «получен» это «забрали»."""
+    items = (((d or {}).get("data") or {}).get("purchases") or {}).get("data") or {}
+    out = []
+    for it in items.get("Items") or []:
+        if not it.get("Rid"):
+            continue
+        price, sale = it.get("Price"), it.get("PaymentSaleAmount") or 0
+        out.append({"rid": it["Rid"], "nm_id": it.get("NmId"), "name": it.get("GoodsName"), "brand": it.get("BrandName"),
+                    "price": _rub(price - sale) if isinstance(price, int) and isinstance(sale, int) else None,
+                    "dt": _iso(it.get("Dt")), "office_id": it.get("DstOfficeId")})
+    return out
+
+
+def parse_vb_history(d) -> list[dict]:
+    """bonuses/history → операции ВБ-баллов: operation 1 начисление / 2 списание, amount — баллы."""
+    out = []
+    for h in ((d or {}).get("data") or {}).get("history") or []:
+        if h.get("tx_id"):
+            out.append({"tx_id": str(h["tx_id"])[:128], "title": h.get("title"), "description": h.get("description"),
+                        "dt": _iso(h.get("dt")), "operation": h.get("operation"), "amount": h.get("amount")})
+    return out
+
+
+def parse_balance_history(d) -> list[dict]:
+    """mywallet/purchases/data → операции баланса. Сумма = moneyIncome + bonusIncome: у «Оплата»/«Сертификат» деньги
+    приходят в bonusIncome (тоже рубли — та же часть, что bonus_balance в «Кошельке WB»). dt — мс."""
+    out = []
+    groups = ((((d or {}).get("value") or {}).get("balanceHistory") or {}).get("groups")) or []
+    for it in (i for g in groups for i in g.get("items") or []):
+        if not it.get("txId"):
+            continue
+        num = lambda k: it.get(k) if isinstance(it.get(k), (int, float)) else 0
+        out.append({"tx_id": str(it["txId"])[:128], "name": it.get("operationName"), "op_type": it.get("operationType"),
+                    "amount": num("moneyIncome") + num("bonusIncome"), "balance": it.get("currentBalance"),
+                    "dt": _ts(it["dt"] / 1000) if isinstance(it.get("dt"), (int, float)) else None})
+    return out
 
 
 def parse_profile(d) -> dict | None:
@@ -133,14 +209,16 @@ def apply_statuses(orders: list[dict], d) -> None:
         o["status_at"] = _ts((st.get("date") or 0) / 1e9)
 
 
-async def fetch(state: dict, proxy: str | None = None) -> dict:
-    """Баланс, лимит, % Кошелька и активные заказы. Unauthorized на 401, ProxyDown — сеть через прокси
-    не работает (таймаут, обрыв, 407), прочие сбои — исключением. proxy — прокси аккаунта."""
+@asynccontextmanager
+async def _client(state: dict, proxy: str | None):
+    """HTTP под личностью аккаунта: call(method, url, **kw) → json; заголовки auth (Bearer) и with_vkey (+ кука
+    wbx-validation-key — её хотят full-balance, bonuses, astro). Unauthorized на 401, ProxyDown — сеть через прокси."""
     token = bearer(state)
     if not token:  # не 401: сессия может быть жива (бизнес-цены идут по кукам) — просто нечем спросить
         raise NoBearer()
     auth = {**HEADERS, "Authorization": f"Bearer {token}"}
     vkey = next((c["value"] for c in state.get("cookies") or [] if c.get("name") == "wbx-validation-key"), None)
+    with_vkey = {**auth, **({"Cookie": f"wbx-validation-key={vkey}"} if vkey else {})}
     proxy = curl_proxy(proxy or web_proxy())  # тот же выход, что у браузера аккаунта
     async with AsyncSession(impersonate="chrome", timeout=20,
                             proxies={"http": proxy, "https": proxy} if proxy else None) as s:
@@ -155,14 +233,24 @@ async def fetch(state: dict, proxy: str | None = None) -> dict:
                 raise Unauthorized(url.split("/")[2])
             r.raise_for_status()
             return r.json()
+        yield call, auth, with_vkey
 
-        with_vkey = {**auth, **({"Cookie": f"wbx-validation-key={vkey}"} if vkey else {})}
+
+async def fetch(state: dict, proxy: str | None = None) -> dict:
+    """Баланс, лимит, % Кошелька, ВБ-баллы (+ их история) и активные заказы. Unauthorized на 401, ProxyDown — сеть
+    через прокси не работает (таймаут, обрыв, 407), прочие сбои — исключением. proxy — прокси аккаунта."""
+    async with _client(state, proxy) as (call, auth, with_vkey):
         out = parse_balance(await call("GET", BALANCE_URL, headers=with_vkey))
         try:  # баллы — не главное: их сбой не ломает опрос
             out["vb_points"] = parse_vb(await call("GET", VB_URL, headers=with_vkey))
         except Exception as e:
             out["vb_points"] = None
             log.warning("ВБ-баллы не получены: %s: %s", type(e).__name__, str(e)[:200])
+        try:  # история баллов — тоже не главное; None = не трогать накопленное
+            out["vb_ops"] = parse_vb_history(await call("GET", VB_HISTORY_URL, headers=with_vkey))
+        except Exception as e:
+            out["vb_ops"] = None
+            log.warning("история ВБ-баллов не получена: %s: %s", type(e).__name__, str(e)[:200])
         out["wallet_pct"] = parse_grade(await call("GET", GRADE_URL, headers=auth))
         orders = parse_orders(await call("GET", ORDERS_URL, headers=auth))
         if orders:  # одним запросом на все rid аккаунта
@@ -170,6 +258,19 @@ async def fetch(state: dict, proxy: str | None = None) -> dict:
                                               json={"ids": [o["rid"] for o in orders]}))
         out["orders"] = orders
         return out
+
+
+async def fetch_purchases(state: dict, proxy: str | None = None) -> list[dict]:
+    """Вся история полученных заказов: листаем по PURCHASES_PAGE, пока страница полная."""
+    out: list[dict] = []
+    async with _client(state, proxy) as (call, _, with_vkey):
+        for page in range(PURCHASES_MAX_PAGES):
+            got = parse_purchases(await call("GET", PURCHASES_URL.format(offset=page * PURCHASES_PAGE,
+                                                                       limit=PURCHASES_PAGE), headers=with_vkey))
+            out += got
+            if len(got) < PURCHASES_PAGE:
+                break
+    return out
 
 
 if __name__ == "__main__":  # self-check на формах ответов из HAR (суммы в копейках)
@@ -255,4 +356,59 @@ if __name__ == "__main__":  # self-check на формах ответов из H
             assert (VB_URL, "wbx-validation-key=vk") in seen  # заголовки как у full-balance
     with patch.object(log, "warning"):
         asyncio.run(demo())
+
+    # история заказов (HAR боевого): цена = Price − PaymentSaleAmount — как в активных (A17: 17 094 − 1 026 = 16 068)
+    item = lambda rid, **kw: {"Rid": rid, "NmId": 1656607451, "GoodsName": "Смартфон A17", "BrandName": "Samsung",
+                              "Price": 1709400, "PaymentSaleAmount": 102600, "Dt": "2026-11-09T10:35:38Z",
+                              "DstOfficeId": 50044805, "Status": 32, **kw}
+    pur = parse_purchases({"data": {"purchases": {"data": {"Items": [item("eA5.a.0.0"), item(None), item(
+        "eA5.b.0.0", PaymentSaleAmount=None)]}}}})
+    assert [(x["rid"], x["price"]) for x in pur] == [("eA5.a.0.0", 16068), ("eA5.b.0.0", 17094)], pur
+    assert pur[0]["dt"] == datetime(2026, 11, 9, 10, 35, 38, tzinfo=timezone.utc) and pur[0]["office_id"] == 50044805
+    assert parse_purchases({}) == [] and parse_purchases(None) == []
+    # история ВБ-баллов
+    vb = parse_vb_history({"data": {"icons": {}, "history": [
+        {"tx_id": "01a162d7", "description": "Вы выполнили задание", "title": "Баллы за задание",
+         "dt": "2026-10-22T09:00:58Z", "operation": 1, "amount": 350}, {"title": "без tx_id"}]}})
+    assert vb == [{"tx_id": "01a162d7", "title": "Баллы за задание", "description": "Вы выполнили задание",
+                   "dt": datetime(2026, 10, 22, 9, 0, 58, tzinfo=timezone.utc), "operation": 1, "amount": 350}], vb
+    # история баланса: «Оплата»/«Сертификат» — деньги в bonusIncome (moneyIncome 0)
+    bal = parse_balance_history({"resultState": 0, "value": {"balanceHistory": {"totalItems": 3, "groups": [
+        {"groupName": "09 ноября", "items": [
+            {"txId": "ub_dd_47345296_15_1_-1_t_balance", "operationName": "Списано с карты", "operationType": 0,
+             "moneyIncome": 99, "bonusIncome": 0, "currentBalance": 2390, "dt": 1794231734716},
+            {"txId": "01a1bfe0", "operationName": "Оплата", "operationType": 1, "moneyIncome": 0, "bonusIncome": -52065,
+             "currentBalance": 2291, "dt": 1794231348052}]},
+        {"groupName": "07 ноября", "items": [{"operationName": "без txId"}]}]}}})
+    assert [(x["tx_id"], x["amount"], x["op_type"]) for x in bal] == [
+        ("ub_dd_47345296_15_1_-1_t_balance", 99, 0), ("01a1bfe0", -52065, 1)], bal
+    assert bal[0]["dt"] == datetime(2026, 11, 9, 13, 42, 14, 716000, tzinfo=timezone.utc) and bal[0]["balance"] == 2390
+    assert parse_balance_history(None) == []
+    # код получения: строго 6 цифр, неразрывный пробел, без числа со следующей строки
+    assert parse_pickup_code("Код получения\n112\u00a0396\n12 ноября") == "112396"
+    assert parse_pickup_code("Код получения 112396") == "112396" and parse_pickup_code("Код получения 1123") is None
+    assert parse_pickup_code("") is None and parse_pickup_code(None) is None
+
+    async def pages():  # листаем по 100, пока страница полная
+        full = {"data": {"purchases": {"data": {"Items": [item(f"r{i}") for i in range(PURCHASES_PAGE)]}}}}
+        last = {"data": {"purchases": {"data": {"Items": [item("last")]}}}}
+        urls = []
+
+        class S:
+            def __init__(self, **kw):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                pass
+
+            async def request(self, method, url, **kw):
+                urls.append(url)
+                return R(200, full if "offset=0&" in url else last)
+        with patch(f"{__name__}.AsyncSession", S), patch(f"{__name__}.web_proxy", lambda: None):
+            got = await fetch_purchases(st)
+        assert len(got) == PURCHASES_PAGE + 1 and len(urls) == 2 and "offset=100&status=32&limit=100" in urls[1], urls
+    asyncio.run(pages())
     print("ok")
