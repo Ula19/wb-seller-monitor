@@ -5,6 +5,7 @@ import Login from "./pages/Login";
 import Items from "./pages/Items";
 import Sellers from "./pages/Sellers";
 import Accounts from "./pages/Accounts";
+import Account from "./pages/Account";
 import Events from "./pages/Events";
 import Targets from "./pages/Targets";
 import Proxies from "./pages/Proxies";
@@ -74,6 +75,7 @@ export default function App() {
           <Route path="/targets" element={<Targets />} />
           <Route path="/sellers" element={<Sellers />} />
           <Route path="/accounts" element={<Accounts />} />
+          <Route path="/accounts/:id" element={<Account />} />
           <Route path="/proxies" element={<Proxies />} />
           <Route path="/events" element={<Events />} />
           <Route path="*" element={<Navigate to="/items" replace />} />

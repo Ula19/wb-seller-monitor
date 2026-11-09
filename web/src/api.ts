@@ -64,6 +64,22 @@ export type Account = {
   proxy_fails: number; proxy_fail_at: string | null; proxy_down: boolean; polling: boolean;
   title: string; proxy: { id: number; label: string; server: string; exit_ip: string | null } | null;
 };
+// страница аккаунта: + код получения на сегодня и счётчики вкладок
+export type AccountFull = Account & {
+  browser_sync: boolean; pickup_code: string | null; counts: { purchases: number; balance: number; vb: number };
+};
+export type Purchase = {
+  rid: string; nm_id: number | null; name: string | null; brand: string | null; price: number | null; dt: string | null;
+  office_id: number | null; office_address: string | null; office_hours: string | null;
+};
+export type BalanceOp = {
+  tx_id: string; name: string | null; op_type: number | null; amount: number | null; balance: number | null;
+  dt: string | null; note: string | null;
+};
+export type VbOp = {
+  tx_id: string; title: string | null; description: string | null; dt: string | null; operation: number | null;
+  amount: number | null;
+};
 export type Proxy = {
   id: number; label: string; server: string; exit_ip: string | null; ok: boolean | null; error: string | null;
   checking: boolean; checked_at: string | null; created_at: string; used_by: string[];
