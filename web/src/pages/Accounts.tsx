@@ -158,6 +158,7 @@ function Card({ a }: { a: Account }) {
           <div className="muted small">{a.kind === "business" ? "Бизнес" : "Обычный"} · обновлён {time(a.state_at)}</div>
           <div className="small">{a.proxy ? <span className="muted">прокси: {a.proxy.label} · {a.proxy.exit_ip ?? a.proxy.server}</span>
             : <span className="up-t">без своего прокси — IP мониторинга</span>}</div>
+          {a.proxy_fails > 0 && <div className="small up-t">прокси не ответил {a.proxy_fails} раз подряд, последний {time(a.proxy_fail_at)}</div>}
         </div>
         <span className={`pill ${a.status === "active" ? (low ? "warn" : "ok") : "bad"}`}>
           {a.status === "active" ? (low ? "лимит почти исчерпан" : "активен") : a.status === "relogin" ? "нужен вход" : "выключен"}

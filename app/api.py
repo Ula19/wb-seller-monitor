@@ -324,7 +324,7 @@ async def delete_target(nm_id: int, u=Depends(user), s=Depends(db)):
 
 # ---------- аккаунты WB ----------
 ACC_FIELDS = ("id", "label", "phone_mask", "name", "phone", "purchase_pct", "kind", "status", "wallet_pct", "limit_left", "monthly_limit", "max_order",
-              "max_rid", "wallet_balance", "bonus_balance", "state_at")
+              "max_rid", "wallet_balance", "bonus_balance", "state_at", "proxy_fails", "proxy_fail_at")
 ORDER_FIELDS = ("rid", "nm_id", "name", "brand", "price", "dst_office_id", "status_name", "group_id",
                 "status_at", "ordered_at", "expiry_at", "delivery_at", "paid", "office_address", "office_hours", "hidden")
 

@@ -25,8 +25,7 @@ CODE_TIMEOUT = 300  # сколько ждём код из чата, сек
 # ожидание кода из чата по telegram_id (логин — долгая корутина, код приходит отдельно)
 _pending_code: dict[int, asyncio.Future] = {}
 _login_tasks: dict[int, asyncio.Task] = {}
-# ponytail: в памяти — после рестарта worker'а пуш «прокси не отвечает» может прийти ещё раз
-_proxy_down: set[int] = set()
+PROXY_ALERT_AFTER = 3  # пуш «прокси не отвечает» — после стольких сбоев подряд (один таймаут резидентного прокси — норма)
 
 
 def phone_mask(phone: str) -> str:
@@ -68,28 +67,31 @@ async def _relogin(bot, acc: models.WbAccount) -> None:
         await s.commit()
     log.warning("keeper: аккаунт %s (%s) разлогинен", acc.id, acc.title)
     where = f"на сайте https://{settings.site_domain}/accounts" if settings.site_domain else "/wblogin"
+    await _push_all(bot, f"‼️ <b>Аккаунт WB {acc.title} разлогинен</b> — бизнес-цены, лимит "
+                         f"и заказы под ним не идут.\n👉 Войдите заново: {where}")
+
+
+async def _push_all(bot, text: str) -> None:
     for uid in settings.superadmins:  # одно пространство — всем из списка
         try:
-            await bot.send_message(uid, f"‼️ <b>Аккаунт WB {acc.title} разлогинен</b> — бизнес-цены, лимит "
-                                        f"и заказы под ним не идут.\n👉 Войдите заново: {where}", parse_mode="HTML")
+            await bot.send_message(uid, text, parse_mode="HTML")
         except Exception:
             pass
 
 
 async def _proxy_alert(bot, acc: models.WbAccount, e: Exception) -> None:
-    """Сеть через прокси аккаунта не работает: сессия цела, НЕ relogin. Пуш один раз до восстановления."""
-    log.warning("keeper: аккаунт %s (%s): прокси не отвечает: %s", acc.id, acc.title, e)
-    if acc.id in _proxy_down:
+    """Сеть через прокси аккаунта не работает: сессия цела, НЕ relogin. Счётчик сбоев — в БД (его видит сайт);
+    пуш один раз, когда сбоев подряд стало PROXY_ALERT_AFTER."""
+    async with Session() as s:
+        n = await repo.proxy_fail(s, acc.id)
+        await s.commit()
+    log.warning("keeper: аккаунт %s (%s): прокси не отвечает (%s подряд): %s", acc.id, acc.title, n, e)
+    if n != PROXY_ALERT_AFTER:
         return
-    _proxy_down.add(acc.id)
     where = f"https://{settings.site_domain}/proxies" if settings.site_domain else "раздел «Прокси» на сайте"
-    for uid in settings.superadmins:
-        try:
-            await bot.send_message(uid, f"⚠️ <b>Прокси аккаунта WB {acc.title} не отвечает</b> — лимит, заказы и "
-                                        f"рефреш сессии под ним не идут. Сессия цела, входить заново не нужно.\n"
-                                        f"👉 Проверьте прокси: {where}", parse_mode="HTML")
-        except Exception:
-            pass
+    await _push_all(bot, f"⚠️ <b>Прокси аккаунта WB {acc.title} не отвечает</b> — лимит, заказы и "
+                         f"рефреш сессии под ним не идут. Сессия цела, входить заново не нужно.\n"
+                         f"👉 Проверьте прокси: {where}")
 
 
 async def _refresh(acc: models.WbAccount, state: dict) -> dict | None:
@@ -162,14 +164,16 @@ async def poll_account(bot, acc: models.WbAccount) -> None:
     except Exception as e:
         log.warning("keeper: состояние аккаунта %s не получено: %s: %s", acc.id, type(e).__name__, str(e)[:200])
         return
-    _proxy_down.discard(acc.id)
     if st.get("orders"):  # адрес и часы ПВЗ — в строку заказа: API в другом контейнере, кэша справочника не видит
         offices = await pickups.lookup(o["dst_office_id"] for o in st["orders"])
         for o in st["orders"]:
             o["office_address"], o["office_hours"] = offices.get(o["dst_office_id"], (None, None))
     async with Session() as s:
-        await repo.save_account_state(s, acc.id, st)
+        fails = await repo.save_account_state(s, acc.id, st)
         await s.commit()
+    if fails >= PROXY_ALERT_AFTER:  # о сбое пушили — скажем и о восстановлении
+        log.info("keeper: аккаунт %s: прокси снова отвечает после %d сбоев", acc.title, fails)
+        await _push_all(bot, f"✅ Прокси аккаунта WB <b>{acc.title}</b> снова отвечает")
     log.info("keeper: аккаунт %s: Кошелёк %s%%, лимит %s ₽, заказов %d", acc.title,
              st.get("wallet_pct") if st.get("wallet_pct") is not None else "—",
              f"{st['limit_left']:,}".replace(",", " ") if st.get("limit_left") is not None else "—",

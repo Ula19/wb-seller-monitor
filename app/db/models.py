@@ -174,6 +174,9 @@ class WbAccount(Base):
     wallet_balance: Mapped[int | None] = mapped_column(Integer, nullable=True)
     bonus_balance: Mapped[int | None] = mapped_column(Integer, nullable=True)
     state_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # сбои прокси аккаунта подряд (опрос/рефреш); сброс — удачный опрос или новый вход
+    proxy_fails: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    proxy_fail_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # свой выход в WB: вход, рефреш, состояние, personalinfo. Меняется только перелогином
     proxy_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("proxies.id", ondelete="RESTRICT"), nullable=True, index=True)

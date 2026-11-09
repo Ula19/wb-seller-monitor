@@ -317,6 +317,7 @@ async def save_account(s, uid: int, phone_mask: str, kind: str, state_enc: bytes
         acc = models.WbAccount(user_id=uid, phone_mask=phone_mask)
         s.add(acc)
     acc.kind, acc.state_enc, acc.status, acc.proxy_id = kind, state_enc, "active", proxy_id
+    acc.proxy_fails, acc.proxy_fail_at = 0, None  # счётчик сбоев был про старый вход/прокси
     apply_profile(acc, profile)
     await s.flush()
     return acc
@@ -344,10 +345,18 @@ async def upsert_account_prices(s, account_id: int, prices: dict[int, int]) -> N
 ACCOUNT_STATE_FIELDS = ("wallet_pct", "limit_left", "monthly_limit", "max_order", "max_rid", "wallet_balance", "bonus_balance")
 
 
-async def save_account_state(s, account_id: int, st: dict) -> None:
-    """Состояние из account_api.fetch: поля аккаунта + активные заказы (пропавшие rid — в архив, удаляем)."""
+async def proxy_fail(s, account_id: int) -> int | None:
+    """Ещё один сбой прокси аккаунта подряд → сколько их теперь (None — аккаунта нет)."""
+    return await s.scalar(update(models.WbAccount).where(models.WbAccount.id == account_id).values(
+        proxy_fails=models.WbAccount.proxy_fails + 1, proxy_fail_at=_utcnow()).returning(models.WbAccount.proxy_fails))
+
+
+async def save_account_state(s, account_id: int, st: dict) -> int:
+    """Состояние из account_api.fetch: поля аккаунта + активные заказы (пропавшие rid — в архив, удаляем).
+    Опрос удался — прокси жив: счётчик сбоев в 0. Возвращает, сколько сбоев было до этого."""
+    was = await s.scalar(select(models.WbAccount.proxy_fails).where(models.WbAccount.id == account_id).with_for_update())
     await s.execute(update(models.WbAccount).where(models.WbAccount.id == account_id).values(
-        state_at=_utcnow(), **{k: st.get(k) for k in ACCOUNT_STATE_FIELDS}))
+        state_at=_utcnow(), proxy_fails=0, proxy_fail_at=None, **{k: st.get(k) for k in ACCOUNT_STATE_FIELDS}))
     orders = st.get("orders") or []
     await s.execute(delete(models.AccountOrder).where(
         models.AccountOrder.account_id == account_id,
@@ -363,6 +372,7 @@ async def save_account_state(s, account_id: int, st: dict) -> None:
             index_elements=[models.AccountOrder.account_id, models.AccountOrder.rid],
             set_={**{c: stmt.excluded[c] for c in cols},
                   **{c: func.coalesce(stmt.excluded[c], t.c[c]) for c in office}}))
+    return was or 0
 
 
 # ---------- заявки на вход в аккаунт WB (сайт → worker) ----------
