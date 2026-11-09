@@ -20,11 +20,7 @@ from app.wb.web_session import ProxyDown
 
 log = logging.getLogger(__name__)
 
-CODE_TIMEOUT = 300  # сколько ждём код из чата, сек
-
-# ожидание кода из чата по telegram_id (логин — долгая корутина, код приходит отдельно)
-_pending_code: dict[int, asyncio.Future] = {}
-_login_tasks: dict[int, asyncio.Task] = {}
+CODE_TIMEOUT = 300  # сколько ждём код с сайта, сек
 PROXY_ALERT_AFTER = 3  # пуш «прокси не отвечает» — после стольких сбоев подряд (один таймаут резидентного прокси — норма)
 
 
@@ -66,7 +62,7 @@ async def _relogin(bot, acc: models.WbAccount) -> None:
         row.status = "relogin"
         await s.commit()
     log.warning("keeper: аккаунт %s (%s) разлогинен", acc.id, acc.title)
-    where = f"на сайте https://{settings.site_domain}/accounts" if settings.site_domain else "/wblogin"
+    where = f"на сайте https://{settings.site_domain}/accounts" if settings.site_domain else "на сайте, раздел «Аккаунты»"
     await _push_all(bot, f"‼️ <b>Аккаунт WB {acc.title} разлогинен</b> — бизнес-цены, лимит "
                          f"и заказы под ним не идут.\n👉 Войдите заново: {where}")
 
@@ -233,6 +229,8 @@ async def process_login_request(bot=None) -> bool:
             error = ("неверный код или WB не пустил — попробуйте ещё раз" if got
                      else f"код не введён за {CODE_TIMEOUT // 60} мин" if asked
                      else "WB не показал форму входа (антибот) — попробуйте позже")
+    except web_session.LoginFailed as e:  # код введён, вход не завершён — причина по кукам
+        status, error, acc_id = "error", str(e), None
     except ProxyDown as e:
         log.warning("keeper: вход по заявке %s: прокси не отвечает: %s", req.id, e)
         status, error, acc_id = "error", "прокси не отвечает — проверьте его в разделе «Прокси»", None
@@ -299,70 +297,9 @@ async def proxy_checks_loop() -> None:
         await asyncio.sleep(LOGIN_POLL_SEC)
 
 
-# ---------- логин через Telegram ----------
-async def start_login(bot, uid: int, phone: str, kind: str) -> str:
-    """Запускает логин в фоне; код придёт из чата через submit_code. Возвращает статус."""
-    if uid in _login_tasks and not _login_tasks[uid].done():
-        return "already"
-    fut: asyncio.Future = asyncio.get_event_loop().create_future()
-    _pending_code[uid] = fut
-
-    async def get_code():
-        try:
-            return await asyncio.wait_for(fut, timeout=CODE_TIMEOUT)
-        except asyncio.TimeoutError:
-            return None
-
-    async def run():
-        try:
-            state = await web_session.login(phone, get_code)
-            if state:
-                acc = await save_login(uid, phone, kind, state)
-                msg = f"✅ Вошёл в WB: аккаунт {acc.title} ({'бизнес' if kind == 'business' else 'обычный'})."
-            else:
-                msg = "❌ Логин не удался (неверный код или антибот). Попробуй ещё раз: /wblogin"
-        except Exception as e:
-            log.exception("keeper: логин упал")
-            msg = f"❌ Ошибка логина: {type(e).__name__}"
-        finally:
-            _pending_code.pop(uid, None)
-        try:
-            await bot.send_message(uid, msg)
-        except Exception:
-            pass
-
-    _login_tasks[uid] = asyncio.create_task(run())
-    return "started"
-
-
-def submit_code(uid: int, code: str) -> bool:
-    """Передать код из чата ожидающему логину. False — никто не ждёт."""
-    fut = _pending_code.get(uid)
-    if fut and not fut.done():
-        fut.set_result(str(code).strip())
-        return True
-    return False
-
-
-def awaiting_code(uid: int) -> bool:
-    fut = _pending_code.get(uid)
-    return bool(fut and not fut.done())
-
-
-if __name__ == "__main__":  # self-check: маска номера, Bearer в сессии, оркестрация кода
+if __name__ == "__main__":  # self-check: маска номера, Bearer в сессии
     assert phone_mask("9161234567") == "+7 ••• •••-45-67"
     assert has_bearer({"origins": [{"origin": "https://www.wildberries.ru", "localStorage": [
         {"name": "wbid-oauth-sdk-access-token", "value": "eyJa.eyJb.c"}]}]})
     assert not has_bearer({"cookies": [], "origins": []})
-
-    async def demo():
-        uid = 1
-        fut = asyncio.get_event_loop().create_future()
-        _pending_code[uid] = fut
-        assert awaiting_code(uid) is True
-        assert submit_code(uid, " 1234 ") is True
-        assert await fut == "1234"  # пробелы срезаны
-        assert submit_code(uid, "9999") is False  # уже отдан
-        assert awaiting_code(uid) is False
-        print("ok")
-    asyncio.run(demo())
+    print("ok")

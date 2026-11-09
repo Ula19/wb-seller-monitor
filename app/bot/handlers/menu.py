@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -15,13 +14,13 @@ from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from app.bot import keyboards as kb
 from app.bot import views
 from app.bot.access import access
-from app.bot.states import AddSeller, AddUser, CheckBrands, SetTokens, WbLogin, WorkHours
+from app.bot.states import AddSeller, AddUser, CheckBrands, SetTokens, WorkHours
 from app.bot.utils import parse_seller_slug, parse_supplier_id
 from app.config import settings
 from app.db import repo
 from app.db.base import Session
 from app.emoji import esc, tge
-from app.services import keeper, reporting
+from app.services import reporting
 from app.services.monitor import _pass_lock, sync_and_notify
 from app.wb.client import guardium_expires_at, wb_client
 
@@ -49,50 +48,6 @@ async def _deny_if_not_admin(cb: CallbackQuery) -> bool:
         await cb.answer("⛔ Только для администратора", show_alert=True)
         return True
     return False
-
-
-# ---------- вход в аккаунт WB (веб-сессия для keeper) ----------
-@router.message(Command("wblogin"))
-async def cmd_wblogin(m: Message, state: FSMContext):
-    if not access.is_admin(m.from_user.id):
-        await m.answer("⛔ Нет доступа")
-        return
-    if not settings.accounts_key:
-        await m.answer("⛔ На сервере не задан ACCOUNTS_KEY — сессию аккаунта не зашифровать.")
-        return
-    await state.set_state(WbLogin.waiting_kind)
-    await m.answer("🔐 Вход в аккаунт WB. Какой это аккаунт?", reply_markup=kb.account_kind_kb())
-
-
-@router.callback_query(WbLogin.waiting_kind, kb.AccKindCB.filter())
-async def wblogin_kind(cb: CallbackQuery, callback_data: kb.AccKindCB, state: FSMContext):
-    await state.update_data(kind="business" if callback_data.business else "retail")
-    await state.set_state(WbLogin.waiting_phone)
-    await _edit(cb, "Пришли номер телефона аккаунта (можно с +7 или без):", None)
-    await cb.answer()
-
-
-@router.message(WbLogin.waiting_phone)
-async def wblogin_phone(m: Message, state: FSMContext):
-    phone = re.sub(r"\D", "", m.text or "")[-10:]
-    if len(phone) != 10:
-        await m.answer("Нужно 10 цифр номера (без кода страны). Пришли ещё раз:")
-        return
-    kind = (await state.get_data()).get("kind", "business")
-    await keeper.start_login(m.bot, m.from_user.id, phone, kind)
-    await state.set_state(WbLogin.waiting_code)
-    await m.answer("Открываю WB и ввожу номер… Жди код: он придёт <b>пушем в приложение WB</b> "
-                   "(и в колокольчик на сайте). Пришли код сюда:", parse_mode="HTML")
-
-
-@router.message(WbLogin.waiting_code)
-async def wblogin_code(m: Message, state: FSMContext):
-    code = re.sub(r"\D", "", m.text or "")
-    await state.clear()
-    if keeper.submit_code(m.from_user.id, code):
-        await m.answer("Код принят, проверяю вход…")
-    else:
-        await m.answer("Сейчас код никто не ждёт (истёк таймаут?). Начни заново: /wblogin")
 
 
 # ---------- вход в меню ----------
@@ -140,7 +95,7 @@ async def rb_tokens(m: Message, state: FSMContext):
         "Пришли одним сообщением токен из приложения WB (сними перехватом трафика):\n"
         "• <b>guardium</b> — заголовок <code>x-guardium-token</code>, начинается с "
         "<code>1.1000.</code>. Запасной путь каталога (api-ios), обновлять раз в ~3 дня.\n"
-        "Бизнес-цены идут под твоим бизнес-аккаунтом — вход: /wblogin.",
+        "Бизнес-цены идут под твоим бизнес-аккаунтом — вход на сайте, раздел «Аккаунты».",
         reply_markup=kb.cancel_kb(),
         parse_mode="HTML",
     )
@@ -577,7 +532,7 @@ async def choose_price_mode(cb: CallbackQuery, callback_data: kb.PriceModeCB, st
         await repo.add_source(s, cb.from_user.id, sid, name=name, brand=brand, b2b=b2b)
         no_account = b2b and await repo.business_account(s, cb.from_user.id) is None
         await s.commit()
-    warn = "\n⚠️ Бизнес-аккаунта нет — бизнес-цен не будет, пока не войдёшь: /wblogin" if no_account else ""
+    warn = "\n⚠️ Бизнес-аккаунта нет — бизнес-цен не будет, пока не войдёшь на сайте, раздел «Аккаунты»" if no_account else ""
     status = await cb.message.edit_text(
         f"{tge('clock')} Магазин «{esc(name or sid)}» ({reporting.mode_tag(b2b)}) добавлен. "
         f"Гружу ассортимент в фоне — пришлю, как закончу.{warn}",

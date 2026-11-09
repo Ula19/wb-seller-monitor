@@ -11,6 +11,7 @@
 import asyncio
 import json
 import logging
+import random
 from urllib.parse import urlparse
 
 from app.config import settings
@@ -29,6 +30,11 @@ LAUNCH_ARGS = ["--no-sandbox", "--disable-dev-shm-usage"]
 SELLER_URL = "https://www.wildberries.ru/seller/{}"
 # служебные заголовки запроса браузера, которые curl ставит сам (cookie — свои)
 SKIP_HEADERS = {"host", "content-length", "connection", "cookie"}
+CALLBACK_WAIT_SEC = 45  # после кода: ждём callback (и экран согласия WB ID у нового аккаунта)
+
+
+class LoginFailed(Exception):
+    """Код введён, но вход не завершился; текст — для пользователя (почему)."""
 
 
 def web_proxy() -> str | None:
@@ -168,7 +174,8 @@ async def login(phone: str, get_code, proxy: str | None = None) -> dict | None:
     """Логин аккаунта WB по телефону. get_code() — корутина, возвращает код из пуша.
     proxy — прокси аккаунта (нет — общий web_proxy()).
 
-    Возвращает storageState (банку кук) или None, если логин не удался. ProxyDown — прокси не отвечает.
+    Возвращает storageState (банку кук) или None, если до кода не дошли (форма, код не пришёл).
+    LoginFailed — код введён, а вход не завершился (текст — причина). ProxyDown — прокси не отвечает.
     """
     from patchright.async_api import async_playwright
 
@@ -198,21 +205,53 @@ async def login(phone: str, get_code, proxy: str | None = None) -> dict | None:
                 log.warning("веб-логин: код не получен")
                 return None
             await page.keyboard.type(str(code).strip(), delay=120)
-            # ждём редирект на callback = успех
-            try:
-                await page.wait_for_url("**/wb-id/callback**", timeout=30000)
-            except Exception:
-                log.warning("веб-логин: редиректа на callback нет (неверный код?), жду куки сайта")
-            state = await _wait_www_session(ctx, page)
-            if is_logged(state):
-                log.info("веб-логин: успех, куки аккаунта получены")
-                from app.wb.account_api import PROFILE_KEY
-                state[PROFILE_KEY] = await _profile(page)  # keeper заберёт и не сохранит в сессию
-                return state
-            log.warning("веб-логин: куки аккаунта не появились (неверный код?)")
-            return None
+            state = await _finish_login(ctx, page)
+            from app.wb.account_api import PROFILE_KEY
+            state[PROFILE_KEY] = await _profile(page)  # keeper заберёт и не сохранит в сессию
+            return state
         finally:
             await browser.close()
+
+
+async def _wait_callback(page) -> bool:
+    """Код введён: ждём редирект на /wb-id/callback. Новому аккаунту WB ID показывает экран согласия
+    («Wildberries получит доступ к данным WB ID … Принять | Отклонить», oauth2/authorize?prompt=consent) —
+    жмём «Принять» один раз, как человек, с паузой. «Отклонить» не трогаем."""
+    accept = page.get_by_role("button", name="Принять")
+    clicked = False
+    for _ in range(CALLBACK_WAIT_SEC):
+        if "/wb-id/callback" in page.url:
+            return True
+        if not clicked:
+            try:
+                visible = await accept.is_visible()
+            except Exception:  # страница в переходе — проверим на следующем шаге
+                visible = False
+            if visible:
+                await asyncio.sleep(random.uniform(1, 2))
+                await accept.click()
+                clicked = True
+                log.info("веб-логин: экран согласия WB ID — принял")
+        await asyncio.sleep(1)
+    return False
+
+
+async def _finish_login(ctx, page) -> dict:
+    """После ввода кода: callback (+ согласие) → куки сайта. Не вышло — LoginFailed с причиной по кукам."""
+    if not await _wait_callback(page):
+        log.warning("веб-логин: редиректа на callback нет, жду куки сайта")
+    state = await _wait_www_session(ctx, page)
+    if is_logged(state):
+        log.info("веб-логин: успех, куки аккаунта получены")
+        return state
+    try:  # следующий незнакомый экран будет виден в логе сразу
+        text = " ".join((await asyncio.wait_for(page.inner_text("body"), 5)).split())[:200]
+    except Exception as e:
+        text = f"<текст не прочитан: {type(e).__name__}>"
+    log.warning("веб-логин: вход не завершён, страница %s: %s", page.url, text)
+    sso = any(c.get("name") == "wbid-refresh" and "id.wb.ru" in c.get("domain", "") for c in state.get("cookies", []))
+    raise LoginFailed("код принят, но WB не завершил вход на сайт — попробуйте ещё раз" if sso
+                      else "код не принят — проверьте код")
 
 
 async def refresh(storage_state: dict | str, proxy: str | None = None) -> dict | None:
@@ -345,4 +384,73 @@ if __name__ == "__main__":  # self-check чистых функций (без б�
     assert curl_proxy("socks5://h:1") == "socks5h://h:1" and curl_proxy(None) is None
     acc = account_cookies(st)  # только аккаунт, без антибота и чужих доменов
     assert acc == "wbid-refresh=abc; wbx-validation-key=v", acc
+
+    # вход после кода — на заглушках браузера: экран согласия, обычный callback, две причины неудачи
+    from unittest.mock import patch
+
+    SSO = {"name": "wbid-refresh", "value": "r", "domain": ".id.wb.ru"}
+    WWW_OK = {"name": "wbx-validation-key", "value": "v", "domain": ".wildberries.ru"}
+
+    class Btn:
+        def __init__(self, page):
+            self.page, self.clicks = page, 0
+
+        async def is_visible(self):
+            return self.page.consent and "/wb-id/callback" not in self.page.url
+
+        async def click(self):
+            self.clicks += 1
+            self.page.url = "https://www.wildberries.ru/wb-id/callback?code=x"  # «Принять» → редирект
+            self.page.cookies.append(WWW_OK)
+
+    class Page:
+        def __init__(self, url, cookies, consent=False):
+            self.url, self.cookies, self.consent = url, cookies, consent
+            self.btn, self.roles = Btn(self), []
+
+        def get_by_role(self, role, name):
+            self.roles.append((role, name))
+            return self.btn
+
+        async def goto(self, url, **kw):
+            self.url = url
+
+        async def inner_text(self, sel):
+            return "Wildberries   получит доступ\n к данным WB ID " + "x" * 300
+
+    class Ctx:
+        def __init__(self, page):
+            self.page = page
+
+        async def storage_state(self):
+            return {"cookies": list(self.page.cookies), "origins": []}
+
+    async def nosleep(_):
+        pass
+
+    async def demo():
+        with patch.object(asyncio, "sleep", nosleep):
+            # новый аккаунт: экран согласия → «Принять» один раз → callback → куки www
+            pg = Page("https://id.wb.ru/login/oauth2/authorize?prompt=consent", [SSO], consent=True)
+            assert is_logged(await _finish_login(Ctx(pg), pg)) and pg.btn.clicks == 1
+            assert pg.roles == [("button", "Принять")]  # «Отклонить» не ищем вовсе
+            # уже входивший: сразу callback, куки есть — кнопку не жмём
+            pg = Page("https://www.wildberries.ru/wb-id/callback?code=y", [SSO, WWW_OK])
+            assert is_logged(await _finish_login(Ctx(pg), pg)) and pg.btn.clicks == 0
+            # SSO-куки есть, www нет → «код принят, но…»; нет SSO → «код не принят»
+            for cookies, want in (([SSO], "код принят, но WB не завершил вход на сайт — попробуйте ещё раз"),
+                                  ([], "код не принят — проверьте код")):
+                pg = Page("https://id.wb.ru/login?x=1", cookies)
+                try:
+                    await _finish_login(Ctx(pg), pg)
+                    raise AssertionError("ждали LoginFailed")
+                except LoginFailed as e:
+                    assert str(e) == want, e
+                assert pg.btn.clicks == 0
+
+    with patch.object(log, "warning") as warn:
+        asyncio.run(demo())
+    last = warn.call_args_list[-1].args  # URL и первые 200 символов текста страницы — в лог
+    assert last[1] == "https://www.wildberries.ru/" and last[2].startswith("Wildberries получит доступ к данным") \
+        and len(last[2]) == 200, last
     print("ok")

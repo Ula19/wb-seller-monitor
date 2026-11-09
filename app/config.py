@@ -76,7 +76,7 @@ class Settings(BaseSettings):
     # только он, закрытый — у владельца в менеджере паролей. Пусто — бэкап не делаем.
     backup_age_recipient: str = ""
     backup_hour: int = 4  # час по Москве
-    # ключ Fernet для сессий аккаунтов WB в БД (обязателен для /wblogin), см. app/crypto.py
+    # ключ Fernet для сессий аккаунтов WB в БД (обязателен для входа аккаунтов с сайта), см. app/crypto.py
     accounts_key: str = ""
 
     # сайт (контейнер api): домен для Caddy и ссылок, секрет подписи cookie сессии (≥32 символов),

@@ -50,10 +50,6 @@ class PriceModeCB(CallbackData, prefix="pm"):
     b2b: int  # 1 — бизнес, 0 — розница
 
 
-class AccKindCB(CallbackData, prefix="ak"):
-    business: int  # 1 — бизнес-аккаунт, 0 — обычный
-
-
 class UserCB(CallbackData, prefix="ud"):
     action: str  # del
     uid: int
@@ -156,15 +152,6 @@ def price_mode_kb():
     b = InlineKeyboardBuilder()
     b.button(text="🏢 Бизнес-цена", callback_data=PriceModeCB(b2b=1))
     b.button(text="👤 Розничная", callback_data=PriceModeCB(b2b=0))
-    b.adjust(1)
-    return b.as_markup()
-
-
-def account_kind_kb():
-    """Тип аккаунта WB при входе."""
-    b = InlineKeyboardBuilder()
-    b.button(text="🏢 Бизнес-аккаунт", callback_data=AccKindCB(business=1))
-    b.button(text="👤 Обычный", callback_data=AccKindCB(business=0))
     b.adjust(1)
     return b.as_markup()
 

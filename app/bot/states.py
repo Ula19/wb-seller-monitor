@@ -16,12 +16,6 @@ class SetTokens(StatesGroup):
     waiting = State()
 
 
-class WbLogin(StatesGroup):
-    waiting_kind = State()   # бизнес или обычный аккаунт
-    waiting_phone = State()  # номер аккаунта WB
-    waiting_code = State()   # код из пуша в приложении WB
-
-
 class CheckBrands(StatesGroup):
     pick_sellers = State()  # мультивыбор магазинов
     pick_brands = State()   # мультивыбор брендов
