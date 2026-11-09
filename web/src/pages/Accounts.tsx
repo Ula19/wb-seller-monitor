@@ -170,6 +170,24 @@ function Title({ a }: { a: Account }) {
 function Card({ a }: { a: Account }) {
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
+  // ↻: опрос сам глотает ошибки — запоминаем, что было при нажатии, и по итогу говорим, обновилось ли
+  const [pressed, setPressed] = useState<{ at: number; stateAt: string | null } | null>(null);
+  const [pollNote, setPollNote] = useState("");
+  const poll = useMutation({
+    mutationFn: () => api(`/accounts/${a.id}/poll`, { method: "POST" }),
+    onMutate: () => { setPollNote(""); setPressed({ at: Date.now(), stateAt: a.state_at }); },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["accounts"] }),
+    onError: (e: unknown) => { setPressed(null); setPollNote(e instanceof ApiError ? e.message : "ошибка"); },
+  });
+  useEffect(() => {
+    if (!pressed || a.polling || poll.isPending) return;
+    if (a.state_at === pressed.stateAt) {
+      const why = a.status === "relogin" ? "нужен вход"
+        : a.proxy_fail_at && new Date(a.proxy_fail_at).getTime() > pressed.at ? "прокси не ответил" : "";
+      setPollNote(why ? `не обновилось — ${why}` : "не обновилось");
+    }
+    setPressed(null);
+  }, [a.polling, a.state_at, a.status, poll.isPending]);
   const del = useMutation({
     mutationFn: () => api(`/accounts/${a.id}`, { method: "DELETE" }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["accounts"] }),
@@ -184,7 +202,10 @@ function Card({ a }: { a: Account }) {
       <div className="acc-head">
         <div>
           <Title a={a} /> <span className="muted nowrap">· {a.phone ?? a.phone_mask}</span>
-          <div className="muted small">{a.kind === "business" ? "Бизнес" : "Обычный"} · обновлён {time(a.state_at)}</div>
+          <div className="muted small">{a.kind === "business" ? "Бизнес" : "Обычный"} · обновлён {time(a.state_at)}{" "}
+            {a.polling || poll.isPending ? <span className="spin" title="обновляю…" />
+              : <button className="mini" title="Обновить сейчас" onClick={() => poll.mutate()}>↻</button>}
+            {pollNote && <span className="up-t"> {pollNote}</span>}</div>
           <div className="small">{a.proxy ? <span className="muted">прокси: {a.proxy.label} · {a.proxy.exit_ip ?? a.proxy.server}</span>
             : <span className="up-t">без своего прокси — IP мониторинга</span>}</div>
           {a.proxy_down && <div className="small up-t">прокси не ответил {a.proxy_fails} раз подряд, последний {time(a.proxy_fail_at)}</div>}
@@ -223,7 +244,8 @@ function Card({ a }: { a: Account }) {
 
 export default function Accounts() {
   const qc = useQueryClient();
-  const accounts = useQuery({ queryKey: ["accounts"], queryFn: () => api<Account[]>("/accounts"), refetchInterval: 60_000 });
+  const accounts = useQuery({ queryKey: ["accounts"], queryFn: () => api<Account[]>("/accounts"),
+    refetchInterval: (q) => (q.state.data?.some((a) => a.polling) ? 2000 : 60_000) });
   const list = accounts.data ?? [];
   const sum = (f: (a: Account) => number) => list.reduce((s, a) => s + f(a), 0);
   return (

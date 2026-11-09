@@ -324,7 +324,8 @@ async def delete_target(nm_id: int, u=Depends(user), s=Depends(db)):
 
 # ---------- аккаунты WB ----------
 ACC_FIELDS = ("id", "label", "phone_mask", "name", "phone", "purchase_pct", "kind", "status", "wallet_pct", "limit_left", "monthly_limit", "max_order",
-              "max_rid", "funds", "vb_points", "state_at", "proxy_fails", "proxy_fail_at")
+              "max_rid", "funds", "vb_points", "state_at", "proxy_fails", "proxy_fail_at", "polling")
+POLL_FRESH_SEC = 30  # ↻ не чаще: только что обновлённый опрашивать незачем
 ORDER_FIELDS = ("rid", "nm_id", "name", "brand", "price", "dst_office_id", "status_name", "group_id",
                 "status_at", "ordered_at", "expiry_at", "delivery_at", "paid", "office_address", "office_hours", "hidden")
 
@@ -340,6 +341,23 @@ async def accounts(u=Depends(user), s=Depends(db)):
              "proxy_down": a.proxy_fails >= repo.PROXY_ALERT_AFTER,  # порог тот же, что у пуша
              "proxy": (p := proxies.get(a.proxy_id)) and {"id": p.id, "label": p.label, "server": p.server,
                                                          "exit_ip": p.exit_ip}} for a in accs]
+
+
+@app.post("/api/accounts/{account_id:int}/poll")
+async def poll_account(account_id: int, u=Depends(user), s=Depends(db)):
+    """↻ «Обновить»: worker опросит аккаунт вне расписания (polling — как checking у прокси)."""
+    acc = await s.get(models.WbAccount, account_id)
+    if acc is None or acc.user_id != u.telegram_id:
+        raise HTTPException(404, "нет такого аккаунта")
+    if acc.status != "active":
+        raise HTTPException(409, "аккаунт не активен — нужен вход")
+    if acc.polling:
+        return {"ok": True}
+    if acc.state_at and (datetime.now(timezone.utc) - acc.state_at).total_seconds() < POLL_FRESH_SEC:
+        raise HTTPException(409, "только что обновлён")
+    acc.polling = True
+    await s.commit()
+    return {"ok": True}
 
 
 class AccountIn(BaseModel):

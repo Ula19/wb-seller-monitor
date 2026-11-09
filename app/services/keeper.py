@@ -318,6 +318,36 @@ async def proxy_checks_loop() -> None:
         await asyncio.sleep(LOGIN_POLL_SEC)
 
 
+async def process_account_poll(bot) -> bool:
+    """Аккаунт, которому на сайте нажали ↻: внеочередной опрос. False — опрашивать некого."""
+    async with Session() as s:
+        acc = await s.scalar(select(models.WbAccount).where(models.WbAccount.polling)
+                             .order_by(models.WbAccount.id).limit(1))
+        if acc is None:
+            return False
+    try:
+        await poll_account(bot, acc)
+    finally:  # иначе при сбое «обновляю…» висит, а цикл крутит один и тот же аккаунт
+        async with Session() as s:
+            await s.execute(update(models.WbAccount).where(models.WbAccount.id == acc.id).values(polling=False))
+            await s.commit()
+    return True
+
+
+async def account_polls_loop(bot) -> None:
+    """Фоновая задача worker'а: ↻ «Обновить» с сайта (плановый опрос — state_job по расписанию)."""
+    async with Session() as s:  # опрос, прерванный рестартом, уже не закончит никто
+        await s.execute(update(models.WbAccount).where(models.WbAccount.polling).values(polling=False))
+        await s.commit()
+    while True:
+        try:
+            if await process_account_poll(bot):
+                continue
+        except Exception:
+            log.exception("keeper: цикл опроса аккаунтов по кнопке")
+        await asyncio.sleep(LOGIN_POLL_SEC)
+
+
 if __name__ == "__main__":  # self-check: маска номера, Bearer в сессии
     assert phone_mask("9161234567") == "+7 ••• •••-45-67"
     assert has_bearer({"origins": [{"origin": "https://www.wildberries.ru", "localStorage": [

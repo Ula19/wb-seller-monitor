@@ -176,6 +176,7 @@ class WbAccount(Base):
     state_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # сбои прокси аккаунта подряд (опрос/рефреш); сброс — удачный опрос или новый вход
     proxy_fails: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    polling: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")  # ↻ с сайта: worker опросит
     proxy_fail_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # свой выход в WB: вход, рефреш, состояние, personalinfo. Меняется только перелогином
     proxy_id: Mapped[int | None] = mapped_column(

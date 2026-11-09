@@ -75,12 +75,13 @@ async def main() -> None:
         args=[bot], max_instances=1,
     )
     scheduler.add_job(  # лимит/% Кошелька/заказы аккаунтов; 401 → рефреш → «войдите заново»
-        keeper.state_job, "interval", minutes=10, args=[bot], max_instances=1,
+        keeper.state_job, "interval", minutes=settings.account_poll_minutes, args=[bot], max_instances=1,
         next_run_time=datetime.now(timezone.utc) + timedelta(minutes=1),
     )
     scheduler.start()
     login_task = asyncio.create_task(keeper.login_requests_loop(bot))  # вход в WB по заявкам сайта
     proxy_task = asyncio.create_task(keeper.proxy_checks_loop())  # «Проверить» прокси с сайта
+    poll_task = asyncio.create_task(keeper.account_polls_loop(bot))  # ↻ «Обновить» аккаунт с сайта
 
     try:
         await dp.start_polling(bot)
@@ -88,6 +89,7 @@ async def main() -> None:
         scheduler.shutdown(wait=False)
         login_task.cancel()
         proxy_task.cancel()
+        poll_task.cancel()
         await wb_client.close()
         await bot.session.close()
 
