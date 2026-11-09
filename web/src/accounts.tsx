@@ -79,3 +79,45 @@ export function Thumb({ src }: { src: string | null }) {
   return src && !bad ? <img className="thumb" src={src} alt="" loading="lazy" onError={() => setBad(true)} />
     : <span className="thumb none">📦</span>;
 }
+
+// ---------- заказы: группы по ПВЗ, строки по товару ----------
+export type Line = { key: string; orders: Order[]; first: Order };  // одинаковый товар в одном статусе — одна строка «× N»
+export type Pvz = { id: number; address: string; hours: string | null; orders: Order[] };
+
+export function byPvz(orders: Order[]): Pvz[] {
+  const m = new Map<number, Pvz>();
+  for (const o of orders) {
+    const id = o.dst_office_id ?? 0;
+    const g = m.get(id) ?? { id, address: o.office_address ?? (id ? `ПВЗ №${id}` : "ПВЗ не указан"), hours: o.office_hours, orders: [] };
+    g.orders.push(o);
+    m.set(id, g);
+  }
+  // сначала те, где есть что забирать
+  return [...m.values()].sort((a, b) => Number(b.orders.some((o) => o.group_id === 5)) - Number(a.orders.some((o) => o.group_id === 5)));
+}
+
+export function lines(orders: Order[]): Line[] {
+  const m = new Map<string, Line>();
+  for (const o of orders) {
+    const key = [o.nm_id ?? o.rid, o.group_id, o.paid, o.price, o.hidden].join("|");
+    const l = m.get(key) ?? { key, orders: [], first: o };
+    l.orders.push(o);
+    m.set(key, l);
+  }
+  return [...m.values()];
+}
+
+/** Текст «Готовы забрать» для буфера обмена — только то, что ждёт в ПВЗ, без скрытых; сумма — за все штуки. */
+export function pickupText(g: Pvz, a: Account, code: string): string {
+  const phone = (a.phone ?? "").replace(/\D/g, "").slice(-10);
+  const items = new Map<string, { name: string; n: number; sum: number }>();
+  for (const o of g.orders.filter((o) => o.group_id === 5 && !o.hidden)) {
+    const k = String(o.nm_id ?? o.rid);
+    const it = items.get(k) ?? { name: o.name ?? `арт. ${o.nm_id}`, n: 0, sum: 0 };
+    it.n += 1;
+    it.sum += o.price ?? 0;
+    items.set(k, it);
+  }
+  const head = [g.address, `${phone ? "7" + phone : ""} ${a.title}`.trim(), `Код : ${code}`];
+  return [head.join("\n"), ...[...items.values()].map((it) => `${it.name} - ${it.n} шт\n${it.sum} руб`)].join("\n\n");
+}
