@@ -24,9 +24,7 @@ CODE_TIMEOUT = 300  # сколько ждём код с сайта, сек
 PROXY_ALERT_AFTER = repo.PROXY_ALERT_AFTER  # один таймаут резидентного прокси — норма, пушим с третьего подряд
 
 
-def phone_mask(phone: str) -> str:
-    """10 цифр без кода страны → «+7 ••• •••-12-34» (номер целиком не храним)."""
-    return f"+7 ••• •••-{phone[-4:-2]}-{phone[-2:]}"
+phone_mask = repo.phone_mask
 
 
 def has_bearer(state: dict) -> bool:
@@ -48,7 +46,7 @@ async def save_login(uid: int, phone: str, kind: str, state: dict,
     if not has_bearer(state):  # без Bearer не будет лимита и заказов (шаг account_state)
         log.warning("keeper: в сессии нет Bearer сайта — лимит/заказы появятся после рефреша, если он его допишет")
     async with Session() as s:
-        acc = await repo.save_account(s, uid, phone_mask(phone), kind, encrypt_json(state), profile, proxy_id)
+        acc = await repo.save_account(s, uid, phone, kind, encrypt_json(state), profile, proxy_id)
         await s.commit()
         return acc
 
@@ -349,7 +347,7 @@ async def account_polls_loop(bot) -> None:
 
 
 if __name__ == "__main__":  # self-check: маска номера, Bearer в сессии
-    assert phone_mask("9161234567") == "+7 ••• •••-45-67"
+    assert phone_mask("9161234567") == "+7 ••• •••-45-67" and repo.phone_pretty("9161234567") == "+7 916 123-45-67"
     assert has_bearer({"origins": [{"origin": "https://www.wildberries.ru", "localStorage": [
         {"name": "wbid-oauth-sdk-access-token", "value": "eyJa.eyJb.c"}]}]})
     assert not has_bearer({"cookies": [], "origins": []})

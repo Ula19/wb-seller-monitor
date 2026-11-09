@@ -1,6 +1,7 @@
 // Тонкая обёртка над fetch: cookie сессии того же origin, ошибки — ApiError с текстом бэкенда.
 export class ApiError extends Error {
-  constructor(public status: number, message: string) {
+  // detail — тело ошибки как есть (объект для 409 already_connected и т.п.)
+  constructor(public status: number, message: string, public detail: unknown = null) {
     super(message);
   }
 }
@@ -14,7 +15,7 @@ export async function api<T>(path: string, init?: { method?: string; body?: unkn
   const data = (r.headers.get("content-type") ?? "").includes("json") ? await r.json() : null;
   if (!r.ok) {
     const d = data?.detail;
-    throw new ApiError(r.status, typeof d === "string" ? d : Array.isArray(d) ? d[0]?.msg ?? "ошибка" : r.statusText);
+    throw new ApiError(r.status, typeof d === "string" ? d : Array.isArray(d) ? d[0]?.msg ?? "ошибка" : r.statusText, d);
   }
   return data as T;
 }

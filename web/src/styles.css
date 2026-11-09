@@ -200,3 +200,5 @@ tr.hit td { background: var(--ok-soft); }
 }
 .nowrap { white-space: nowrap; }
 .link:disabled { opacity: .4; cursor: default; }
+.already { background: var(--up-soft); border-radius: 8px; padding: 10px 12px; }
+.already p { margin: 0 0 8px; }

@@ -405,6 +405,7 @@ class LoginIn(BaseModel):
     phone: str
     kind: Literal["business", "retail"]
     proxy_id: int | None = None  # None — вход через общий прокси (IP парсера)
+    relogin: bool = False  # номер уже подключён — сайт спросил и пользователь подтвердил повторный вход
 
 
 class CodeIn(BaseModel):
@@ -427,6 +428,10 @@ async def start_login(body: LoginIn, u=Depends(user), s=Depends(db)):
     phone = phone[1:] if len(phone) == 11 and phone[0] in "78" else phone
     if len(phone) != 10:
         raise HTTPException(422, "нужен номер РФ: 10 цифр после +7")
+    if not body.relogin and (acc := await repo.find_account(s, u.telegram_id, phone)):
+        # не входим молча поверх: сайт спросит «Войти заново?» и повторит с relogin
+        raise HTTPException(409, {"code": "already_connected",
+                                  "account": {"id": acc.id, "title": acc.title, "status": acc.status}})
     if body.proxy_id is not None:  # один прокси на несколько аккаунтов — норма, непроверенный — нет
         p = await s.get(models.Proxy, body.proxy_id)
         if p is None:

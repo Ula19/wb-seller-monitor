@@ -1,5 +1,6 @@
 """Доступ к данным: запросы и CRUD-помощники (схема v2)."""
 
+import re
 from datetime import datetime, timezone
 
 from sqlalchemy import and_, delete, func, select, true, update
@@ -308,18 +309,43 @@ def apply_profile(acc: models.WbAccount, profile: dict | None) -> None:
             setattr(acc, k, profile[k])
 
 
-async def save_account(s, uid: int, phone_mask: str, kind: str, state_enc: bytes,
+def phone_mask(phone10: str) -> str:
+    """10 цифр без кода страны → «+7 ••• •••-12-34» — подпись в пушах и быстрый отбор кандидатов."""
+    return f"+7 ••• •••-{phone10[-4:-2]}-{phone10[-2:]}"
+
+
+def phone_pretty(phone10: str) -> str:
+    """10 цифр → «+7 916 123-45-67» (как отдаёт WB в personalinfo)."""
+    return f"+7 {phone10[:3]} {phone10[3:6]}-{phone10[6:8]}-{phone10[8:]}"
+
+
+async def find_account(s, uid: int, phone10: str) -> models.WbAccount | None:
+    """Аккаунт с этим номером. Маска — только 4 последние цифры, поэтому сверяем полный номер (acc.phone);
+    у старых аккаунтов без phone — по маске, как раньше."""
+    legacy = None
+    for acc in await s.scalars(select(models.WbAccount).where(
+            models.WbAccount.user_id == uid, models.WbAccount.phone_mask == phone_mask(phone10))
+            .order_by(models.WbAccount.id)):
+        digits = re.sub(r"\D", "", acc.phone or "")[-10:]
+        if digits == phone10:
+            return acc
+        if not digits and legacy is None:
+            legacy = acc
+    return legacy
+
+
+async def save_account(s, uid: int, phone10: str, kind: str, state_enc: bytes,
                        profile: dict | None = None, proxy_id: int | None = None) -> models.WbAccount:
     """Вход в аккаунт: тот же номер у пользователя — обновляем, иначе новый аккаунт.
     Прокси — тот, через который вошли (смена прокси = перелогин)."""
-    acc = await s.scalar(select(models.WbAccount).where(
-        models.WbAccount.user_id == uid, models.WbAccount.phone_mask == phone_mask))
+    acc = await find_account(s, uid, phone10)
     if acc is None:
-        acc = models.WbAccount(user_id=uid, phone_mask=phone_mask)
+        acc = models.WbAccount(user_id=uid, phone_mask=phone_mask(phone10))
         s.add(acc)
     acc.kind, acc.state_enc, acc.status, acc.proxy_id = kind, state_enc, "active", proxy_id
     acc.proxy_fails, acc.proxy_fail_at = 0, None  # счётчик сбоев был про старый вход/прокси
     apply_profile(acc, profile)
+    acc.phone = acc.phone or phone_pretty(phone10)  # полный номер — ключ поиска, должен быть всегда
     await s.flush()
     return acc
 

@@ -1,9 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError, rub, time, type Account, type LoginRequest, type Order, type Proxy } from "../api";
 
 const GROUP: Record<number, string> = { 1: "оформлен", 2: "сборка", 3: "в пути", 5: "в ПВЗ" };
 const ACTIVE = ["new", "running", "wait_code"];
+const STATUS: Record<string, string> = { active: "активен", relogin: "нужен вход", off: "выключен" };
+type Connected = { id: number; title: string; status: string };
+type Relogin = { a: Account; n: number };  // n — чтобы повторный клик по той же карточке снова сработал
 
 // сброс месячного лимита — 1-е число следующего месяца
 const resetDate = () => {
@@ -11,9 +14,12 @@ const resetDate = () => {
   return new Date(d.getFullYear(), d.getMonth() + 1, 1).toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit" });
 };
 
-function Connect({ onDone }: { onDone: () => void }) {
+function Connect({ onDone, relogin }: { onDone: () => void; relogin: Relogin | null }) {
   const qc = useQueryClient();
+  const box = useRef<HTMLDivElement>(null);
   const [phone, setPhone] = useState("");
+  const [already, setAlready] = useState<Connected | null>(null);  // 409: номер уже подключён — спрашиваем
+  const [reloginOf, setReloginOf] = useState<string | null>(null);  // «Войти заново» с карточки: без вопроса
   const [kind, setKind] = useState<"retail" | "business">("retail");
   const [code, setCode] = useState("");
   const [error, setError] = useState("");
@@ -32,10 +38,23 @@ function Connect({ onDone }: { onDone: () => void }) {
   const active = !!r && ACTIVE.includes(r.status);
   const fail = (e: unknown) => setError(e instanceof ApiError ? e.message : "ошибка");
   const start = useMutation({
-    mutationFn: () => api("/accounts/login", { method: "POST", body: { phone, kind, proxy_id: pid ? Number(pid) : null } }),
-    onSuccess: () => { setError(""); qc.invalidateQueries({ queryKey: ["login"] }); },
-    onError: fail,
+    mutationFn: (again: boolean) => api("/accounts/login",
+      { method: "POST", body: { phone, kind, proxy_id: pid ? Number(pid) : null, relogin: again } }),
+    onSuccess: () => { setError(""); setAlready(null); setReloginOf(null); qc.invalidateQueries({ queryKey: ["login"] }); },
+    onError: (e: unknown) => {
+      const d = e instanceof ApiError ? (e.detail as { code?: string; account?: Connected } | null) : null;
+      if (d?.code === "already_connected" && d.account) { setError(""); setAlready(d.account); } else fail(e);
+    },
   });
+  useEffect(() => {  // «Войти заново» на карточке: номер, тип и прокси этого аккаунта
+    if (!relogin) return;
+    const { a } = relogin;
+    setPhone((a.phone ?? "").replace(/\D/g, "").slice(-10));
+    setKind(a.kind);
+    setProxyId(!a.proxy ? "" : good.some((p) => p.id === a.proxy!.id) ? String(a.proxy.id) : null);
+    setReloginOf(a.title); setAlready(null); setError("");
+    box.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [relogin?.n]);
   const send = useMutation({
     mutationFn: () => api("/accounts/login/code", { method: "POST", body: { code } }),
     onSuccess: () => { setCode(""); setError(""); setSent(r?.id ?? null); qc.invalidateQueries({ queryKey: ["login"] }); },
@@ -62,11 +81,13 @@ function Connect({ onDone }: { onDone: () => void }) {
   }, [r?.id, r?.status]);
 
   return (
-    <div className="card connect">
-      <h2>Подключить аккаунт WB</h2>
+    <div className="card connect" ref={box}>
+      <h2>{reloginOf ? `Повторный вход: ${reloginOf}` : "Подключить аккаунт WB"}</h2>
       {!active ? (
-        <form className="add" onSubmit={(e) => { e.preventDefault(); start.mutate(); }}>
-          <div className="phone"><span>+7</span><input inputMode="tel" placeholder="900 123-45-67" value={phone} onChange={(e) => setPhone(e.target.value)} /></div>
+        <form className="add" onSubmit={(e) => { e.preventDefault(); start.mutate(!!reloginOf); }}>
+          {/* другой номер — уже не «повторный вход» этого аккаунта */}
+          <div className="phone"><span>+7</span><input inputMode="tel" placeholder="900 123-45-67" value={phone}
+            onChange={(e) => { setPhone(e.target.value); setAlready(null); setReloginOf(null); }} /></div>
           <select value={kind} onChange={(e) => setKind(e.target.value as "retail" | "business")}>
             <option value="retail">Обычный (розница)</option>
             <option value="business">Бизнес</option>
@@ -77,6 +98,12 @@ function Connect({ onDone }: { onDone: () => void }) {
           </select>
           <button className="btn" disabled={start.isPending || phone.replace(/\D/g, "").length < 10}>Получить код</button>
           {!chosen && <p className="full up-t small">Без прокси вход пойдёт через IP мониторинга. Свой прокси — в разделе «Прокси».</p>}
+          {already && <div className="full already">
+            <p>Этот номер уже подключён: <b>{already.title}</b> ({STATUS[already.status] ?? already.status}). Войти заново?
+              <span className="muted"> Сессия и прокси обновятся, имя и заказы сохранятся.</span></p>
+            <button type="button" className="btn sm" disabled={start.isPending} onClick={() => start.mutate(true)}>Войти заново</button>{" "}
+            <button type="button" className="link" onClick={() => setAlready(null)}>Отмена</button>
+          </div>}
         </form>
       ) : r.status === "wait_code" && sent !== r.id ? (
         <form className="add" onSubmit={(e) => { e.preventDefault(); send.mutate(); }}>
@@ -167,7 +194,7 @@ function Title({ a }: { a: Account }) {
   );
 }
 
-function Card({ a }: { a: Account }) {
+function Card({ a, onRelogin }: { a: Account; onRelogin: () => void }) {
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   // ↻: опрос сам глотает ошибки — запоминаем, что было при нажатии, и по итогу говорим, обновилось ли
@@ -211,7 +238,7 @@ function Card({ a }: { a: Account }) {
           {a.proxy_down && <div className="small up-t">прокси не ответил {a.proxy_fails} раз подряд, последний {time(a.proxy_fail_at)}</div>}
         </div>
         <span className={`pill ${a.status === "active" ? "ok" : "bad"}`}>
-          {a.status === "active" ? "активен" : a.status === "relogin" ? "нужен вход" : "выключен"}
+          {STATUS[a.status] ?? a.status}
         </span>
       </div>
       <div className="kv">
@@ -233,6 +260,7 @@ function Card({ a }: { a: Account }) {
       ) : a.limit_left != null && <div className="small">Остаток лимита скидки: <b>{rub(a.limit_left)}</b>{limitNote}</div>}
       <div className="acc-foot">
         <button className="link" onClick={() => setOpen(!open)}>Заказы ({visible(a.orders).length}) {open ? "▴" : "▾"}</button>
+        {a.status === "relogin" && <button className="btn sm" onClick={onRelogin}>Войти заново</button>}
         <button className="link danger" onClick={() => confirm(
           `Удалить аккаунт ${[a.label ?? a.name, a.phone ?? a.phone_mask].filter(Boolean).join(" ")}?\n\n`
           + "Сессия удалится, бизнес-цены и заказы под ним перестанут обновляться. Вход — заново по коду.") && del.mutate()}>Удалить</button>
@@ -248,6 +276,7 @@ export default function Accounts() {
     refetchInterval: (q) => (q.state.data?.some((a) => a.polling) ? 2000 : 60_000) });
   const list = accounts.data ?? [];
   const sum = (f: (a: Account) => number) => list.reduce((s, a) => s + f(a), 0);
+  const [relogin, setRelogin] = useState<Relogin | null>(null);
   return (
     <section>
       <h1>Аккаунты</h1>
@@ -259,8 +288,8 @@ export default function Accounts() {
         <div className="tile"><b className={list.some((a) => a.status !== "active") ? "up-t" : ""}>{list.filter((a) => a.status !== "active").length}</b><span>требуют входа</span></div>
       </div>
       <div className="acc-grid">
-        {list.map((a) => <Card key={a.id} a={a} />)}
-        <Connect onDone={() => qc.invalidateQueries({ queryKey: ["accounts"] })} />
+        {list.map((a) => <Card key={a.id} a={a} onRelogin={() => setRelogin({ a, n: Date.now() })} />)}
+        <Connect relogin={relogin} onDone={() => qc.invalidateQueries({ queryKey: ["accounts"] })} />
       </div>
     </section>
   );
