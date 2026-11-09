@@ -139,8 +139,8 @@ const daysAgo = (n: number) => iso(new Date(Date.now() - n * 86400_000));
 
 function HistoryTab({ a }: { a: AccountFull }) {
   const img = useImg();
-  const [from, setFrom] = useState("");
-  const [to, setTo] = useState("");
+  const [from, setFrom] = useState(() => daysAgo(6));  // по умолчанию — 7 дней, включая сегодня
+  const [to, setTo] = useState(() => iso(new Date()));
   const q = useQuery({ queryKey: ["accounts", a.id, "purchases", from, to],
     queryFn: () => api<Purchase[]>(`/accounts/${a.id}/purchases?${new URLSearchParams({ ...(from && { from }), ...(to && { to }) })}`) });
   const preset = (days: number | null) => { setFrom(days == null ? "" : daysAgo(days - 1)); setTo(days == null ? "" : iso(new Date())); };

@@ -413,16 +413,19 @@ async def save_account_state(s, account_id: int, st: dict) -> int:
 
 
 
+UPSERT_CHUNK = 1000  # строк за запрос: у Postgres/asyncpg лимит 32 767 параметров (≈ 3 000 строк по 10 полей)
+
+
 async def _upsert(s, model, account_id: int, key: str, rows: list[dict], cols, keep=()) -> None:
     """Вставка или обновление строк аккаунта по (account_id, key). keep — поля, которые пустое (None) не затирает."""
-    if not rows:
-        return
     rows = list({r[key]: r for r in rows}.values())  # дубль ключа в одном ответе — иначе ON CONFLICT упадёт
     t = model.__table__
-    stmt = pg_insert(model).values([{"account_id": account_id, key: r[key], **{c: r.get(c) for c in cols}} for r in rows])
-    await s.execute(stmt.on_conflict_do_update(
-        index_elements=[t.c.account_id, t.c[key]],
-        set_={c: func.coalesce(stmt.excluded[c], t.c[c]) if c in keep else stmt.excluded[c] for c in cols}))
+    for i in range(0, len(rows), UPSERT_CHUNK):
+        stmt = pg_insert(model).values([{"account_id": account_id, key: r[key], **{c: r.get(c) for c in cols}}
+                                        for r in rows[i:i + UPSERT_CHUNK]])
+        await s.execute(stmt.on_conflict_do_update(
+            index_elements=[t.c.account_id, t.c[key]],
+            set_={c: func.coalesce(stmt.excluded[c], t.c[c]) if c in keep else stmt.excluded[c] for c in cols}))
 
 
 async def upsert_purchases(s, account_id: int, items: list[dict]) -> None:

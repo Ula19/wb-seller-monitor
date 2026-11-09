@@ -415,21 +415,36 @@ async def browser_syncs_loop(bot) -> None:
     await _flag_loop(models.WbAccount.browser_sync, lambda: process_browser_sync(bot), "визитов в браузере")
 
 
+async def _purchases(acc: models.WbAccount) -> None:
+    """История заказов одного аккаунта. Пока полная загрузка ни разу не дошла до последней страницы
+    (purchases_full_at пуст) — грузим целиком: прерванная на середине первая загрузка иначе оставила бы старые
+    покупки недогруженными навсегда. Потом — только догрузка до страницы, где всё уже известно."""
+    known = None
+    if acc.purchases_full_at:
+        async with Session() as s:
+            known = set(await s.scalars(select(models.AccountPurchase.rid)
+                                        .where(models.AccountPurchase.account_id == acc.id)))
+    items, complete = await account_api.fetch_purchases(decrypt_json(acc.state_enc), await proxy_url(acc.proxy_id), known)
+    await _attach_offices(items, "office_id")
+    async with Session() as s:
+        await repo.upsert_purchases(s, acc.id, items)
+        if known is None and complete:
+            await s.execute(update(models.WbAccount).where(models.WbAccount.id == acc.id)
+                            .values(purchases_full_at=datetime.now(timezone.utc)))
+        await s.commit()
+    log.info("keeper: история заказов %s: %s, %d позиций", acc.title,
+             "догрузка" if known is not None else "полная" if complete else "полная, не до конца", len(items))
+
+
 async def purchases_job(bot=None) -> None:
     """История заказов (полученные) всех активных аккаунтов — раз в час; копим по rid. Сбой одного — дальше."""
     async with Session() as s:
         accounts = await repo.active_accounts(s)
     for acc in accounts:
         try:
-            items = await account_api.fetch_purchases(decrypt_json(acc.state_enc), await proxy_url(acc.proxy_id))
+            await _purchases(acc)
         except Exception as e:  # 401/прокси — разберётся опрос аккаунта (у него рефреш и тревоги)
             log.warning("keeper: история заказов %s не получена: %s: %s", acc.title, type(e).__name__, str(e)[:200])
-            continue
-        await _attach_offices(items, "office_id")
-        async with Session() as s:
-            await repo.upsert_purchases(s, acc.id, items)
-            await s.commit()
-        log.info("keeper: история заказов %s: %d позиций", acc.title, len(items))
 
 
 async def img_hosts_job() -> None:

@@ -23,7 +23,7 @@ VB_HISTORY_URL = "https://loyalty-balances.wildberries.ru/public/api/v1/bonuses/
 # история заказов: только полученные (status=32), листаем offset; Bearer + кука wbx-validation-key
 PURCHASES_URL = "https://astro.wildberries.ru/api/v1/shopper/api/v2/purchases/list?offset={offset}&status=32&limit={limit}"
 PURCHASES_PAGE = 100
-PURCHASES_MAX_PAGES = 50  # предохранитель: 5000 покупок
+PURCHASES_MAX_PAGES = 200  # предохранитель: 20 000 покупок (у живых аккаунтов уже 3 000+)
 GRADE_URL = "https://user-grade.wildberries.ru/api/v6/grade?curr=RUB&uf_loc=ru"
 ORDERS_URL = ("https://wbxoofex.wildberries.ru/api/v2/orders"
               "?limit=100&exclude_delivery_types=777,778&exclude_b2b=true&offset=0")
@@ -128,12 +128,15 @@ def _iso(s) -> datetime | None:
         return None
 
 
+def _purchase_items(d) -> list:
+    return ((((d or {}).get("data") or {}).get("purchases") or {}).get("data") or {}).get("Items") or []
+
+
 def parse_purchases(d) -> list[dict]:
     """astro purchases/list → полученные позиции. Цена = Price − PaymentSaleAmount (скидка Кошелька), копейки → ₽;
     Dt — дата статуса, для «получен» это «забрали»."""
-    items = (((d or {}).get("data") or {}).get("purchases") or {}).get("data") or {}
     out = []
-    for it in items.get("Items") or []:
+    for it in _purchase_items(d):
         if not it.get("Rid"):
             continue
         price, sale = it.get("Price"), it.get("PaymentSaleAmount") or 0
@@ -232,7 +235,7 @@ async def _client(state: dict, proxy: str | None):
             if r.status_code == 401:
                 raise Unauthorized(url.split("/")[2])
             r.raise_for_status()
-            return r.json()
+            return r.json() if r.content else None  # 2xx с пустым телом (у bonuses/history без истории)
         yield call, auth, with_vkey
 
 
@@ -260,17 +263,23 @@ async def fetch(state: dict, proxy: str | None = None) -> dict:
         return out
 
 
-async def fetch_purchases(state: dict, proxy: str | None = None) -> list[dict]:
-    """Вся история полученных заказов: листаем по PURCHASES_PAGE, пока страница полная."""
+async def fetch_purchases(state: dict, proxy: str | None = None,
+                          known: set[str] | None = None) -> tuple[list[dict], bool]:
+    """История полученных заказов, новые сверху, по PURCHASES_PAGE. → (позиции, дошли ли до конца).
+    known=None — полная загрузка до последней (неполной) страницы; known — догрузка: стоп на первой странице,
+    где все rid уже известны."""
     out: list[dict] = []
     async with _client(state, proxy) as (call, _, with_vkey):
         for page in range(PURCHASES_MAX_PAGES):
-            got = parse_purchases(await call("GET", PURCHASES_URL.format(offset=page * PURCHASES_PAGE,
-                                                                       limit=PURCHASES_PAGE), headers=with_vkey))
+            d = await call("GET", PURCHASES_URL.format(offset=page * PURCHASES_PAGE, limit=PURCHASES_PAGE),
+                           headers=with_vkey)
+            got = parse_purchases(d)
             out += got
-            if len(got) < PURCHASES_PAGE:
-                break
-    return out
+            if len(_purchase_items(d)) < PURCHASES_PAGE:
+                return out, True
+            if known is not None and all(p["rid"] in known for p in got):
+                return out, False
+    return out, False
 
 
 if __name__ == "__main__":  # self-check на формах ответов из HAR (суммы в копейках)
@@ -318,6 +327,7 @@ if __name__ == "__main__":  # self-check на формах ответов из H
     class R:
         def __init__(self, code, body):
             self.status_code, self.body = code, body
+            self.content = b"" if body is None else b"{}"
 
         def json(self):
             return self.body
@@ -327,7 +337,7 @@ if __name__ == "__main__":  # self-check на формах ответов из H
                 raise RuntimeError(f"HTTP {self.status_code}")
 
     def session(vb):
-        bodies = {BALANCE_URL: R(200, {"available_funds_rub": 19788800}), VB_URL: vb,
+        bodies = {BALANCE_URL: R(200, {"available_funds_rub": 19788800}), VB_URL: vb, VB_HISTORY_URL: R(200, None),
                   GRADE_URL: R(200, {"state": 0}), ORDERS_URL: R(200, {"data": []})}
         seen = []
 
@@ -352,10 +362,11 @@ if __name__ == "__main__":  # self-check на формах ответов из H
             S, seen = session(vb)
             with patch(f"{__name__}.AsyncSession", S), patch(f"{__name__}.web_proxy", lambda: None):
                 out = await fetch({**st, "cookies": [{"name": "wbx-validation-key", "value": "vk"}]})
-            assert (out["funds"], out["vb_points"], out["orders"]) == (197888, want, []), out
+            assert (out["funds"], out["vb_points"], out["orders"], out["vb_ops"]) == (197888, want, [], []), out
             assert (VB_URL, "wbx-validation-key=vk") in seen  # заголовки как у full-balance
-    with patch.object(log, "warning"):
+    with patch.object(log, "warning") as warn:
         asyncio.run(demo())
+    assert not any("истори" in str(c) for c in warn.call_args_list), warn.call_args_list  # пустая история — не сбой
 
     # история заказов (HAR боевого): цена = Price − PaymentSaleAmount — как в активных (A17: 17 094 − 1 026 = 16 068)
     item = lambda rid, **kw: {"Rid": rid, "NmId": 1656607451, "GoodsName": "Смартфон A17", "BrandName": "Samsung",
@@ -389,8 +400,8 @@ if __name__ == "__main__":  # self-check на формах ответов из H
     assert parse_pickup_code("Код получения 112396") == "112396" and parse_pickup_code("Код получения 1123") is None
     assert parse_pickup_code("") is None and parse_pickup_code(None) is None
 
-    async def pages():  # листаем по 100, пока страница полная
-        full = {"data": {"purchases": {"data": {"Items": [item(f"r{i}") for i in range(PURCHASES_PAGE)]}}}}
+    async def pages():  # листаем по 100, пока страница полная; догрузка — до страницы без новых rid
+        page = lambda k: {"data": {"purchases": {"data": {"Items": [item(f"r{k}_{i}") for i in range(PURCHASES_PAGE)]}}}}
         last = {"data": {"purchases": {"data": {"Items": [item("last")]}}}}
         urls = []
 
@@ -406,9 +417,18 @@ if __name__ == "__main__":  # self-check на формах ответов из H
 
             async def request(self, method, url, **kw):
                 urls.append(url)
-                return R(200, full if "offset=0&" in url else last)
+                off = int(url.split("offset=")[1].split("&")[0]) // PURCHASES_PAGE
+                return R(200, page(off) if off < 2 else last)  # 2 полные страницы + неполная
         with patch(f"{__name__}.AsyncSession", S), patch(f"{__name__}.web_proxy", lambda: None):
-            got = await fetch_purchases(st)
-        assert len(got) == PURCHASES_PAGE + 1 and len(urls) == 2 and "offset=100&status=32&limit=100" in urls[1], urls
+            got, complete = await fetch_purchases(st)
+            assert len(got) == 2 * PURCHASES_PAGE + 1 and complete and len(urls) == 3, urls
+            assert "offset=100&status=32&limit=100" in urls[1]
+            urls.clear()
+            known = {p["rid"] for p in got if p["rid"].startswith("r0_")}  # первая страница уже есть
+            got, complete = await fetch_purchases(st, known={"r0_1"})  # на 1-й странице есть новые — листаем дальше
+            assert len(urls) == 3 and complete
+            urls.clear()
+            got, complete = await fetch_purchases(st, known=known)
+            assert len(urls) == 1 and not complete and len(got) == PURCHASES_PAGE  # всё известно — стоп
     asyncio.run(pages())
     print("ok")

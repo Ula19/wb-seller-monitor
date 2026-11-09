@@ -184,6 +184,9 @@ class WbAccount(Base):
     browser_sync: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     pickup_code: Mapped[str | None] = mapped_column(String(16), nullable=True)  # код получения в ПВЗ
     pickup_code_date: Mapped[date | None] = mapped_column(Date, nullable=True)  # день МСК, на который код (до 00:00)
+    # история заказов загружена целиком (до последней страницы) — дальше раз в час только догрузка новых
+    purchases_full_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    visit_error: Mapped[str | None] = mapped_column(String(128), nullable=True)  # почему визит в браузере не удался
     proxy_fail_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # свой выход в WB: вход, рефреш, состояние, personalinfo. Меняется только перелогином
     proxy_id: Mapped[int | None] = mapped_column(
