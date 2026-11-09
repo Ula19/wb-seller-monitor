@@ -372,7 +372,7 @@ async def hide_order(account_id: int, rid: str, body: OrderIn, u=Depends(user), 
     return {"ok": True}
 
 
-@app.delete("/api/accounts/{account_id}")
+@app.delete("/api/accounts/{account_id:int}")  # :int — иначе перехватит DELETE /api/accounts/login
 async def delete_account(account_id: int, u=Depends(user), s=Depends(db)):
     acc = await s.get(models.WbAccount, account_id)
     if acc is None or acc.user_id != u.telegram_id:
@@ -394,7 +394,12 @@ class CodeIn(BaseModel):
 
 def _request_view(r: models.WbLoginRequest | None):
     return r and {"id": r.id, "status": r.status, "kind": r.kind, "error": r.error,
-                  "account_id": r.account_id, "created_at": r.created_at}
+                  "account_id": r.account_id, "created_at": r.created_at,
+                  "sent_via": r.sent_via, "resend_after": r.resend_after, "resend": r.resend}
+
+
+class ResendIn(BaseModel):
+    via: Literal["push", "sms"]
 
 
 @app.post("/api/accounts/login", status_code=201)
@@ -421,6 +426,28 @@ async def start_login(body: LoginIn, u=Depends(user), s=Depends(db)):
 async def login_status(u=Depends(user), s=Depends(db)):
     """Последняя заявка: new (в очереди) → running → wait_code (введите код) → done | error."""
     return _request_view(await repo.last_login_request(s, u.telegram_id))
+
+
+@app.delete("/api/accounts/login")
+async def cancel_login(u=Depends(user), s=Depends(db)):
+    """Отмена входа в любом активном состоянии; worker закроет браузер на ближайшей проверке."""
+    if not await repo.cancel_login_request(s, u.telegram_id):
+        raise HTTPException(404, "активного входа нет")
+    await s.commit()
+    return {"ok": True}
+
+
+@app.post("/api/accounts/login/resend")
+async def login_resend(body: ResendIn, u=Depends(user), s=Depends(db)):
+    """Прислать код заново (пуш или СМС): worker нажмёт «Получить новый код» на странице WB ID."""
+    r = await repo.last_login_request(s, u.telegram_id)
+    if r is None or r.status != "wait_code":
+        raise HTTPException(409, "код сейчас не ждём")
+    if r.resend_after and (left := (r.resend_after - datetime.now(timezone.utc)).total_seconds()) > 0:
+        raise HTTPException(409, f"можно через {int(left) + 1} с")
+    r.resend = body.via
+    await s.commit()
+    return {"ok": True}
 
 
 @app.post("/api/accounts/login/code")

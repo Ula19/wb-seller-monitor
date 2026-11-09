@@ -9,7 +9,7 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from app.config import settings
 from app.crypto import decrypt_json, encrypt_json
@@ -180,13 +180,14 @@ async def poll_account(bot, acc: models.WbAccount) -> None:
 LOGIN_POLL_SEC = 2  # как часто worker смотрит новые заявки
 
 
-async def _set_request(req_id: int, **values) -> None:
+async def _set_request(req_id: int, **values) -> bool:
+    """Правка заявки, если её не отменили с сайта (иначе статус вернулся бы в активный, а при уже начатой новой
+    заявке упал бы uq_login_active). False — заявка отменена."""
     async with Session() as s:
-        row = await s.get(models.WbLoginRequest, req_id)
-        if row is not None:
-            for k, v in values.items():
-                setattr(row, k, v)
-            await s.commit()
+        res = await s.execute(update(models.WbLoginRequest).where(
+            models.WbLoginRequest.id == req_id, models.WbLoginRequest.status != "cancelled").values(**values))
+        await s.commit()
+    return res.rowcount > 0
 
 
 async def process_login_request(bot=None) -> bool:
@@ -198,29 +199,46 @@ async def process_login_request(bot=None) -> bool:
         req = await repo.next_login_request(s)
         if req is None:
             return False
-        req.status = "running"
-        await s.commit()
+    if not await _set_request(req.id, status="running"):  # отменили, пока брали из очереди
+        return True
     asked = got = False
 
     async def get_code():
+        """Код с сайта, Resend (просьба прислать заново) или LoginCancelled. None — не дождались."""
         nonlocal asked, got
         asked = True
-        await _set_request(req.id, status="wait_code")
+        if not await _set_request(req.id, status="wait_code"):  # отменили, пока открывали WB
+            raise web_session.LoginCancelled()
         loop = asyncio.get_running_loop()
         deadline = loop.time() + CODE_TIMEOUT
         while loop.time() < deadline:
             await asyncio.sleep(1)
             async with Session() as s:
-                code = await s.scalar(select(models.WbLoginRequest.code).where(models.WbLoginRequest.id == req.id))
-            if code:
+                row = (await s.execute(select(models.WbLoginRequest.status, models.WbLoginRequest.code,
+                                              models.WbLoginRequest.resend)
+                                       .where(models.WbLoginRequest.id == req.id))).one()
+            if row.status == "cancelled":
+                raise web_session.LoginCancelled()
+            if row.resend:
+                await _set_request(req.id, resend=None)
+                return web_session.Resend(row.resend)
+            if row.code:
                 got = True
                 await _set_request(req.id, status="running")
-                return code
+                return row.code
         return None
+
+    async def on_sent(via, until):
+        await _set_request(req.id, sent_via=via, resend_after=until)
 
     acc = None
     try:
-        state = await web_session.login(req.phone, get_code, await proxy_url(req.proxy_id))
+        state = await web_session.login(req.phone, get_code, await proxy_url(req.proxy_id), on_sent)
+        async with Session() as s:
+            cancelled = await s.scalar(select(models.WbLoginRequest.status)
+                                       .where(models.WbLoginRequest.id == req.id)) == "cancelled"
+        if cancelled:  # отменили уже после ввода кода — аккаунт не сохраняем
+            raise web_session.LoginCancelled()
         if state:
             acc = await save_login(req.user_id, req.phone, req.kind, state, req.proxy_id)
             status, error, acc_id = "done", None, acc.id
@@ -229,6 +247,9 @@ async def process_login_request(bot=None) -> bool:
             error = ("неверный код или WB не пустил — попробуйте ещё раз" if got
                      else f"код не введён за {CODE_TIMEOUT // 60} мин" if asked
                      else "WB не показал форму входа (антибот) — попробуйте позже")
+    except web_session.LoginCancelled:  # браузер уже закрыт (finally в login), заявку отменил сайт
+        log.info("keeper: заявка на вход %s (пользователь %s): отменена с сайта", req.id, req.user_id)
+        return True
     except web_session.LoginFailed as e:  # код введён, вход не завершён — причина по кукам
         status, error, acc_id = "error", str(e), None
     except ProxyDown as e:

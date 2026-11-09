@@ -390,9 +390,18 @@ async def next_login_request(s) -> models.WbLoginRequest | None:
 
 
 async def finish_login_request(s, req_id: int, status: str, *, error=None, account_id=None) -> None:
-    """Итог заявки; номер и код больше не нужны — стираем."""
-    await s.execute(update(models.WbLoginRequest).where(models.WbLoginRequest.id == req_id).values(
-        status=status, error=error, account_id=account_id, phone=None, code=None))
+    """Итог заявки; номер и код больше не нужны — стираем. Отменённую с сайта не трогаем."""
+    await s.execute(update(models.WbLoginRequest).where(
+        models.WbLoginRequest.id == req_id, models.WbLoginRequest.status != "cancelled").values(
+        status=status, error=error, account_id=account_id, phone=None, code=None, resend=None))
+
+
+async def cancel_login_request(s, uid: int) -> bool:
+    """Отмена активной заявки пользователя (условно — уже завершённую не затираем). False — активной нет."""
+    res = await s.execute(update(models.WbLoginRequest).where(
+        models.WbLoginRequest.user_id == uid, models.WbLoginRequest.status.in_(LOGIN_ACTIVE)).values(
+        status="cancelled", phone=None, code=None, resend=None))
+    return res.rowcount > 0
 
 
 async def fail_stale_logins(s) -> int:

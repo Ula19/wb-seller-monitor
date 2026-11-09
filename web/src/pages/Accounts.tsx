@@ -41,6 +41,22 @@ function Connect({ onDone }: { onDone: () => void }) {
     onSuccess: () => { setCode(""); setError(""); setSent(r?.id ?? null); qc.invalidateQueries({ queryKey: ["login"] }); },
     onError: fail,
   });
+  const reset = () => { setPhone(""); setCode(""); setError(""); setSent(null); qc.invalidateQueries({ queryKey: ["login"] }); };
+  // 404 — вход уже закончился сам: просто обновить статус
+  const cancel = useMutation({ mutationFn: () => api("/accounts/login", { method: "DELETE" }), onSettled: reset });
+  const resend = useMutation({
+    mutationFn: (via: "push" | "sms") => api("/accounts/login/resend", { method: "POST", body: { via } }),
+    onSuccess: () => { setError(""); qc.invalidateQueries({ queryKey: ["login"] }); },
+    onError: fail,
+  });
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {  // таймер «Отправить ещё раз через 0:42» — раз в секунду, пока ждём код
+    if (r?.status !== "wait_code") return;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [r?.status]);
+  const left = r?.resend_after ? Math.ceil((new Date(r.resend_after).getTime() - now) / 1000) : 0;
+  const cancelBtn = <button type="button" className="link danger" disabled={cancel.isPending} onClick={() => cancel.mutate()}>Отменить</button>;
   useEffect(() => {  // подключён → обновить список и очистить форму
     if (r?.status === "done") { onDone(); setPhone(""); }
   }, [r?.id, r?.status]);
@@ -64,12 +80,23 @@ function Connect({ onDone }: { onDone: () => void }) {
         </form>
       ) : r.status === "wait_code" && sent !== r.id ? (
         <form className="add" onSubmit={(e) => { e.preventDefault(); send.mutate(); }}>
-          <p className="full">WB отправил код — пуш в приложение Wildberries или SMS. Введите его:</p>
+          <p className="full">{r.sent_via === "SMS" ? "Код отправлен по СМС." : r.sent_via === "PUSH" ? "Код отправлен: в приложение WB."
+            : "WB отправил код — пуш в приложение Wildberries или SMS."} Введите его:</p>
           <input inputMode="numeric" autoFocus placeholder="Код" value={code} onChange={(e) => setCode(e.target.value)} />
           <button className="btn" disabled={send.isPending || code.length < 4}>Войти</button>
+          <p className="full small resend">
+            {r.resend || resend.isPending ? <span className="muted">Запрашиваю новый код…</span>
+              : left > 0 ? <span className="muted">Отправить ещё раз через {Math.floor(left / 60)}:{String(left % 60).padStart(2, "0")}</span>
+              : <>
+                <button type="button" className="link" onClick={() => resend.mutate(r.sent_via === "SMS" ? "sms" : "push")}>Отправить ещё раз</button>
+                {r.sent_via !== "SMS" && <> · <button type="button" className="link" onClick={() => resend.mutate("sms")}>Прислать по СМС</button></>}
+              </>}
+            {" · "}{cancelBtn}
+          </p>
         </form>
       ) : (
-        <p><span className="spin" /> {r.status === "wait_code" ? "Проверяю код…" : r.status === "new" ? "Запускаю вход… (если идёт другой вход — подождёт его)" : "Открываю WB и ввожу номер… (до 1–2 минут)"}</p>
+        <p><span className="spin" /> {r.status === "wait_code" || sent === r.id ? "Проверяю код…" : r.status === "new" ? "Запускаю вход… (если идёт другой вход — подождёт его)" : "Открываю WB и ввожу номер… (до 1–2 минут)"}
+          {" "}{cancelBtn}</p>
       )}
       {r?.status === "error" && !start.isPending && <p className="err">Не вышло: {r.error}</p>}
       {r?.status === "done" && <p className="ok-t">Аккаунт подключён ✓</p>}

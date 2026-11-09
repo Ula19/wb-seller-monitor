@@ -12,6 +12,8 @@ import asyncio
 import json
 import logging
 import random
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 from app.config import settings
@@ -31,10 +33,122 @@ SELLER_URL = "https://www.wildberries.ru/seller/{}"
 # служебные заголовки запроса браузера, которые curl ставит сам (cookie — свои)
 SKIP_HEADERS = {"host", "content-length", "connection", "cookie"}
 CALLBACK_WAIT_SEC = 45  # после кода: ждём callback (и экран согласия WB ID у нового аккаунта)
+# страница кода WB ID (тексты из id.wb.ru/login/assets/locales/wb/ru.json)
+SEND_CODE_PATH = "/auth/flow/send-code"  # ответ: {"confirmationType": "PUSH"|"SMS", "denyResendUntil": "<unix>"}
+CODE_INPUT_SELS = ("input[autocomplete=one-time-code]", "input[inputmode=numeric]", "input")
+RESEND_NAME = "Получить новый код"
+CHOOSE_TITLE = "Куда отправить код?"
+VIA_OPTION = {"sms": "На телефон в СМС", "push": "В колокольчик на сайт и в приложение Wildberries"}
+TOO_MANY = "Слишком много попыток"
 
 
 class LoginFailed(Exception):
     """Код введён, но вход не завершился; текст — для пользователя (почему)."""
+
+
+class LoginCancelled(Exception):
+    """Вход отменили с сайта — бросает get_code; login() закрывает браузер."""
+
+
+@dataclass(frozen=True)
+class Resend:
+    """get_code вернул просьбу прислать код заново вместо кода."""
+    via: str  # push | sms
+
+
+def parse_send_code(d) -> tuple[str | None, datetime | None]:
+    """Ответ send-code → (куда ушёл код PUSH/SMS, до какого времени WB не даст повторить)."""
+    if not isinstance(d, dict):
+        return None, None
+    via = d.get("confirmationType")
+    until = str(d.get("denyResendUntil") or "")
+    return (str(via)[:8] if via else None,
+            datetime.fromtimestamp(int(until), timezone.utc) if until.isdigit() else None)
+
+
+def _send_code_listener(on_sent):
+    """Обработчик page.on("response"): ответ send-code → on_sent(via, until). Сбой — только в лог."""
+    async def handler(resp):
+        if SEND_CODE_PATH not in resp.url:
+            return
+        try:
+            via, until = parse_send_code(await resp.json())
+            log.info("веб-логин: WB отправил код: %s, повтор после %s", via, until)
+            await on_sent(via, until)
+        except Exception as e:
+            log.warning("веб-логин: ответ send-code не разобран: %s: %s", type(e).__name__, str(e)[:200])
+    return handler
+
+
+async def _page_text(page) -> str:
+    try:
+        return " ".join((await asyncio.wait_for(page.inner_text("body"), 5)).split())
+    except Exception as e:
+        return f"<текст не прочитан: {type(e).__name__}>"
+
+
+async def _first_visible(locator):
+    """Первый видимый элемент локатора или None (страница в переходе — тоже None)."""
+    try:
+        for i in range(await locator.count()):
+            if await locator.nth(i).is_visible():
+                return locator.nth(i)
+    except Exception:
+        pass
+    return None
+
+
+async def _focus_code_input(page) -> None:
+    """Клик в поле кода: после первой отправки фокус там ставит сам WB, после повторной — он на нажатой кнопке."""
+    for sel in CODE_INPUT_SELS:
+        if el := await _first_visible(page.locator(sel)):
+            await el.click()
+            return
+    log.warning("веб-логин: поле кода не нашёл — ввожу без клика")
+
+
+async def _resend(page, via: str) -> None:
+    """«Получить новый код» → (если WB спросил) «Куда отправить код?» → нужный вариант. Куда ушло на самом деле —
+    из ответа send-code (_send_code_listener). Кнопки нет — не падаем, ждём код дальше."""
+    btn = None
+    for role in ("button", "link"):
+        if btn := await _first_visible(page.get_by_role(role, name=RESEND_NAME, exact=True)):
+            break
+    if btn is None:
+        log.warning("веб-логин: кнопки «%s» нет (таймер ещё идёт?) — жду код дальше", RESEND_NAME)
+        return
+    await btn.click()
+    did = f"«{RESEND_NAME}»"
+    await asyncio.sleep(3)
+    if await _first_visible(page.get_by_text(CHOOSE_TITLE)):
+        if opt := await _first_visible(page.get_by_text(VIA_OPTION[via], exact=True)):
+            await asyncio.sleep(random.uniform(0.5, 1.5))
+            await opt.click()
+            did += f" → «{VIA_OPTION[via]}»"
+            await asyncio.sleep(2)
+        else:
+            did += f" → выбор есть, варианта «{VIA_OPTION[via]}» нет"
+    else:
+        did += " (выбора нет — тем же способом)"
+    text = await _page_text(page)
+    log.info("веб-логин: повторный код: нажал %s; страница: %s", did, text[:200])
+    if TOO_MANY in text:
+        raise LoginFailed(f"WB: «{TOO_MANY}» — подождите и начните вход заново")
+
+
+async def _enter_code(page, get_code) -> bool:
+    """Ждём код с сайта (или просьбу прислать заново) и вводим его. False — код не пришёл."""
+    while True:
+        got = await get_code()  # у каждого ожидания свой таймаут — после повторной отправки отсчёт заново
+        if isinstance(got, Resend):
+            await _resend(page, got.via)
+            continue
+        if not got:
+            log.warning("веб-логин: код не получен")
+            return False
+        await _focus_code_input(page)
+        await page.keyboard.type(str(got).strip(), delay=120)
+        return True
 
 
 def web_proxy() -> str | None:
@@ -170,8 +284,9 @@ async def _profile(page) -> dict | None:
         return None
 
 
-async def login(phone: str, get_code, proxy: str | None = None) -> dict | None:
-    """Логин аккаунта WB по телефону. get_code() — корутина, возвращает код из пуша.
+async def login(phone: str, get_code, proxy: str | None = None, on_sent=None) -> dict | None:
+    """Логин аккаунта WB по телефону. get_code() — корутина: код, Resend(via) (прислать заново) или
+    LoginCancelled (отмена). on_sent(via, until) — куда WB отправил код и когда можно повторить.
     proxy — прокси аккаунта (нет — общий web_proxy()).
 
     Возвращает storageState (банку кук) или None, если до кода не дошли (форма, код не пришёл).
@@ -185,6 +300,8 @@ async def login(phone: str, get_code, proxy: str | None = None) -> dict | None:
         try:
             ctx = await browser.new_context(locale="ru-RU")
             page = await ctx.new_page()
+            if on_sent:
+                page.on("response", _send_code_listener(on_sent))
             # прогрев: сначала главная (антибот-куки), потом строгая страница логина
             await _open_home(page)
             await asyncio.sleep(6)
@@ -200,11 +317,8 @@ async def login(phone: str, get_code, proxy: str | None = None) -> dict | None:
             await asyncio.sleep(0.5)
             await page.click("button[type=submit]")
             await asyncio.sleep(6)
-            code = await get_code()
-            if not code:
-                log.warning("веб-логин: код не получен")
+            if not await _enter_code(page, get_code):
                 return None
-            await page.keyboard.type(str(code).strip(), delay=120)
             state = await _finish_login(ctx, page)
             from app.wb.account_api import PROFILE_KEY
             state[PROFILE_KEY] = await _profile(page)  # keeper заберёт и не сохранит в сессию
@@ -244,11 +358,10 @@ async def _finish_login(ctx, page) -> dict:
     if is_logged(state):
         log.info("веб-логин: успех, куки аккаунта получены")
         return state
-    try:  # следующий незнакомый экран будет виден в логе сразу
-        text = " ".join((await asyncio.wait_for(page.inner_text("body"), 5)).split())[:200]
-    except Exception as e:
-        text = f"<текст не прочитан: {type(e).__name__}>"
+    text = (await _page_text(page))[:200]  # следующий незнакомый экран будет виден в логе сразу
     log.warning("веб-логин: вход не завершён, страница %s: %s", page.url, text)
+    if TOO_MANY in text:
+        raise LoginFailed(f"WB: «{TOO_MANY}» — подождите и начните вход заново")
     sso = any(c.get("name") == "wbid-refresh" and "id.wb.ru" in c.get("domain", "") for c in state.get("cookies", []))
     raise LoginFailed("код принят, но WB не завершил вход на сайт — попробуйте ещё раз" if sso
                       else "код не принят — проверьте код")
@@ -453,4 +566,121 @@ if __name__ == "__main__":  # self-check чистых функций (без б�
     last = warn.call_args_list[-1].args  # URL и первые 200 символов текста страницы — в лог
     assert last[1] == "https://www.wildberries.ru/" and last[2].startswith("Wildberries получит доступ к данным") \
         and len(last[2]) == 200, last
+
+    # повторная отправка кода и ввод: заглушка страницы кода WB ID
+    class El:
+        def __init__(self, pg, key, visible=True, on_click=None):
+            self.pg, self.key, self.visible, self.on_click = pg, key, visible, on_click
+
+        async def is_visible(self):
+            return self.visible
+
+        async def click(self):
+            self.pg.focus = self.key
+            self.pg.clicks.append(self.key)
+            if self.on_click:
+                self.on_click()
+
+    class Loc:
+        def __init__(self, els):
+            self.els = els
+
+        async def count(self):
+            return len(self.els)
+
+        def nth(self, i):
+            return self.els[i]
+
+    class Kb:
+        def __init__(self, pg):
+            self.pg = pg
+
+        async def type(self, text, delay=0):
+            self.pg.typed.append((self.pg.focus, text))
+
+    class CodePage:
+        def __init__(self, choice=True, button=True, after_text="Введите код из СМС"):
+            self.focus, self.clicks, self.typed, self.els = "button:" + RESEND_NAME, [], [], {}
+            self.keyboard, self.text = Kb(self), "Введите код из уведомления"
+            self.add("css:input", visible=False)  # скрытый input — не он
+            self.add("css:input[inputmode=numeric]")
+            if button:
+                self.add("button:" + RESEND_NAME, on_click=lambda: choice and self.show_choice())
+            self.after_text = after_text
+
+        def add(self, key, **kw):
+            self.els.setdefault(key, []).append(El(self, key, **kw))
+
+        def show_choice(self):
+            self.add("text:" + CHOOSE_TITLE)
+            for v in VIA_OPTION.values():
+                self.add("text:" + v, on_click=lambda: setattr(self, "text", self.after_text))
+
+        def locator(self, sel):
+            return Loc(self.els.get("css:" + sel, []))
+
+        def get_by_role(self, role, name, exact=False):
+            return Loc(self.els.get(f"{role}:{name}", []))
+
+        def get_by_text(self, text, exact=False):
+            return Loc(self.els.get("text:" + text, []))
+
+        async def inner_text(self, sel):
+            return self.text
+
+    def codes(*answers):
+        it = iter(answers)
+
+        async def get_code():
+            return next(it)
+        return get_code
+
+    async def demo2():
+        with patch.object(asyncio, "sleep", nosleep):
+            # с выбором: «Получить новый код» → «На телефон в СМС» → фокус в поле кода → ввод
+            pg = CodePage()
+            assert await _enter_code(pg, codes(Resend("sms"), " 1234 "))
+            assert pg.clicks == ["button:" + RESEND_NAME, "text:" + VIA_OPTION["sms"], "css:input[inputmode=numeric]"]
+            assert pg.typed == [("css:input[inputmode=numeric]", "1234")]  # код ушёл в поле, а не в кнопку
+            # без выбора — ушло тем же способом, вариант не жмём; one-time-code главнее numeric
+            pg = CodePage(choice=False)
+            pg.add("css:input[autocomplete=one-time-code]")
+            assert await _enter_code(pg, codes(Resend("push"), "5678"))
+            assert pg.clicks == ["button:" + RESEND_NAME, "css:input[autocomplete=one-time-code]"]
+            assert pg.typed == [("css:input[autocomplete=one-time-code]", "5678")]
+            # кнопки нет (таймер) — не падаем, ждём код; поля нет — warning и ввод как есть
+            pg = CodePage(button=False)
+            pg.els.pop("css:input[inputmode=numeric]")
+            assert await _enter_code(pg, codes(Resend("push"), "1111")) and pg.typed == [(pg.focus, "1111")]
+            assert await _enter_code(CodePage(), codes(None)) is False  # код не пришёл
+            # «Слишком много попыток» после повтора → LoginFailed с этим текстом
+            pg = CodePage(after_text="Слишком много попыток — запросите код ещё раз")
+            try:
+                await _enter_code(pg, codes(Resend("push"), "1"))
+                raise AssertionError("ждали LoginFailed")
+            except LoginFailed as e:
+                assert TOO_MANY in str(e) and not pg.typed
+        # ответ send-code → on_sent; чужие ответы и битый JSON — мимо
+        got = []
+
+        async def on_sent(via, until):
+            got.append((via, until))
+
+        class Resp:
+            def __init__(self, url, body):
+                self.url, self.body = url, body
+
+            async def json(self):
+                if self.body is None:
+                    raise ValueError("не json")
+                return self.body
+        h = _send_code_listener(on_sent)
+        await h(Resp("https://id.wb.ru/wb-auth/v2/auth/flow/send-code", {"confirmationType": "SMS", "denyResendUntil": "1794220301"}))
+        await h(Resp("https://id.wb.ru/other", {"confirmationType": "PUSH"}))
+        await h(Resp("https://id.wb.ru/wb-auth/v2/auth/flow/send-code", None))
+        assert got == [("SMS", datetime(2026, 11, 9, 10, 31, 41, tzinfo=timezone.utc))], got
+        assert parse_send_code({}) == (None, None) and parse_send_code(None) == (None, None)
+
+    with patch.object(log, "warning"), patch.object(log, "info"):
+        asyncio.run(demo2())
     print("ok")

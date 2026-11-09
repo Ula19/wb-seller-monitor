@@ -247,7 +247,7 @@ class Target(Base):
 class WbLoginRequest(Base):
     """Заявка сайта на вход в аккаунт WB. api пишет, worker выполняет (браузер есть только у него).
 
-    status: new → running → wait_code → done | error. Активная — одна на пользователя
+    status: new → running → wait_code → done | error | cancelled (отмена с сайта). Активная — одна на пользователя
     (частичный уникальный индекс). Номер и код стираются, когда заявка завершилась.
     """
 
@@ -267,6 +267,9 @@ class WbLoginRequest(Base):
         Integer, ForeignKey("wb_accounts.id", ondelete="SET NULL"), nullable=True)
     proxy_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("proxies.id", ondelete="SET NULL"), nullable=True)
+    resend: Mapped[str | None] = mapped_column(String(8), nullable=True)  # просьба сайта: push | sms
+    sent_via: Mapped[str | None] = mapped_column(String(8), nullable=True)  # куда WB отправил код: PUSH | SMS
+    resend_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)  # раньше WB не даст
     created_at: Mapped[datetime] = _now()
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

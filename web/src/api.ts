@@ -68,8 +68,9 @@ export type Proxy = {
   checking: boolean; checked_at: string | null; created_at: string; used_by: string[];
 };
 export type LoginRequest = {
-  id: number; status: "new" | "running" | "wait_code" | "done" | "error"; kind: string;
+  id: number; status: "new" | "running" | "wait_code" | "done" | "error" | "cancelled"; kind: string;
   error: string | null; account_id: number | null; created_at: string;
+  sent_via: "PUSH" | "SMS" | null; resend_after: string | null; resend: "push" | "sms" | null;
 } | null;
 
 export const rub = (n: number | null | undefined) => (n == null ? "—" : `${n.toLocaleString("ru-RU")} ₽`);
