@@ -456,7 +456,7 @@ async def purchases_job(bot=None) -> None:
 
 # ---------- уведомления колокольчика WB ----------
 NOTICE_FULL_SEC = 3600  # раз в час лента без условия: прочитанные в приложении WB счётчик не покажет
-NOTICES_CHECK = "notices_check"  # app_settings: «Проверить сейчас» — {state: requested|running|done, new, failed, at}
+NOTICES_CHECK = repo.NOTICES_CHECK
 
 
 async def _notices(acc: models.WbAccount, state: dict, proxy: str | None, force: bool = False) -> int:

@@ -98,6 +98,12 @@ export type LoginRequest = {
   sent_via: "PUSH" | "SMS" | null; resend_after: string | null; resend: "push" | "sms" | null;
 } | null;
 
+export type Notice = {
+  id: number; account_id: number; account_title: string; topic_id: string | null; title: string | null;
+  text: string | null; url: string | null; dt: string | null; read_at: string | null;
+};
+export type NoticeCheck = { state: "requested" | "running" | "done"; new?: number; failed?: string[]; at: string } | null;
+
 export const rub = (n: number | null | undefined) => (n == null ? "—" : `${n.toLocaleString("ru-RU")} ₽`);
 export const time = (iso: string | number | null) => {
   if (iso == null) return "—";

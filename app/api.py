@@ -793,6 +793,61 @@ async def certificates(ids: list[int] = Query(..., max_length=500), u=Depends(us
             for c, a in rows.all()]
 
 
+# ---------- уведомления WB (колокольчик) ----------
+NOTICE_FIELDS = ("id", "account_id", "topic_id", "title", "text", "url", "dt", "read_at")
+
+
+@app.get("/api/notices")
+async def notices(limit: int = Query(50, ge=1, le=500), offset: int = Query(0, ge=0), u=Depends(user), s=Depends(db)):
+    """Лента всех аккаунтов, новые сверху. ponytail: offset — при новых сверху «Показать ещё» может повторить строку
+    (сайт убирает дубли по id); курсор по (dt, id) — если станет мешать."""
+    m, a = models.AccountNotice, models.WbAccount
+    rows = await s.execute(select(m, a).join(a, a.id == m.account_id).where(a.user_id == u.telegram_id)
+                           .order_by(m.dt.desc().nulls_last(), m.id.desc()).limit(limit).offset(offset))
+    return [{**{f: getattr(n, f) for f in NOTICE_FIELDS}, "account_title": acc.title} for n, acc in rows.all()]
+
+
+async def _check_state(s) -> dict | None:
+    raw = await repo.get_setting(s, repo.NOTICES_CHECK)
+    return json.loads(raw) if raw else None
+
+
+@app.get("/api/notices/unread")
+async def notices_unread(u=Depends(user), s=Depends(db)):
+    """Бейдж колокольчика + состояние «Проверить сейчас» — одним запросом (сайт опрашивает раз в 30 с)."""
+    m, a = models.AccountNotice, models.WbAccount
+    n = await s.scalar(select(func.count()).select_from(m).join(a, a.id == m.account_id)
+                       .where(a.user_id == u.telegram_id, m.read_at.is_(None)))
+    return {"count": n, "check": await _check_state(s)}
+
+
+class ReadIn(BaseModel):
+    ids: list[int] | None = Field(None, max_length=1000)  # None — все
+
+
+@app.post("/api/notices/read")
+async def notices_read(body: ReadIn, u=Depends(user), s=Depends(db)):
+    m = models.AccountNotice
+    mine = select(models.WbAccount.id).where(models.WbAccount.user_id == u.telegram_id)
+    q = update(m).where(m.account_id.in_(mine), m.read_at.is_(None))
+    if body.ids is not None:
+        q = q.where(m.id.in_(body.ids))
+    res = await s.execute(q.values(read_at=func.now()))
+    await s.commit()
+    return {"count": res.rowcount}
+
+
+@app.post("/api/notices/check")
+async def notices_check(u=Depends(user), s=Depends(db)):
+    """«↻ Проверить сейчас»: флаг для worker'а (API в WB не ходит). Уже идёт — 409."""
+    st = await _check_state(s)
+    if st and st.get("state") in ("requested", "running"):
+        raise HTTPException(409, "проверка уже идёт")
+    await repo.set_setting(s, repo.NOTICES_CHECK, json.dumps({"state": "requested", "at": datetime.now(timezone.utc).isoformat()}))
+    await s.commit()
+    return {"ok": True}
+
+
 @app.get("/api/status")
 async def status(u=Depends(user), s=Depends(db)):
     raw = await repo.get_setting(s, repo.HEARTBEAT_KEY)

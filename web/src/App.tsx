@@ -9,6 +9,7 @@ import Account from "./pages/Account";
 import Events from "./pages/Events";
 import Targets from "./pages/Targets";
 import Proxies from "./pages/Proxies";
+import Bell from "./Bell";
 
 const NAV = [
   { to: "/items", label: "Товары", icon: "▦" },
@@ -50,7 +51,7 @@ export default function App() {
   return (
     <div className="shell">
       <aside className="side">
-        <div className="brand">WB Монитор</div>
+        <div className="brand">WB Монитор <Bell /></div>
         <nav>
           {NAV.map((n) => (
             <NavLink key={n.to} to={n.to} className="nav">
@@ -67,6 +68,7 @@ export default function App() {
       <main className="main">
         <header className="mob">
           <b>WB Монитор</b>
+          <Bell />
           <WorkerDot />
           <button className="link" onClick={logout}>Выйти</button>
         </header>
