@@ -29,7 +29,7 @@ from app.crypto import encrypt_json
 from app.db import models, repo
 from app.db.base import Session
 from app.wallet import best_offer, offer_text, wallet_price
-from app.wb import media
+from app.wb import account_api, media
 from app.wb.web_session import VISIT_SESSION
 from app.wb.proxy_check import is_parser_proxy, parse_proxy
 
@@ -396,11 +396,13 @@ async def purchases(account_id: int, d_from: date | None = Query(None, alias="fr
 async def balance_ops(account_id: int, u=Depends(user), s=Depends(db)):
     """Операции баланса (копим из визитов в браузере) + свои заметки."""
     acc = await _my_account(s, u, account_id)
-    m, n = models.AccountBalanceOp, models.BalanceNote
-    rows = await s.execute(select(m, n.text).outerjoin(n, (n.account_id == m.account_id) & (n.tx_id == m.tx_id))
+    m, n, c = models.AccountBalanceOp, models.BalanceNote, models.Certificate
+    rows = await s.execute(select(m, n.text, c.code)
+                           .outerjoin(n, (n.account_id == m.account_id) & (n.tx_id == m.tx_id))
+                           .outerjoin(c, (c.wb_cert_id == m.tx_id) & (c.status == "ok"))  # id активации = txId
                            .where(m.account_id == acc.id).order_by(m.dt.desc().nulls_last()))
     return [{"tx_id": o.tx_id, "name": o.name, "op_type": o.op_type, "amount": o.amount, "balance": o.balance,
-             "dt": o.dt, "note": note} for o, note in rows.all()]
+             "dt": o.dt, "note": note, "cert_code": code} for o, note, code in rows.all()]
 
 
 class NoteIn(BaseModel):
@@ -663,6 +665,94 @@ async def delete_proxy(proxy_id: int, u=Depends(user), s=Depends(db)):
 
 
 # ---------- статус worker'а ----------
+# ---------- сертификаты WB ----------
+CERT_FIELDS = ("id", "code", "account_id", "nominal_entered", "nominal", "status", "error_text", "created_at", "done_at")
+
+
+class CertItem(BaseModel):
+    code: str = Field(max_length=64)
+    nominal: int = Field(gt=0, le=10_000_000)  # вне 500–100 000 — только предупреждение на сайте (бывают 5–80 ₽)
+    account_id: int
+
+
+class CertsIn(BaseModel):
+    items: list[CertItem] = Field(min_length=1, max_length=500)
+
+
+class CodesIn(BaseModel):
+    codes: list[str] = Field(max_length=500)
+
+
+def _ddmm(dt: datetime | None) -> str | None:
+    return dt.astimezone(repo.MSK).strftime("%d.%m") if dt else None
+
+
+async def _known_certs(s, codes) -> dict[str, dict]:
+    """Коды, уже активированные или ждущие активации (status не error) → {status, title, done_at}."""
+    m = models.Certificate
+    rows = await s.execute(select(m, models.WbAccount).outerjoin(models.WbAccount, models.WbAccount.id == m.account_id)
+                           .where(m.code.in_(list(codes)), m.status != "error"))
+    return {c.code: {"status": c.status, "done_at": c.done_at or c.created_at,
+                     "title": a and a.title}
+            for c, a in rows.all()}
+
+
+@app.post("/api/certificates/known")
+async def known_certificates(body: CodesIn, u=Depends(user), s=Depends(db)):
+    """Какие из кодов уже были (POST — код до активации = деньги, в URL и логи прокси не кладём)."""
+    codes = {c for c in map(account_api.norm_cert, body.codes) if c}
+    return await _known_certs(s, codes) if codes else {}
+
+
+@app.post("/api/certificates", status_code=201)
+async def add_certificates(body: CertsIn, u=Depends(user), s=Depends(db)):
+    """Сертификаты в очередь активации (pending; активирует worker). Плохие строки → 422 со списком причин,
+    ничего не создаётся."""
+    accs = {a.id: a for a in await repo.user_accounts(s, u.telegram_id)}
+    codes = [account_api.norm_cert(it.code) for it in body.items]
+    known = await _known_certs(s, {c for c in codes if c})
+    def why(it, code, seen) -> str | None:
+        acc, k = accs.get(it.account_id), known.get(code)
+        if not code:
+            return "неверный код — нужно 16 латинских букв и цифр"
+        if code in seen:
+            return "код повторяется в списке"
+        if k and k["status"] == "ok":
+            parts = [x for x in (k["title"], _ddmm(k["done_at"])) if x]  # «уже активирован: Аня, 10.11»
+            return "уже активирован" + (": " + ", ".join(parts) if parts else "")
+        if k:
+            return "уже добавлен — ждёт активации или проверки баланса"
+        if acc is None:
+            return "нет такого аккаунта"
+        return "аккаунт не активен — нужен вход" if acc.status != "active" else None
+
+    bad, seen = [], set()
+    for i, (it, code) in enumerate(zip(body.items, codes)):
+        if err := why(it, code, seen):
+            bad.append({"row": i, "code": code or it.code[:64], "error": err})
+        seen.add(code)
+    if bad:
+        raise HTTPException(422, {"code": "bad_items", "items": bad})
+    rows = [models.Certificate(user_id=u.telegram_id, code=code, account_id=it.account_id, nominal_entered=it.nominal)
+            for it, code in zip(body.items, codes)]
+    s.add_all(rows)
+    try:
+        await s.commit()
+    except IntegrityError:  # тот же код успели добавить параллельно
+        raise HTTPException(409, "часть кодов уже добавлена — обновите страницу")
+    return {"ids": [r.id for r in rows]}
+
+
+@app.get("/api/certificates")
+async def certificates(ids: list[int] = Query(..., max_length=500), u=Depends(user), s=Depends(db)):
+    """Статусы для мастера (опрос раз в 1–2 с) + свежий баланс аккаунта («баланс теперь»)."""
+    m = models.Certificate
+    rows = await s.execute(select(m, models.WbAccount).outerjoin(models.WbAccount, models.WbAccount.id == m.account_id)
+                           .where(m.id.in_(ids), m.user_id == u.telegram_id).order_by(m.id))
+    return [{**{f: getattr(c, f) for f in CERT_FIELDS}, "account_title": a and a.title, "funds": a and a.funds}
+            for c, a in rows.all()]
+
+
 @app.get("/api/status")
 async def status(u=Depends(user), s=Depends(db)):
     raw = await repo.get_setting(s, repo.HEARTBEAT_KEY)

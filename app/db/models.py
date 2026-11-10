@@ -351,6 +351,33 @@ class WbLoginRequest(Base):
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
+class Certificate(Base):
+    """Подарочный сертификат WB к активации на аккаунт. api пишет pending, worker активирует.
+
+    status: pending → sending (уходит в WB; ставится прямо перед POST) → ok | error | unknown (ответа нет — мог
+    активироваться, проверьте баланс; не повторяем). code — 16 символов открытым текстом (решение владельца),
+    уникален среди не-ошибочных: код, на который WB ответил ошибкой, можно ввести снова.
+    """
+
+    __tablename__ = "certificates"
+    __table_args__ = (Index("uq_cert_code", "code", unique=True, postgresql_where=text("status <> 'error'")),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.telegram_id", ondelete="CASCADE"), index=True)
+    code: Mapped[str] = mapped_column(String(16))
+    account_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("wb_accounts.id", ondelete="SET NULL"), nullable=True, index=True)
+    nominal_entered: Mapped[int] = mapped_column(Integer)  # ₽, что ввёл человек (до активации WB номинал не отдаёт)
+    nominal: Mapped[int | None] = mapped_column(Integer, nullable=True)  # ₽ из ответа WB
+    status: Mapped[str] = mapped_column(String(16), default="pending", server_default="pending")
+    wb_cert_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)  # = txId в истории баланса
+    error_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error_text: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    created_at: Mapped[datetime] = _now()
+    done_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class AppSetting(Base):
     """Key-value рантайм-настройки (guardium, часы отчётов, рабочее окно)."""
 

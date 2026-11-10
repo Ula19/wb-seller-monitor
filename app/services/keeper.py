@@ -450,6 +450,135 @@ async def purchases_job(bot=None) -> None:
             log.warning("keeper: история заказов %s не получена: %s: %s", acc.title, type(e).__name__, str(e)[:200])
 
 
+# ---------- активация сертификатов (certificates: pending с сайта) ----------
+# Очередь — по прокси: один прокси = один IP у нескольких аккаунтов, параллель на одном IP даёт «слишком много
+# запросов». Разные прокси — параллельно. Без своего прокси — общий из .env (ключ None).
+CERT_PAUSE_SEC = 3  # между активациями на одном прокси
+CERT_UNKNOWN = "WB не ответил — сертификат мог активироваться, проверьте баланс аккаунта"
+_cert_lanes: set[int | None] = set()  # прокси, по которым уже идёт очередь (ponytail: в памяти одного worker'а)
+
+
+def _cert_tail(code: str) -> str:
+    return "…" + code[-4:]  # код — это деньги: в лог целиком не пишем
+
+
+async def _finish_cert(cert_id: int, status: str, **values) -> None:
+    async with Session() as s:
+        await s.execute(update(models.Certificate).where(models.Certificate.id == cert_id).values(
+            status=status, done_at=datetime.now(timezone.utc), **values))
+        await s.commit()
+
+
+async def _activate_cert(cert_id: int) -> None:
+    """Один сертификат: sending (коммит ДО запроса — рестарт посреди отправки не повторит его) → ok | error | unknown.
+    Успех → свежий баланс аккаунта (funds) в БД."""
+    async with Session() as s:
+        cert = await s.get(models.Certificate, cert_id)
+        acc = cert and cert.account_id and await s.get(models.WbAccount, cert.account_id)
+        if cert is None or cert.status != "pending":
+            return
+        if not acc:
+            cert.status, cert.error_text, cert.done_at = "error", "аккаунт удалён", datetime.now(timezone.utc)
+            await s.commit()
+            return
+        code, title, state, proxy_id, acc_id = cert.code, acc.title, decrypt_json(acc.state_enc), acc.proxy_id, acc.id
+        cert.status = "sending"
+        await s.commit()
+    proxy = await proxy_url(proxy_id)
+    try:
+        res = await account_api.activate_cert(state, proxy, code)
+    except (account_api.Unauthorized, account_api.NoBearer):
+        await _finish_cert(cert_id, "error", error_text="нужен вход в аккаунт — войдите заново и добавьте ещё раз")
+        log.warning("keeper: сертификат %s → %s: нужен вход", _cert_tail(code), title)
+        return
+    except ProxyDown as e:  # до WB не дошли — не активирован
+        await _finish_cert(cert_id, "error", error_text="прокси не отвечает — проверьте его в разделе «Прокси»")
+        log.warning("keeper: сертификат %s → %s: прокси не отвечает: %s", _cert_tail(code), title, e)
+        return
+    except Exception as e:  # CertUnknown и всё неожиданное: запрос мог дойти — не повторяем
+        await _finish_cert(cert_id, "unknown", error_text=CERT_UNKNOWN)
+        log.warning("keeper: сертификат %s → %s: ответа нет (%s: %s) — проверьте баланс", _cert_tail(code), title,
+                    type(e).__name__, str(e)[:200])
+        return
+    if not res["ok"]:
+        await _finish_cert(cert_id, "error", error_number=res["error_number"], error_text=res["error_text"] or "ошибка WB")
+        log.info("keeper: сертификат %s → %s: ошибка %s %s", _cert_tail(code), title, res["error_number"], res["error_text"])
+        return
+    await _finish_cert(cert_id, "ok", nominal=res["nominal"], wb_cert_id=res["id"])
+    log.info("keeper: сертификат %s → %s: зачислено %s ₽", _cert_tail(code), title, res["nominal"])
+    try:  # «баланс теперь» на сайте; сбой — не беда, обычный опрос догонит
+        bal = await account_api.fetch_balance(state, proxy)
+        async with Session() as s:
+            await s.execute(update(models.WbAccount).where(models.WbAccount.id == acc_id).values(
+                state_at=datetime.now(timezone.utc), **{k: v for k, v in bal.items() if k in repo.ACCOUNT_STATE_FIELDS}))
+            await s.commit()
+    except Exception as e:
+        log.warning("keeper: баланс %s после сертификата не получен: %s: %s", title, type(e).__name__, str(e)[:200])
+
+
+async def _cert_lane(proxy_id: int | None) -> None:
+    """Очередь одного прокси: по одному, пауза CERT_PAUSE_SEC между активациями; пусто — выходим."""
+    try:
+        while True:
+            async with Session() as s:
+                cid = await s.scalar(select(models.Certificate.id).join(
+                    models.WbAccount, models.WbAccount.id == models.Certificate.account_id).where(
+                    models.Certificate.status == "pending",
+                    models.WbAccount.proxy_id.is_(None) if proxy_id is None else models.WbAccount.proxy_id == proxy_id)
+                    .order_by(models.Certificate.id).limit(1))
+            if cid is None:
+                return
+            try:
+                await _activate_cert(cid)
+            except Exception as e:  # иначе строка зависнет в sending/pending, а очередь крутит её же
+                log.exception("keeper: активация сертификата %s", cid)
+                async with Session() as s:
+                    c = models.Certificate
+                    now = datetime.now(timezone.utc)
+                    await s.execute(update(c).where(c.id == cid, c.status == "sending").values(
+                        status="unknown", error_text=CERT_UNKNOWN, done_at=now))
+                    await s.execute(update(c).where(c.id == cid, c.status == "pending").values(  # до WB не дошли
+                        status="error", error_text=f"ошибка: {type(e).__name__}", done_at=now))
+                    await s.commit()
+            await asyncio.sleep(CERT_PAUSE_SEC)
+    finally:
+        _cert_lanes.discard(proxy_id)
+
+
+async def start_cert_lanes() -> int:
+    """Запускает очереди прокси, у которых есть pending, а очередь ещё не идёт. → сколько запущено."""
+    async with Session() as s:
+        orphan = await s.execute(update(models.Certificate).where(  # аккаунт удалили, пока ждал
+            models.Certificate.status == "pending", models.Certificate.account_id.is_(None)).values(
+            status="error", error_text="аккаунт удалён", done_at=datetime.now(timezone.utc)))
+        lanes = set(await s.scalars(select(models.WbAccount.proxy_id).distinct().join(
+            models.Certificate, models.Certificate.account_id == models.WbAccount.id).where(
+            models.Certificate.status == "pending")))
+        if orphan.rowcount:
+            await s.commit()
+    new = lanes - _cert_lanes
+    for lane in new:
+        _cert_lanes.add(lane)
+        asyncio.create_task(_cert_lane(lane))
+    return len(new)
+
+
+async def certificates_loop() -> None:
+    """Фоновая задача worker'а. При старте sending → unknown (могли успеть отправить), pending остаются в очереди."""
+    async with Session() as s:
+        res = await s.execute(update(models.Certificate).where(models.Certificate.status == "sending").values(
+            status="unknown", error_text=CERT_UNKNOWN, done_at=datetime.now(timezone.utc)))
+        await s.commit()
+    if res.rowcount:
+        log.warning("keeper: %d сертификатов прервано рестартом посреди отправки — статус «проверьте баланс»", res.rowcount)
+    while True:
+        try:
+            await start_cert_lanes()
+        except Exception:
+            log.exception("keeper: цикл сертификатов")
+        await asyncio.sleep(LOGIN_POLL_SEC)
+
+
 async def img_hosts_job() -> None:
     """Карта basket-хостов картинок — раз в сутки в app_settings (сайт собирает URL сам, API в сеть не ходит)."""
     try:

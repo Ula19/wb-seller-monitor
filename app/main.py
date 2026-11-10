@@ -91,6 +91,7 @@ async def main() -> None:
     proxy_task = asyncio.create_task(keeper.proxy_checks_loop())  # «Проверить» прокси с сайта
     poll_task = asyncio.create_task(keeper.account_polls_loop(bot))  # ↻ «Обновить» аккаунт с сайта
     sync_task = asyncio.create_task(keeper.browser_syncs_loop(bot))  # визит в браузере по кнопке с сайта
+    cert_task = asyncio.create_task(keeper.certificates_loop())  # активация сертификатов с сайта
 
     try:
         await dp.start_polling(bot)
@@ -100,6 +101,7 @@ async def main() -> None:
         proxy_task.cancel()
         poll_task.cancel()
         sync_task.cancel()
+        cert_task.cancel()
         await wb_client.close()
         await bot.session.close()
 

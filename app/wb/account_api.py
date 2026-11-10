@@ -5,6 +5,8 @@ Bearer — localStorage www: `wbx__tokenData` или `wbid-oauth-sdk-access-toke
 wbx-validation-key, остальным хватает Bearer. Суммы WB — в копейках, наружу отдаём рубли.
 401 → Unauthorized: решение (рефреш / «войдите заново») — у вызывающего.
 """
+import asyncio
+import json
 import logging
 import re
 from contextlib import asynccontextmanager
@@ -35,6 +37,10 @@ PAY_STATE = {4: True, 1: False}  # rids[].pay_state: 4 оплачен, 1 не о
 JWT = re.compile(r"eyJ[\w-]+\.[\w-]+\.[\w-]+")
 HEADERS = {"Origin": "https://www.wildberries.ru", "Referer": "https://www.wildberries.ru/",
            "Accept": "application/json"}
+
+
+class CertUnknown(Exception):
+    """Запрос активации мог дойти до WB, а ответа нет: сертификат мог активироваться — повторять нельзя."""
 
 
 class Unauthorized(Exception):
@@ -298,6 +304,77 @@ async def fetch_purchases(state: dict, proxy: str | None = None,
     return out, False
 
 
+# ---------- подарочные сертификаты ----------
+CERT_URL = "https://astro.wildberries.ru/api/v1/giftcards/certificates/activation"
+CERT_RE = re.compile(r"[A-Z0-9]{16}")
+CERT_BUSY = 5  # errorNumber «От вас слишком много запросов. Попробуйте через 2 сек.»
+CERT_RETRY_SEC, CERT_RETRIES = 3, 3
+# сбой curl ДО отправки запроса (до WB не дошли — можно считать ошибкой); всё прочее (Operation timed out, Empty
+# reply, Recv failure…) — после: запрос мог дойти. Голое «(28)» не годится — бывает обоих видов
+PRE_SEND = re.compile(r"\(28\) Connection timed out|\(56\) CONNECT tunnel failed|\(35\) TLS connect error|"
+                      r"\(7\) |\b407\b")
+
+
+def norm_cert(s) -> str | None:
+    """Код сертификата → 16 символов [A-Z0-9] (как храним и показываем); с дефисами, пробелами, префиксом wbcert-,
+    в любом регистре. Не похоже на код — None."""
+    s = re.sub(r"[\s\-\u2010-\u2015]", "", str(s or "")).upper()
+    if len(s) == 22 and s.startswith("WBCERT"):
+        s = s[6:]
+    return s if CERT_RE.fullmatch(s) else None
+
+
+def cert_key(code: str) -> str:
+    """Как ждёт WB: wbcert-XXXX-XXXX-XXXX-XXXX (без дефисов — HTTP 400)."""
+    return "wbcert-" + "-".join(code[i:i + 4] for i in range(0, 16, 4))
+
+
+def parse_cert(d) -> dict:
+    """Ответ активации → {"ok": True, "id", "nominal" ₽} | {"ok": False, "error_number", "error_text"}.
+    Непонятный ответ — CertUnknown (мог активироваться)."""
+    x = ((((d or {}).get("data") or {}).get("certificatesActivation") or {}).get("data") or {}) if isinstance(d, dict) else {}
+    if x.get("id") and x.get("status") == "processed":
+        return {"ok": True, "id": str(x["id"])[:128], "nominal": _rub(x.get("nominal"))}
+    if isinstance(x.get("errorNumber"), int):
+        return {"ok": False, "error_number": x["errorNumber"], "error_text": str(x.get("errorText") or "")[:256]}
+    raise CertUnknown(f"непонятный ответ WB: {str(d)[:200]}")
+
+
+async def activate_cert(state: dict, proxy: str | None, code: str, sleep=None) -> dict:
+    """Активация на аккаунт (зачисление в баланс). → parse_cert; на «слишком много запросов» ждём и повторяем.
+    ProxyDown — до WB не дошли (ошибка, повторять можно); CertUnknown — запрос мог дойти, ответа нет;
+    Unauthorized/NoBearer — нужен вход."""
+    sleep = sleep or asyncio.sleep
+    body = json.dumps({"certificatesActivationRequest": {"activationKey": cert_key(code)}})
+    async with _client(state, proxy) as (call, _, with_vkey):
+        headers = {**with_vkey, "Content-Type": "text/plain;charset=UTF-8",
+                   "Referer": "https://www.wildberries.ru/gift/certificates/activate"}
+        for attempt in range(CERT_RETRIES + 1):
+            try:
+                res = parse_cert(await call("POST", CERT_URL, headers=headers, data=body))
+            except ProxyDown as e:
+                if PRE_SEND.search(str(e)):
+                    raise
+                raise CertUnknown(str(e)) from e
+            except (Unauthorized, CertUnknown):
+                raise
+            except Exception as e:
+                code_ = getattr(getattr(e, "response", None), "status_code", None)
+                if isinstance(code_, int) and 400 <= code_ < 500:  # WB отклонил запрос — не активирован
+                    return {"ok": False, "error_number": None, "error_text": f"WB отклонил запрос: HTTP {code_}"}
+                raise CertUnknown(f"{type(e).__name__}: {str(e)[:200]}") from e
+            if res["ok"] or res["error_number"] != CERT_BUSY or attempt == CERT_RETRIES:
+                return res
+            await sleep(CERT_RETRY_SEC)
+    return res
+
+
+async def fetch_balance(state: dict, proxy: str | None = None) -> dict:
+    """Только full-balance (после активации — свежий funds)."""
+    async with _client(state, proxy) as (call, _, with_vkey):
+        return parse_balance(await call("GET", BALANCE_URL, headers=with_vkey))
+
+
 if __name__ == "__main__":  # self-check на формах ответов из HAR (суммы в копейках)
     b = parse_balance({"wallet_balance_rub": 428500, "bonus_balance": 20100, "available_funds_rub": 448600, "discount": {
         "expenses": 23355900, "monthly_limit": 100000000, "max_order_price": 100000000, "max_rid_price": 50000000}})
@@ -461,4 +538,115 @@ if __name__ == "__main__":  # self-check на формах ответов из H
             got, complete = await fetch_purchases(st, known=known)
             assert len(urls) == 1 and not complete and len(got) == PURCHASES_PAGE  # всё известно — стоп
     asyncio.run(pages())
+
+    # сертификаты: код в любом виде → 16 символов; в WB — с дефисами
+    for raw in ("UYPMJUAFGZEVR89S", "uypm-juaf-gzev-r89s", "wbcert-UYPM-JUAF-GZEV-R89S", " WBCERT-uypmjuafgzevr89s ",
+                "UYPM JUAF GZEV R89S", "UYPM\u2013JUAF\u2013GZEV\u2013R89S"):
+        assert norm_cert(raw) == "UYPMJUAFGZEVR89S", raw
+    for bad in ("", None, "UYPMJUAFGZEVR89", "UYPMJUAFGZEVR89SS", "UYPM_JUAF_GZEV_R89S", "ЮYPMJUAFGZEVR89S", "wbcert-UYPM"):
+        assert norm_cert(bad) is None, bad
+    assert norm_cert("WBCERTAAAAAAAAAA") == "WBCERTAAAAAAAAAA"  # код, который сам начинается с WBCERT, — не режем
+    assert cert_key("UYPMJUAFGZEVR89S") == "wbcert-UYPM-JUAF-GZEV-R89S"
+    ok = {"data": {"certificatesActivation": {"data": {"id": "d32a.101126.0", "status": "processed", "nominal": 50000,
+                                                        "currency": "RUB"}}}}
+    busy = {"data": {"certificatesActivation": {"data": {"errorText": "От вас слишком много запросов.", "errorNumber": 5}}}}
+    nf = {"data": {"certificatesActivation": {"data": {"errorText": "Ключ активации не найден.", "errorNumber": 21}}}}
+    assert parse_cert(ok) == {"ok": True, "id": "d32a.101126.0", "nominal": 500}
+    assert parse_cert(nf) == {"ok": False, "error_number": 21, "error_text": "Ключ активации не найден."}
+    for weird in ({}, None, {"data": {"certificatesActivation": {"data": {"id": "x", "status": "pending"}}}}):
+        try:
+            parse_cert(weird)
+            raise AssertionError(weird)
+        except CertUnknown:
+            pass
+
+    class HTTP400(Exception):
+        response = R(400, None)
+
+    def cert_session(script):
+        """script — ответы по очереди: dict (200 с телом) | исключение (бросит request)."""
+        sent = []
+
+        class S:
+            def __init__(self, **kw):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                pass
+
+            async def request(self, method, url, **kw):
+                sent.append((method, url, kw))
+                x = script.pop(0)
+                if isinstance(x, BaseException):
+                    raise x
+                if x == 400:
+                    r = R(400, None)
+                    r.raise_for_status = lambda: (_ for _ in ()).throw(HTTP400())
+                    return r
+                return R(200, x)
+        return S, sent
+
+    async def certs():
+        naps = []
+
+        async def nap(sec):
+            naps.append(sec)
+
+        async def run(script):
+            S, sent = cert_session(script)
+            with patch(f"{__name__}.AsyncSession", S), patch(f"{__name__}.web_proxy", lambda: None):
+                return await activate_cert({**st, "cookies": [{"name": "wbx-validation-key", "value": "vk"}]}, None,
+                                           "UYPMJUAFGZEVR89S", sleep=nap), sent
+        res, sent = await run([ok])
+        assert res["ok"] and res["nominal"] == 500 and len(sent) == 1
+        m, url, kw = sent[0]
+        assert (m, url) == ("POST", CERT_URL) and kw["data"] == \
+            '{"certificatesActivationRequest": {"activationKey": "wbcert-UYPM-JUAF-GZEV-R89S"}}', kw
+        assert kw["headers"]["Content-Type"] == "text/plain;charset=UTF-8" and "wbx-validation-key=vk" in kw["headers"]["Cookie"]
+        assert (await run([nf]))[0]["error_number"] == 21 and not naps
+        res, sent = await run([busy, busy, ok])  # «слишком много запросов» → пауза 3 с и повтор
+        assert res["ok"] and len(sent) == 3 and naps == [3, 3], naps
+        naps.clear()
+        res, sent = await run([busy] * 4)  # повторов не больше трёх
+        assert res["error_number"] == 5 and len(sent) == 4 and naps == [3, 3, 3]
+        assert (await run([400]))[0] == {"ok": False, "error_number": None, "error_text": "WB отклонил запрос: HTTP 400"}
+        curl = lambda t: RequestException(f"Failed to perform, curl: {t}. See https://curl.se/libcurl/c/libcurl-errors.html")
+        pre = ("(28) Connection timed out after 20002 milliseconds", "(56) CONNECT tunnel failed, response 502",
+               "(35) TLS connect error: error:00000000:invalid library (0):OPENSSL_internal:invalid library (0)",
+               "(7) Failed to connect to 51.194.246.76 port 44347 after 3 ms: Couldn't connect to server")
+        post = ("(28) Operation timed out after 20001 milliseconds with 0 bytes received", "(52) Empty reply from server",
+                "(56) Recv failure: Connection reset by peer", "(92) HTTP/2 stream 1 was not closed cleanly")
+        for t in pre:
+            try:
+                await run([curl(t)])
+                raise AssertionError(t)
+            except ProxyDown:
+                pass
+        for t in post:
+            try:
+                await run([curl(t)])
+                raise AssertionError(t)
+            except CertUnknown:
+                pass
+        S, _ = cert_session([])
+
+        class S407(S):
+            async def request(self, method, url, **kw):
+                return R(407, None)
+        with patch(f"{__name__}.AsyncSession", S407), patch(f"{__name__}.web_proxy", lambda: None):
+            try:
+                await activate_cert(st, None, "UYPMJUAFGZEVR89S", sleep=nap)
+                raise AssertionError("407")
+            except ProxyDown:
+                pass
+        for weird in ([{}], [RuntimeError("json")]):  # 200 с непонятным телом, сбой разбора — мог активироваться
+            try:
+                await run(weird)
+                raise AssertionError(weird)
+            except CertUnknown:
+                pass
+    asyncio.run(certs())
     print("ok")
