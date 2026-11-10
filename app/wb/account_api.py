@@ -183,6 +183,16 @@ def parse_profile(d) -> dict | None:
             "purchase_pct": v.get("purchasePercent") if isinstance(v.get("purchasePercent"), int) else None}
 
 
+def _order_price(r: dict) -> int | None:
+    """Цена позиции к оплате, ₽ = total_price − discount (скидка Кошелька), как на сайте WB и в «К оплате».
+    price уже со скидкой только у оплаченных; у неоплаченных price = total_price (полная), скидка — в discount.
+    Нет total_price — старое поведение (price)."""
+    total, disc = r.get("total_price"), r.get("discount") or 0
+    if isinstance(total, int) and isinstance(disc, int):
+        return _rub(total - disc)
+    return _rub(r.get("price"))
+
+
 def parse_orders(d: dict) -> list[dict]:
     """Позиции активных заказов: в заказе (data[]) несколько rid, ключ — uid."""
     out = []
@@ -191,7 +201,7 @@ def parse_orders(d: dict) -> list[dict]:
             if not r.get("uid") or r.get("pay_type") == 0:  # pay_type 0 — служебный «Пакет», не товар
                 continue
             out.append({"rid": r["uid"], "nm_id": r.get("nm_id"), "name": r.get("name"),
-                        "brand": r.get("brand"), "price": _rub(r.get("price")),
+                        "brand": r.get("brand"), "price": _order_price(r),
                         "dst_office_id": r.get("dst_office_id") or order.get("dst_office_id"),
                         "ordered_at": _ts(order.get("order_dt")), "expiry_at": _ts(r.get("expiry_dt")),
                         "delivery_at": _ts(r.get("delivery_time")),  # плановая доставка (верхняя граница срока)
@@ -310,6 +320,15 @@ if __name__ == "__main__":  # self-check на формах ответов из H
         {"uid": "bag", "pay_type": 0, "name": "Пакет", "pay_state": 4}]}]})
     assert [(x["rid"], x["paid"]) for x in o] == [("p4", True), ("p1", False), ("p2", None)], o
     assert o[0]["delivery_at"] == datetime(2026, 11, 14, 10, 43, 20, tzinfo=timezone.utc) and o[1]["delivery_at"] is None
+    # цена = total_price − discount (Аня, 2026-11-10): у неоплаченных price полная, скидка Кошелька — в discount
+    o = parse_orders({"data": [{"rids": [
+        {"uid": "rtx", "pay_state": 1, "total_price": 5538900, "price": 5538900, "discount": 332400},
+        {"uid": "katana", "pay_state": 1, "total_price": 9546900, "price": 9546900, "discount": 572900},
+        {"uid": "honor", "pay_state": 4, "total_price": 2760800, "price": 2595100, "discount": 165700},
+        {"uid": "old", "price": 100000},  # без total_price — как раньше
+        {"uid": "nodisc", "total_price": 50000, "price": 50000, "discount": None}]}]})
+    assert [(x["rid"], x["price"]) for x in o] == [("rtx", 52065), ("katana", 89740), ("honor", 25951),
+                                                   ("old", 1000), ("nodisc", 500)], o
     assert parse_profile({"value": {"isAuthenticated": True, "firstName": " Анна ", "purchasePercent": 94,
                                     "formattedPhoneMobile": "+7 916 123-45-67"}}) == \
         {"name": "Анна", "phone": "+7 916 123-45-67", "purchase_pct": 94}
