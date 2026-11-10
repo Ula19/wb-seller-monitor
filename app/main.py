@@ -92,6 +92,7 @@ async def main() -> None:
     poll_task = asyncio.create_task(keeper.account_polls_loop(bot))  # ↻ «Обновить» аккаунт с сайта
     sync_task = asyncio.create_task(keeper.browser_syncs_loop(bot))  # визит в браузере по кнопке с сайта
     cert_task = asyncio.create_task(keeper.certificates_loop())  # активация сертификатов с сайта
+    bell_task = asyncio.create_task(keeper.notices_check_loop())  # «Проверить сейчас» уведомления с сайта
 
     try:
         await dp.start_polling(bot)
@@ -102,6 +103,7 @@ async def main() -> None:
         poll_task.cancel()
         sync_task.cancel()
         cert_task.cancel()
+        bell_task.cancel()
         await wb_client.close()
         await bot.session.close()
 

@@ -12,6 +12,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    Identity,
     Index,
     Integer,
     LargeBinary,
@@ -190,6 +191,7 @@ class WbAccount(Base):
     # история заказов загружена целиком (до последней страницы) — дальше раз в час только догрузка новых
     purchases_full_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     visit_error: Mapped[str | None] = mapped_column(String(128), nullable=True)  # почему визит в браузере не удался
+    notices_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)  # когда брали ленту колокольчика
     proxy_fail_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # свой выход в WB: вход, рефреш, состояние, personalinfo. Меняется только перелогином
     proxy_id: Mapped[int | None] = mapped_column(
@@ -350,6 +352,28 @@ class WbLoginRequest(Base):
     created_at: Mapped[datetime] = _now()
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class AccountNotice(Base):
+    """Уведомление колокольчика WB аккаунта. read_at — НАШЕ прочтение (NULL = новое): на WB get помечает всё прочитанным,
+    поэтому новое = uuid, которого не было, и на WB не прочитанное до нашего get (wb_read_at NULL)."""
+
+    __tablename__ = "account_notices"
+    __table_args__ = (Index("ix_account_notices_dt", "dt"),
+                      Index("ix_account_notices_unread", "read_at", postgresql_where=text("read_at IS NULL")))
+
+    account_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("wb_accounts.id", ondelete="CASCADE"), primary_key=True)
+    uuid: Mapped[str] = mapped_column(String(64), primary_key=True)
+    id: Mapped[int] = mapped_column(Integer, Identity(), unique=True)  # курсор «Показать ещё» и POST read {ids}
+    topic_id: Mapped[str | None] = mapped_column(String(64), nullable=True)  # new_device_login, push-notice-48h, …
+    title: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    text: Mapped[str | None] = mapped_column(Text, nullable=True)  # чистый текст (HTML WB вырезан)
+    url: Mapped[str | None] = mapped_column(String(1024), nullable=True)  # только https://*.wildberries.ru
+    dt: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    wb_read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = _now()
 
 
 class Certificate(Base):

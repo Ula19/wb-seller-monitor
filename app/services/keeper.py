@@ -207,6 +207,10 @@ async def poll_account(bot, acc: models.WbAccount) -> None:
     if fails >= PROXY_ALERT_AFTER:  # о сбое пушили — скажем и о восстановлении
         log.info("keeper: аккаунт %s: прокси снова отвечает после %d сбоев", acc.title, fails)
         await _push_all(bot, f"✅ Прокси аккаунта WB <b>{acc.title}</b> снова отвечает")
+    try:  # колокольчик — не главное: его сбой не ломает опрос
+        await _notices(acc, state, proxy)
+    except Exception as e:
+        log.warning("keeper: уведомления %s не получены: %s: %s", acc.title, type(e).__name__, str(e)[:200])
     log.info("keeper: аккаунт %s: Кошелёк %s%%, лимит %s ₽, заказов %d", acc.title,
              st.get("wallet_pct") if st.get("wallet_pct") is not None else "—",
              f"{st['limit_left']:,}".replace(",", " ") if st.get("limit_left") is not None else "—",
@@ -448,6 +452,85 @@ async def purchases_job(bot=None) -> None:
             await _purchases(acc)
         except Exception as e:  # 401/прокси — разберётся опрос аккаунта (у него рефреш и тревоги)
             log.warning("keeper: история заказов %s не получена: %s: %s", acc.title, type(e).__name__, str(e)[:200])
+
+
+# ---------- уведомления колокольчика WB ----------
+NOTICE_FULL_SEC = 3600  # раз в час лента без условия: прочитанные в приложении WB счётчик не покажет
+NOTICES_CHECK = "notices_check"  # app_settings: «Проверить сейчас» — {state: requested|running|done, new, failed, at}
+
+
+async def _notices(acc: models.WbAccount, state: dict, proxy: str | None, force: bool = False) -> int:
+    """Колокольчик аккаунта: непрочитанные на WB → лента (get помечает их прочитанными на WB); раз в час — лента без
+    условия. → сколько новых у нас."""
+    async with Session() as s:
+        at = await s.scalar(select(models.WbAccount.notices_at).where(models.WbAccount.id == acc.id))
+    force = force or at is None or (datetime.now(timezone.utc) - at).total_seconds() > NOTICE_FULL_SEC
+    unread, items = await account_api.fetch_notices(state, proxy, force)
+    if items is None:
+        return 0
+    async with Session() as s:
+        new = await repo.save_notices(s, acc.id, items)
+        await s.execute(update(models.WbAccount).where(models.WbAccount.id == acc.id)
+                        .values(notices_at=datetime.now(timezone.utc)))
+        await s.commit()
+    if new:
+        log.info("keeper: уведомления %s: новых %d (на WB было непрочитанных %s)", acc.title, new, unread)
+    return new
+
+
+async def _set_check(value: dict) -> None:
+    async with Session() as s:
+        await repo.set_setting(s, NOTICES_CHECK, json.dumps({**value, "at": datetime.now(timezone.utc).isoformat()},
+                                                            ensure_ascii=False))
+        await s.commit()
+
+
+async def process_notices_check() -> bool:
+    """«↻ Проверить сейчас»: лента по ВСЕМ аккаунтам без условия; разные прокси — параллельно, на одном — по очереди.
+    Не вышло (прокси, нужен вход) — в failed с причиной. False — проверку не просили."""
+    async with Session() as s:
+        raw = await repo.get_setting(s, NOTICES_CHECK)
+        accounts = await repo.active_accounts(s)
+        inactive = [a.title for a in await s.scalars(select(models.WbAccount).where(models.WbAccount.status != "active"))]
+    if (json.loads(raw) if raw else {}).get("state") != "requested":
+        return False
+    await _set_check({"state": "running"})
+    lanes: dict[int | None, list] = {}
+    for acc in accounts:
+        lanes.setdefault(acc.proxy_id, []).append(acc)
+    new, failed = 0, [f"{t} (нужен вход)" for t in inactive]
+
+    async def lane(accs):
+        nonlocal new
+        for acc in accs:
+            try:
+                got = await _notices(acc, decrypt_json(acc.state_enc), await proxy_url(acc.proxy_id), force=True)
+                new += got  # не «new += await …»: левая часть читается ДО await — параллельные очереди затёрли бы друг друга
+            except Exception as e:
+                why = ("прокси не отвечает" if isinstance(e, ProxyDown)
+                       else "нужен вход" if isinstance(e, (account_api.Unauthorized, account_api.NoBearer)) else "ошибка")
+                failed.append(f"{acc.title} ({why})")
+                log.warning("keeper: проверка уведомлений %s: %s: %s", acc.title, type(e).__name__, str(e)[:200])
+    await asyncio.gather(*(lane(g) for g in lanes.values()))
+    await _set_check({"state": "done", "new": new, "failed": failed, "checked": len(accounts)})
+    log.info("keeper: проверка уведомлений: аккаунтов %d, новых %d, не проверены: %s", len(accounts), new,
+             ", ".join(failed) or "—")
+    return True
+
+
+async def notices_check_loop() -> None:
+    """Фоновая задача worker'а для «Проверить сейчас». Зависшая с прошлого запуска (running) — закрываем."""
+    async with Session() as s:
+        raw = await repo.get_setting(s, NOTICES_CHECK)
+    if (json.loads(raw) if raw else {}).get("state") == "running":
+        await _set_check({"state": "done", "new": 0, "failed": ["проверка прервана рестартом — нажмите ещё раз"]})
+    while True:
+        try:
+            await process_notices_check()
+        except Exception:
+            log.exception("keeper: цикл проверки уведомлений")
+            await _set_check({"state": "done", "new": 0, "failed": ["проверка упала — см. логи"]})
+        await asyncio.sleep(LOGIN_POLL_SEC)
 
 
 # ---------- активация сертификатов (certificates: pending с сайта) ----------

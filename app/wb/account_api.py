@@ -6,11 +6,13 @@ wbx-validation-key, остальным хватает Bearer. Суммы WB — 
 401 → Unauthorized: решение (рефреш / «войдите заново») — у вызывающего.
 """
 import asyncio
+import html
 import json
 import logging
 import re
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 from curl_cffi.requests import AsyncSession
 from curl_cffi.requests.exceptions import RequestException
@@ -303,6 +305,71 @@ async def fetch_purchases(state: dict, proxy: str | None = None,
             if known is not None and all(p["rid"] in known for p in got):
                 return out, False
     return out, False
+
+
+# ---------- уведомления (колокольчик WB) ----------
+BELL = "https://wbx-bell-v3.wildberries.ru/shard-proxy/api/v3/notice/"
+NOTICE_UNREAD_URL = BELL + "unread?app_type=web&screen=main"  # счётчик, ничего не меняет
+NOTICE_GET_URL = BELL + "get?app_type=web&screen=main"  # POST без тела: вся лента; ПОМЕЧАЕТ ВСЁ ПРОЧИТАННЫМ на WB
+HREF = re.compile(r"""href\s*=\s*["']([^"']+)["']""", re.I)
+
+
+def _ns(v) -> datetime | None:
+    """Наносекунды WB (числом или строкой) → datetime; 0/мусор → None."""
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        return None
+    return datetime.fromtimestamp(n / 1e9, timezone.utc) if n > 0 else None
+
+
+def wb_url(u) -> str | None:
+    """Ссылка — только https на wildberries.ru и его поддомены; прочее (чужой домен, javascript:) — None."""
+    if not isinstance(u, str):
+        return None
+    p = urlparse(html.unescape(u.strip()))
+    host = (p.hostname or "").lower()
+    return p.geturl() if p.scheme == "https" and (host == "wildberries.ru" or host.endswith(".wildberries.ru")) else None
+
+
+def _plain(s) -> str:
+    """HTML WB → чистый текст (на сайт — только текстом)."""
+    s = re.sub(r"<br\s*/?>", "\n", str(s or ""), flags=re.I)
+    s = html.unescape(re.sub(r"<[^>]+>", "", s))
+    return re.sub(r"[ \t\u00a0]+", " ", s).strip()
+
+
+def parse_notices(d) -> list[dict]:
+    """notice/get → уведомления. url — из <a href> текста, иначе payload.apns_custom_data.data.url (только *.wildberries.ru).
+    wb_read_at None — на WB не прочитано (до нашего get: get отдаёт состояние до пометки)."""
+    out = []
+    for it in ((d or {}).get("payload") if isinstance(d, dict) else None) or []:
+        if not isinstance(it, dict) or not it.get("uuid") or str(it.get("is_deleted")).lower() == "true":
+            continue
+        try:
+            extra = json.loads(it.get("payload") or "{}")
+        except (TypeError, ValueError):
+            extra = {}
+        href = HREF.search(str(it.get("text") or ""))
+        data = ((extra.get("apns_custom_data") or {}).get("data") or {}) if isinstance(extra, dict) else {}
+        out.append({"uuid": str(it["uuid"])[:64], "topic_id": str(it["topic_id"])[:64] if it.get("topic_id") else None,
+                    "title": _plain(it.get("title"))[:256] or None, "text": _plain(it.get("text")) or None,
+                    "url": wb_url(href.group(1) if href else None) or wb_url(data.get("url") if isinstance(data, dict) else None),
+                    "dt": _ns(it.get("dt")), "wb_read_at": _ns(it.get("read_date"))})
+    return out
+
+
+async def fetch_notices(state: dict, proxy: str | None = None, force: bool = False) -> tuple[int | None, list[dict] | None]:
+    """→ (непрочитанных на WB, лента | None). Ленту берём, только если есть непрочитанные или force (раз в час / «Проверить
+    сейчас»): get помечает всё прочитанным на WB. Ошибки — исключением (Unauthorized/ProxyDown, как у fetch)."""
+    async with _client(state, proxy) as (call, auth, _):
+        headers = {**auth, "Referer": "https://www.wildberries.ru/lk"}
+        d = await call("GET", NOTICE_UNREAD_URL, headers=headers)
+        n = ((d or {}).get("payload") or {}).get("count") if isinstance(d, dict) else None
+        unread = n if isinstance(n, int) else None
+        if not force and not unread:
+            return unread, None
+        return unread, parse_notices(await call("POST", NOTICE_GET_URL, headers=headers))
 
 
 # ---------- подарочные сертификаты ----------
@@ -655,4 +722,56 @@ if __name__ == "__main__":  # self-check на формах ответов из H
             except CertUnknown:
                 pass
     asyncio.run(certs())
+
+    # уведомления (HAR notification.har): числа строкой, HTML в тексте, url из href или payload, только *.wildberries.ru
+    pay = lambda url: json.dumps({"push_text": "x", "apns_custom_data": {"data": {"url": url, "urlType": "web"}}})
+    ns = parse_notices({"result": 0, "payload": [
+        {"uuid": "cc31", "title": "Вход в ваш профиль", "topic_id": "new_device_login", "dt": "1793722322000000000",
+         "read_date": "1793746957000000000", "is_deleted": "False",
+         "text": "В профиль на WB ID зашли: 51.194.246.76. Если это были не вы, смените пароль", "payload": '{"client_ids":["wb"]}'},
+        {"uuid": "d1", "title": "Ваш заказ ждёт вас", "topic_id": "cdp-info-notice-24h", "dt": 1793722322000000000, "read_date": 0,
+         "text": 'Заберите <a href="https://www.wildberries.ru/lk/myorders/delivery?a=1&amp;b=2">заказ</a>&nbsp;до&nbsp;12.11<br>Спасибо',
+         "payload": pay("https://evil.example/x")},
+        {"uuid": "p1", "title": "Сертификат", "dt": "1793722322000000000", "read_date": "0", "text": "Получатель активировал",
+         "payload": pay("https://wildberries.ru/gift/certificates")},
+        {"uuid": "e1", "title": "чужая ссылка", "text": '<a href="https://wildberries.ru.evil.com/">x</a>', "payload": pay("javascript:alert(1)")},
+        {"uuid": "bad-json", "title": "t", "text": "t", "payload": "{не json"},
+        {"uuid": "del", "title": "удалено", "is_deleted": True}, {"title": "без uuid"}]})
+    assert [x["uuid"] for x in ns] == ["cc31", "d1", "p1", "e1", "bad-json"], ns
+    assert ns[0]["wb_read_at"] == datetime(2026, 11, 3, 23, 2, 37, tzinfo=timezone.utc) and ns[0]["url"] is None
+    assert "51.194.246.76" in ns[0]["text"] and ns[0]["topic_id"] == "new_device_login"
+    assert ns[1]["text"] == "Заберите заказ до 12.11\nСпасибо" and ns[1]["wb_read_at"] is None, ns[1]
+    assert ns[1]["url"] == "https://www.wildberries.ru/lk/myorders/delivery?a=1&b=2", ns[1]["url"]  # href главнее payload
+    assert (ns[2]["url"], ns[2]["wb_read_at"], ns[2]["topic_id"]) == ("https://wildberries.ru/gift/certificates", None, None)
+    assert ns[3]["url"] is None and ns[4]["url"] is None and ns[1]["dt"] == ns[0]["dt"]  # число и строка — одно и то же
+    assert parse_notices(None) == [] and parse_notices({"payload": None}) == []
+    assert wb_url("http://www.wildberries.ru/") is None and wb_url("https://WWW.Wildberries.RU/lk") == "https://WWW.Wildberries.RU/lk"
+
+    async def bell():
+        calls = []
+
+        class S:
+            def __init__(self, **kw):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                pass
+
+            async def request(self, method, url, **kw):
+                calls.append((method, url, kw["headers"].get("Referer")))
+                return R(200, {"result": 0, "payload": {"count": unread}} if "unread" in url else
+                         {"result": 0, "payload": [{"uuid": "u1", "title": "t", "text": "x", "dt": 1, "read_date": 0}]})
+        with patch(f"{__name__}.AsyncSession", S), patch(f"{__name__}.web_proxy", lambda: None):
+            unread = 0
+            assert await fetch_notices(st) == (0, None) and len(calls) == 1  # непрочитанных нет — get не зовём
+            n, items = await fetch_notices(st, force=True)
+            assert n == 0 and [i["uuid"] for i in items] == ["u1"] and calls[-1][:2] == ("POST", NOTICE_GET_URL)
+            unread = 2
+            calls.clear()
+            assert (await fetch_notices(st))[0] == 2 and [c[0] for c in calls] == ["GET", "POST"]
+            assert calls[0][2] == "https://www.wildberries.ru/lk"
+    asyncio.run(bell())
     print("ok")

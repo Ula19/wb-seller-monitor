@@ -444,6 +444,26 @@ async def upsert_balance_ops(s, account_id: int, ops: list[dict]) -> None:
                   ("name", "op_type", "amount", "balance", "dt", "source_type"), keep=("source_type",))
 
 
+NOTICE_COLS = ("topic_id", "title", "text", "url", "dt", "wb_read_at")
+
+
+async def save_notices(s, account_id: int, items: list[dict]) -> int:
+    """Лента колокольчика → БД по uuid; read_at (наше прочтение) у известных не трогаем. Новое — uuid, которого не было, и
+    на WB не прочитанное до нашего get; прочитанное на WB (в т.ч. всё при первом запуске) ложится сразу прочитанным.
+    → сколько новых."""
+    items = list({i["uuid"]: i for i in items}.values())
+    if not items:
+        return 0
+    m = models.AccountNotice
+    known = set(await s.scalars(select(m.uuid).where(m.account_id == account_id, m.uuid.in_([i["uuid"] for i in items]))))
+    now = _utcnow()
+    stmt = pg_insert(m).values([{"account_id": account_id, "uuid": i["uuid"], **{c: i.get(c) for c in NOTICE_COLS},
+                                 "read_at": now if i.get("wb_read_at") else None} for i in items])
+    await s.execute(stmt.on_conflict_do_update(index_elements=[m.account_id, m.uuid],
+                                               set_={c: stmt.excluded[c] for c in NOTICE_COLS}))
+    return sum(1 for i in items if i["uuid"] not in known and not i.get("wb_read_at"))
+
+
 async def has_pickup_orders(s, account_id: int) -> bool:
     """Есть ли заказы, которые ждут в ПВЗ (group 5) — плановому визиту есть смысл ждать код получения."""
     return bool(await s.scalar(select(func.count()).select_from(models.AccountOrder).where(
