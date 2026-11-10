@@ -377,7 +377,8 @@ async def upsert_account_prices(s, account_id: int, prices: dict[int, int]) -> N
         set_={"price": stmt.excluded.price, "priced_at": stmt.excluded.priced_at}))
 
 
-ACCOUNT_STATE_FIELDS = ("wallet_pct", "limit_left", "monthly_limit", "max_order", "max_rid", "funds", "vb_points")
+ACCOUNT_STATE_FIELDS = ("wallet_pct", "limit_left", "monthly_limit", "max_order", "max_rid", "funds", "vb_points",
+                        "wallet_blocked", "wallet_arrested")
 
 
 async def proxy_fail(s, account_id: int) -> int | None:

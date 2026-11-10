@@ -5,7 +5,7 @@ import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError, rub, time, type AccountFull, type BalanceOp, type Order, type Purchase, type VbOp } from "../api";
 import {
-  byPvz, ddmm, GROUP, Limit, lines, pickupText, points, STATUS, StatusDot, Thumb, Title, useImg, visible, type Pvz,
+  Blocked, byPvz, ddmm, GROUP, Limit, lines, pickupText, points, STATUS, StatusDot, Thumb, Title, useImg, visible, type Pvz,
 } from "../accounts";
 import LoginModal, { type Relogin } from "./LoginModal";
 
@@ -291,6 +291,7 @@ export default function Account() {
           <StatusDot a={a} /><Title a={a} />
           {a.wallet_pct != null && <span className="badge in">Кошелёк −{a.wallet_pct}%</span>}
           <span className={`pill ${a.status === "active" ? "ok" : "bad"}`}>{STATUS[a.status] ?? a.status}</span>
+          <Blocked a={a} />
           {(a.status === "relogin" || a.site_lost) && <button className="btn sm" onClick={() => setRelogin({ a, n: Date.now() })}>Войти заново</button>}
         </div>
         <div className="acc-actions">
@@ -308,6 +309,8 @@ export default function Account() {
       </div>
       {a.site_lost && a.status === "active" && <div className="small bad-t">{a.visit_error}: код получения и история
         баланса не обновляются (лимит и заказы — обновляются)</div>}
+      {a.wallet_blocked && <div className="small bad-t">WB наложил ограничение на Кошелёк — оплата им недоступна
+        {a.wallet_arrested ? ` · под арестом ${rub(a.wallet_arrested)}` : ""}</div>}
       {a.proxy_down && <div className="small up-t">прокси не ответил {a.proxy_fails} раз подряд, последний {time(a.proxy_fail_at)}</div>}
       <div className="tiles acc-tiles">
         <div className="tile"><b>{rub(a.funds)}</b><span>Кошелёк WB</span></div>

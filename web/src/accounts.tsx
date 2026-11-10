@@ -22,6 +22,10 @@ export function StatusDot({ a }: { a: Account }) {
   return <i className={`dot ${a.status === "active" ? "ok" : a.status === "relogin" ? "bad" : "off"}`} title={STATUS[a.status]} />;
 }
 
+/** «Кошелёк заблокирован» — WB не даёт платить Кошельком (сертификаты на баланс при этом идут). */
+export const Blocked = ({ a }: { a: Account }) => a.wallet_blocked
+  ? <span className="pill bad" title={a.wallet_arrested ? `под арестом ${rub(a.wallet_arrested)}` : undefined}>Кошелёк заблокирован</span> : null;
+
 /** Полоса лимита скидки + остаток; оранжевым при < 10 %, красным при 0. */
 export function Limit({ a, short = false }: { a: Account; short?: boolean }) {
   if (a.limit_left == null) return <div className="muted">—</div>;

@@ -4,7 +4,7 @@ import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError, rub, time, type Account } from "../api";
-import { inPvz, Limit, points, StatusDot, transit } from "../accounts";
+import { Blocked, inPvz, Limit, points, StatusDot, transit } from "../accounts";
 import LoginModal from "./LoginModal";
 
 const VIEW_KEY = "accounts.view";  // «Список | Плитки» — помним в браузере
@@ -34,7 +34,7 @@ function Name({ a }: { a: Account }) {
   return (
     <span className="acc-name">
       <StatusDot a={a} /><Link to={`/accounts/${a.id}`} onClick={(e) => e.stopPropagation()}><b>{a.title}</b></Link>
-      <span className="muted small"> {a.phone ?? a.phone_mask}</span>
+      <span className="muted small"> {a.phone ?? a.phone_mask}</span> <Blocked a={a} />
     </span>
   );
 }

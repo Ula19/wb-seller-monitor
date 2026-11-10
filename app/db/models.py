@@ -176,6 +176,9 @@ class WbAccount(Base):
     max_rid: Mapped[int | None] = mapped_column(Integer, nullable=True)  # лимит позиции
     funds: Mapped[int | None] = mapped_column(Integer, nullable=True)  # ₽ в Кошельке WB (available_funds_rub)
     vb_points: Mapped[int | None] = mapped_column(Integer, nullable=True)  # ВБ-баллы (не рубли)
+    # кошелёк заблокирован (full-balance: wallet.details.availability не "available"); None — WB поля не прислал
+    wallet_blocked: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    wallet_arrested: Mapped[int | None] = mapped_column(Integer, nullable=True)  # ₽ под арестом
     state_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # сбои прокси аккаунта подряд (опрос/рефреш); сброс — удачный опрос или новый вход
     proxy_fails: Mapped[int] = mapped_column(Integer, default=0, server_default="0")

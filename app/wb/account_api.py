@@ -65,11 +65,15 @@ def _ts(sec) -> datetime | None:
 def parse_balance(d: dict) -> dict:
     disc = d.get("discount") or {}
     lim, exp = disc.get("monthly_limit"), disc.get("expenses")
+    avail = ((((d.get("balance_sources") or {}).get("RUB") or {}).get("wallet") or {}).get("details") or {}).get("availability")
     return {"limit_left": _rub(lim - exp) if isinstance(lim, int) and isinstance(exp, int) else None,
             "monthly_limit": _rub(lim),
             "max_order": _rub(disc.get("max_order_price")), "max_rid": _rub(disc.get("max_rid_price")),
             # деньги в Кошельке WB = сумма в шапке сайта (wallet_balance_rub + bonus_balance — оба в рублях)
-            "funds": _rub(d.get("available_funds_rub"))}
+            "funds": _rub(d.get("available_funds_rub")),
+            # блокировка кошелька: availability у заблокированного "arrested" (wallet_status при этом "active" — не он)
+            "wallet_blocked": None if avail is None else avail != "available",
+            "wallet_arrested": _rub((d.get("not_authorized_orders") or {}).get("arrests_orders"))}
 
 
 def parse_vb(d) -> int | None:
@@ -298,7 +302,12 @@ if __name__ == "__main__":  # self-check на формах ответов из H
     b = parse_balance({"wallet_balance_rub": 428500, "bonus_balance": 20100, "available_funds_rub": 448600, "discount": {
         "expenses": 23355900, "monthly_limit": 100000000, "max_order_price": 100000000, "max_rid_price": 50000000}})
     assert b == {"limit_left": 766441, "monthly_limit": 1000000, "max_order": 1000000, "max_rid": 500000,
-                 "funds": 4486}, b
+                 "funds": 4486, "wallet_blocked": None, "wallet_arrested": None}, b
+    # блокировка кошелька (HAR block_wallet — Павел; certificate — Дмитрий)
+    w = lambda a: {"balance_sources": {"RUB": {"wallet": {"details": {"availability": a, "internal_available": 0}}}},
+                   "wallet_status": "active", "not_authorized_orders": {"arrests_orders": 13517451, "income_orders": 0}}
+    assert (parse_balance(w("arrested"))["wallet_blocked"], parse_balance(w("arrested"))["wallet_arrested"]) == (True, 135174)
+    assert parse_balance(w("available"))["wallet_blocked"] is False
     assert parse_balance({})["limit_left"] is None and parse_balance({})["funds"] is None  # бизнес без полей — не падаем
     yana = parse_balance({"wallet_balance_rub": 594100, "bonus_balance": 19194700, "available_funds_rub": 19788800})
     assert yana["funds"] == 197888 == 5941 + 191947, yana  # = сумма в шапке WB у Яны
