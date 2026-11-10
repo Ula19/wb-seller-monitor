@@ -279,3 +279,43 @@ tr.click:hover td { background: var(--bg); }
   .filters .sum { margin-left: 0; flex-basis: 100%; }
 }
 .scroll { overflow-x: auto; }
+
+/* сертификаты: мастер «Добавить сертификат» */
+.modal.wide { max-width: 860px; }
+.steps { display: flex; gap: 6px 18px; flex-wrap: wrap; list-style: none; padding: 0; margin: 0 0 14px; color: var(--muted); font-size: 13px; }
+.steps li { display: flex; gap: 6px; align-items: center; }
+.steps b { width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; background: var(--bg); font-size: 12px; }
+.steps li.on { color: var(--accent); font-weight: 600; }
+.steps li.on b { background: var(--accent); color: #fff; }
+.steps li.done b { background: var(--ok-soft); color: var(--ok); }
+.cert-accs tr.blocked td { background: var(--bad-soft); }
+.cert-accs tr.off td { opacity: .55; }
+.cert-accs td:first-child, .cert-accs th:first-child { width: 28px; padding-right: 0; }
+.paste { display: grid; gap: 8px; margin-bottom: 12px; }
+.paste textarea { width: 100%; box-sizing: border-box; font: 13px/1.5 ui-monospace, monospace; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+.bad-lines { background: var(--bad-soft); border-radius: 8px; padding: 8px 12px; margin-bottom: 12px; }
+.bad-lines ul { margin: 6px 0 0; padding-left: 18px; }
+.crows { display: grid; gap: 8px; margin-bottom: 8px; }
+.crow { display: grid; grid-template-columns: minmax(0, 1fr) 130px 200px 24px; gap: 8px; align-items: center; }
+.crow input[aria-label="Код"] { font-family: ui-monospace, monospace; letter-spacing: .5px; }
+.crow.bad input[aria-label="Код"] { border-color: var(--bad); }
+.crow .why { grid-column: 1 / -1; margin-top: -4px; }
+.crow .x { border: 0; background: none; color: var(--muted); cursor: pointer; font-size: 14px; }
+.crow .x:hover { color: var(--bad); }
+.cert-cards, .cert-sum { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 10px; margin-top: 14px; }
+.cert-sum { grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); margin-bottom: 8px; }
+.card.sm { padding: 10px 12px; display: grid; gap: 4px; align-content: start; }
+.modal-back { grid-template-columns: minmax(0, 1fr); }  /* иначе окно растягивается по ширине таблицы */
+.modal { justify-self: center; }
+.cert-lines code, .bad-lines code { font-family: ui-monospace, monospace; }
+.card.warn { background: var(--up-soft); border-color: var(--up-soft); color: var(--up); }
+.cert-lines { list-style: none; margin: 4px 0 0; padding: 0; display: grid; gap: 4px; font-size: 13px; }
+.cert-lines .st { margin-right: 4px; }
+.wiz-foot { display: flex; flex-wrap: wrap; gap: 10px; justify-content: space-between; align-items: center; border-top: 1px solid var(--line); padding-top: 14px; margin-top: 16px; }
+.wiz-btns { display: flex; gap: 12px; align-items: center; margin-left: auto; }
+@media (max-width: 768px) {
+  .crow { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 24px; }
+  .crow .x { grid-row: 1; grid-column: 3; }
+  .crow.head { display: none; }
+  .crow input[aria-label="Код"] { grid-column: 1 / 3; }
+}

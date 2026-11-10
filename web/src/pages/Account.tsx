@@ -225,7 +225,8 @@ function BalanceTab({ a, sync }: { a: AccountFull; sync: ReturnType<typeof useSy
           {q.data!.map((op) => (
             <div key={op.tx_id} className="op">
               <span className={`op-ico ${op.op_type === 0 ? "in" : "out"}`}>{op.op_type === 0 ? "↑" : "↓"}</span>
-              <div className="op-main"><div>{op.name ?? "—"}</div><div className="muted small">{when(op.dt)}</div></div>
+              <div className="op-main"><div>{op.name ?? "—"}</div><div className="muted small">{when(op.dt)}
+                {op.cert_code && <> · код <code>{op.cert_code}</code></>}</div></div>
               <Note a={a} op={op} />
               <b className={`num op-sum ${(op.amount ?? 0) > 0 ? "ok-t" : ""}`}>{signed(op.amount)}</b>
             </div>

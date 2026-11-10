@@ -5,6 +5,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError, rub, time, type Account } from "../api";
 import { Blocked, inPvz, Limit, points, StatusDot, transit } from "../accounts";
+import CertModal from "./CertModal";
 import LoginModal from "./LoginModal";
 
 const VIEW_KEY = "accounts.view";  // «Список | Плитки» — помним в браузере
@@ -89,6 +90,7 @@ export default function Accounts() {
   const [q, setQ] = useState("");
   const [view, setView] = useState(readView);
   const [adding, setAdding] = useState(false);
+  const [certs, setCerts] = useState(false);
   const [note, setNote] = useState("");
   const pollAll = useMutation({
     mutationFn: () => api<{ count: number }>("/accounts/poll-all", { method: "POST" }),
@@ -110,6 +112,7 @@ export default function Accounts() {
         </div>
         <button className="btn ghost" disabled={pollAll.isPending || all.some((a) => a.polling)} onClick={() => pollAll.mutate()}>
           {all.some((a) => a.polling) ? <><span className="spin" /> Обновляю…</> : "↻ Обновить все"}</button>
+        <button className="btn ghost" disabled={!all.length} onClick={() => setCerts(true)}>🎁 Добавить сертификат</button>
         <button className="btn" onClick={() => setAdding(true)}>+ Добавить аккаунт</button>
       </div>
       {note && <p className="muted small">{note}</p>}
@@ -125,6 +128,7 @@ export default function Accounts() {
         : !list.length ? <div className="card empty">Ничего не нашлось</div>
         : view === "list" ? <ListView list={list} /> : <TilesView list={list} />}
       <LoginModal open={adding} onClose={() => setAdding(false)} relogin={null} />
+      <CertModal open={certs} onClose={() => setCerts(false)} all={all} />
     </section>
   );
 }

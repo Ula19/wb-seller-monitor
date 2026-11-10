@@ -76,7 +76,12 @@ export type Purchase = {
 };
 export type BalanceOp = {
   tx_id: string; name: string | null; op_type: number | null; amount: number | null; balance: number | null;
-  dt: string | null; note: string | null;
+  dt: string | null; note: string | null; cert_code: string | null;  // код сертификата, если операция — его активация
+};
+export type Cert = {
+  id: number; code: string; account_id: number | null; nominal_entered: number; nominal: number | null;
+  status: "pending" | "sending" | "ok" | "error" | "unknown"; error_text: string | null; created_at: string;
+  done_at: string | null; account_title: string | null; funds: number | null;
 };
 export type VbOp = {
   tx_id: string; title: string | null; description: string | null; dt: string | null; operation: number | null;
