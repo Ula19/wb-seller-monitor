@@ -331,3 +331,4 @@ tr.click:hover td { background: var(--bg); }
   .op-cert { display: none; }
   .cert-m { display: block; margin-top: 2px; }
 }
+.wiz-btns.left { margin-left: 0; }

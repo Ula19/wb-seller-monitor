@@ -743,6 +743,46 @@ async def add_certificates(body: CertsIn, u=Depends(user), s=Depends(db)):
     return {"ids": [r.id for r in rows]}
 
 
+class RetryItem(BaseModel):
+    id: int
+    account_id: int
+
+
+class RetryIn(BaseModel):
+    items: list[RetryItem] = Field(min_length=1, max_length=500)
+
+
+@app.post("/api/certificates/retry")
+async def retry_certificates(body: RetryIn, u=Depends(user), s=Depends(db)):
+    """Неудачные (error | unknown) — снова в очередь, на тот же или другой аккаунт. Та же запись: история кода одна.
+    Повтор unknown безопасен — WB дважды не зачислит (ответит ошибкой). Плохие строки → 422, ничего не меняется."""
+    accs = {a.id: a for a in await repo.user_accounts(s, u.telegram_id)}
+    m = models.Certificate
+    certs = {c.id: c for c in await s.scalars(select(m).where(
+        m.id.in_([it.id for it in body.items]), m.user_id == u.telegram_id))}
+    bad = []
+    for i, it in enumerate(body.items):
+        c, acc = certs.get(it.id), accs.get(it.account_id)
+        why = ("нет такого сертификата" if c is None
+               else "уже активирован" if c.status == "ok"
+               else "ещё активируется" if c.status not in ("error", "unknown")
+               else "нет такого аккаунта" if acc is None
+               else "аккаунт не активен — нужен вход" if acc.status != "active" else None)
+        if why:
+            bad.append({"row": i, "code": c.code if c else None, "error": why})
+    if bad:
+        raise HTTPException(422, {"code": "bad_items", "items": bad})
+    for it in body.items:
+        c = certs[it.id]
+        c.account_id, c.status, c.done_at = it.account_id, "pending", None
+        c.error_number = c.error_text = c.nominal = c.wb_cert_id = None
+    try:
+        await s.commit()
+    except IntegrityError:  # этот код уже добавили заново и он ждёт/прошёл
+        raise HTTPException(409, "код уже добавлен заново — обновите окно")
+    return {"ids": [it.id for it in body.items]}
+
+
 @app.get("/api/certificates")
 async def certificates(ids: list[int] = Query(..., max_length=500), u=Depends(user), s=Depends(db)):
     """Статусы для мастера (опрос раз в 1–2 с) + свежий баланс аккаунта («баланс теперь»)."""
