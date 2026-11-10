@@ -402,7 +402,7 @@ async def balance_ops(account_id: int, u=Depends(user), s=Depends(db)):
                            .outerjoin(c, (c.wb_cert_id == m.tx_id) & (c.status == "ok"))  # id активации = txId
                            .where(m.account_id == acc.id).order_by(m.dt.desc().nulls_last()))
     return [{"tx_id": o.tx_id, "name": o.name, "op_type": o.op_type, "amount": o.amount, "balance": o.balance,
-             "dt": o.dt, "note": note, "cert_code": code} for o, note, code in rows.all()]
+             "dt": o.dt, "note": note, "cert_code": code, "source_type": o.source_type} for o, note, code in rows.all()]
 
 
 class NoteIn(BaseModel):

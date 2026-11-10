@@ -77,6 +77,7 @@ export type Purchase = {
 export type BalanceOp = {
   tx_id: string; name: string | null; op_type: number | null; amount: number | null; balance: number | null;
   dt: string | null; note: string | null; cert_code: string | null;  // код сертификата, если операция — его активация
+  source_type: string | null;  // sourceType WB: giftcards — пополнение сертификатом (в т.ч. активированным на самом WB)
 };
 export type Cert = {
   id: number; code: string; account_id: number | null; nominal_entered: number; nominal: number | null;

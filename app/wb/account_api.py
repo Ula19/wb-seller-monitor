@@ -178,6 +178,7 @@ def parse_balance_history(d) -> list[dict]:
             continue
         num = lambda k: it.get(k) if isinstance(it.get(k), (int, float)) else 0
         out.append({"tx_id": str(it["txId"])[:128], "name": it.get("operationName"), "op_type": it.get("operationType"),
+                    "source_type": str(it["sourceType"])[:32] if it.get("sourceType") else None,  # giftcards — сертификат
                     "amount": num("moneyIncome") + num("bonusIncome"), "balance": it.get("currentBalance"),
                     "dt": _ts(it["dt"] / 1000) if isinstance(it.get("dt"), (int, float)) else None})
     return out
@@ -498,6 +499,11 @@ if __name__ == "__main__":  # self-check на формах ответов из H
             {"txId": "01a1bfe0", "operationName": "Оплата", "operationType": 1, "moneyIncome": 0, "bonusIncome": -52065,
              "currentBalance": 2291, "dt": 1794231348052}]},
         {"groupName": "07 ноября", "items": [{"operationName": "без txId"}]}]}}})
+    assert [x["source_type"] for x in bal] == [None, None]
+    gift = parse_balance_history({"value": {"balanceHistory": {"groups": [{"items": [  # HAR certificate.har
+        {"operationName": "Сертификат Wildberries", "sourceType": "giftcards", "txId": "d32a.101126.0", "bonusIncome": 500,
+         "moneyIncome": 0, "operationType": 0, "dt": 1794231734716}]}]}}})
+    assert (gift[0]["source_type"], gift[0]["amount"]) == ("giftcards", 500), gift
     assert [(x["tx_id"], x["amount"], x["op_type"]) for x in bal] == [
         ("ub_dd_47345296_15_1_-1_t_balance", 99, 0), ("01a1bfe0", -52065, 1)], bal
     assert bal[0]["dt"] == datetime(2026, 11, 9, 13, 42, 14, 716000, tzinfo=timezone.utc) and bal[0]["balance"] == 2390

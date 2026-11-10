@@ -248,6 +248,7 @@ class AccountBalanceOp(Base):
     amount: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
     balance: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
     dt: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    source_type: Mapped[str | None] = mapped_column(String(32), nullable=True)  # sourceType WB: giftcards — сертификат
 
 
 class BalanceNote(Base):

@@ -440,7 +440,8 @@ async def upsert_vb_ops(s, account_id: int, ops: list[dict]) -> None:
 
 
 async def upsert_balance_ops(s, account_id: int, ops: list[dict]) -> None:
-    await _upsert(s, models.AccountBalanceOp, account_id, "tx_id", ops, ("name", "op_type", "amount", "balance", "dt"))
+    await _upsert(s, models.AccountBalanceOp, account_id, "tx_id", ops,  # source_type: пустое не стирает заполненное миграцией
+                  ("name", "op_type", "amount", "balance", "dt", "source_type"), keep=("source_type",))
 
 
 async def has_pickup_orders(s, account_id: int) -> bool:

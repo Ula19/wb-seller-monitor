@@ -136,15 +136,37 @@ function OrdersTab({ a, sync }: { a: AccountFull; sync: ReturnType<typeof useSyn
 // ---------- История заказов ----------
 const iso = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 const daysAgo = (n: number) => iso(new Date(Date.now() - n * 86400_000));
+/** День операции по МСК (YYYY-MM-DD) — так же режет период сервер у «Истории заказов». */
+const mskDay = (dt: string) => new Date(Date.parse(dt) + 3 * 3600_000).toISOString().slice(0, 10);
+
+/** «С / По» + «Всё время | 7 дней | 30 дней»; days — пресет по умолчанию (null — всё время). */
+function usePeriod(days: number | null) {
+  const [from, setFrom] = useState(() => (days == null ? "" : daysAgo(days - 1)));
+  const [to, setTo] = useState(() => (days == null ? "" : iso(new Date())));
+  const preset = (d: number | null) => { setFrom(d == null ? "" : daysAgo(d - 1)); setTo(d == null ? "" : iso(new Date())); };
+  const active = !from && !to ? "all" : to === iso(new Date()) && from === daysAgo(6) ? 7 : to === iso(new Date()) && from === daysAgo(29) ? 30 : "";
+  const has = (dt: string | null) => (!from && !to) || (!!dt && (!from || mskDay(dt) >= from) && (!to || mskDay(dt) <= to));
+  return { from, to, setFrom, setTo, preset, active, has };
+}
+
+function Period({ p }: { p: ReturnType<typeof usePeriod> }) {
+  return <>
+    <label className="small">С <input type="date" value={p.from} max={p.to || undefined} onChange={(e) => p.setFrom(e.target.value)} /></label>
+    <label className="small">По <input type="date" value={p.to} min={p.from || undefined} onChange={(e) => p.setTo(e.target.value)} /></label>
+    <div className="seg">
+      <button className={p.active === "all" ? "on" : ""} onClick={() => p.preset(null)}>Всё время</button>
+      <button className={p.active === 7 ? "on" : ""} onClick={() => p.preset(7)}>7 дней</button>
+      <button className={p.active === 30 ? "on" : ""} onClick={() => p.preset(30)}>30 дней</button>
+    </div>
+  </>;
+}
 
 function HistoryTab({ a }: { a: AccountFull }) {
   const img = useImg();
-  const [from, setFrom] = useState(() => daysAgo(6));  // по умолчанию — 7 дней, включая сегодня
-  const [to, setTo] = useState(() => iso(new Date()));
+  const period = usePeriod(7);  // по умолчанию — 7 дней, включая сегодня
+  const { from, to } = period;
   const q = useQuery({ queryKey: ["accounts", a.id, "purchases", from, to],
     queryFn: () => api<Purchase[]>(`/accounts/${a.id}/purchases?${new URLSearchParams({ ...(from && { from }), ...(to && { to }) })}`) });
-  const preset = (days: number | null) => { setFrom(days == null ? "" : daysAgo(days - 1)); setTo(days == null ? "" : iso(new Date())); };
-  const active = !from && !to ? "all" : to === iso(new Date()) && from === daysAgo(6) ? 7 : to === iso(new Date()) && from === daysAgo(29) ? 30 : "";
   // одна строка — один товар, забранный в одном ПВЗ в одну минуту
   const groups = new Map<string, { p: Purchase; n: number; sum: number }>();
   for (const p of q.data ?? []) {
@@ -157,13 +179,7 @@ function HistoryTab({ a }: { a: AccountFull }) {
   return (
     <div className="card">
       <div className="filters">
-        <label className="small">С <input type="date" value={from} max={to || undefined} onChange={(e) => setFrom(e.target.value)} /></label>
-        <label className="small">По <input type="date" value={to} min={from || undefined} onChange={(e) => setTo(e.target.value)} /></label>
-        <div className="seg">
-          <button className={active === "all" ? "on" : ""} onClick={() => preset(null)}>Всё время</button>
-          <button className={active === 7 ? "on" : ""} onClick={() => preset(7)}>7 дней</button>
-          <button className={active === 30 ? "on" : ""} onClick={() => preset(30)}>30 дней</button>
-        </div>
+        <Period p={period} />
         <span className="sum">Забрано: <b>{all.length} шт.</b> на <b>{rub(all.reduce((s, p) => s + (p.price ?? 0), 0))}</b></span>
       </div>
       {q.isLoading ? <p className="muted">Загрузка…</p> : !all.length ? <p className="empty">За этот период ничего не забирали</p> : (
@@ -210,29 +226,55 @@ function Note({ a, op }: { a: AccountFull; op: BalanceOp }) {
   );
 }
 
+/** Код сертификата: клик — в буфер обмена, на 1,5 с «скопировано». */
+function CertCode({ code }: { code: string }) {
+  const [done, setDone] = useState("");
+  const copy = async () => {
+    try { await navigator.clipboard.writeText(code); setDone("скопировано"); } catch { setDone("не скопировалось"); }
+    setTimeout(() => setDone(""), 1500);
+  };
+  return <button className="cert-code" title="Скопировать код сертификата" onClick={copy}>
+    <code>{code}</code>{done && <span className={`small ${done === "скопировано" ? "ok-t" : "bad-t"}`}> {done}</span>}</button>;
+}
+
 function BalanceTab({ a, sync }: { a: AccountFull; sync: ReturnType<typeof useSync> }) {
   const q = useQuery({ queryKey: ["accounts", a.id, "balance"], queryFn: () => api<BalanceOp[]>(`/accounts/${a.id}/balance`) });
+  const period = usePeriod(null);  // как на макете — «Всё время»
+  const [gifts, setGifts] = useState(false);
+  // все накопленные операции уже загружены (их немного) — режем на клиенте
+  const ops = (q.data ?? []).filter((op) => period.has(op.dt) && (!gifts || op.source_type === "giftcards"));
+  const income = ops.reduce((s, op) => s + Math.max(0, Number(op.amount ?? 0)), 0);
+  const spent = ops.reduce((s, op) => s + Math.max(0, -Number(op.amount ?? 0)), 0);
   return (
     <div className="card">
       <div className="filters">
-        <span className="muted small">WB отдаёт 20 последних операций — старые копятся здесь.</span>
+        <Period p={period} />
+        <label className="small"><input type="checkbox" checked={gifts} onChange={(e) => setGifts(e.target.checked)} /> Пополнение сертификатами</label>
+        <span className="sum">Пополнения: <b className="ok-t">{rub(income)}</b> · Списания: <b>{rub(spent)}</b></span>
+      </div>
+      <div className="filters bal-hint">
+        <span className="muted small">У каждой операции есть заметка: у пополнения впишите, откуда деньги, у списания — на что ушли</span>
         {sync.busy ? <span className="muted small"><span className="spin" /> Обновляю… (~30 с)</span>
           : <button className="btn ghost sm" onClick={sync.start}>↻ Обновить</button>}
       </div>
       {sync.err && <p className="err">{sync.err}</p>}
-      {!(q.data ?? []).length ? <p className="empty">{q.isLoading ? "Загрузка…" : "Операций пока нет — нажмите «Обновить» (браузер ~30 с)"}</p> : (
+      {q.isLoading ? <p className="muted">Загрузка…</p>
+        : !(q.data ?? []).length ? <p className="empty">Операций пока нет — нажмите «Обновить» (браузер ~30 с)</p>
+        : !ops.length ? <p className="empty">Нет операций за период</p> : (
         <div className="ops">
-          {q.data!.map((op) => (
+          {ops.map((op) => (
             <div key={op.tx_id} className="op">
               <span className={`op-ico ${op.op_type === 0 ? "in" : "out"}`}>{op.op_type === 0 ? "↑" : "↓"}</span>
-              <div className="op-main"><div>{op.name ?? "—"}</div><div className="muted small">{when(op.dt)}
-                {op.cert_code && <> · код <code>{op.cert_code}</code></>}</div></div>
+              <div className="op-main"><div>{op.name ?? "—"}</div><div className="muted small">{when(op.dt)}</div>
+                {op.cert_code && <div className="cert-m"><CertCode code={op.cert_code} /></div>}</div>
+              <span className="op-cert">{op.cert_code && <CertCode code={op.cert_code} />}</span>
               <Note a={a} op={op} />
               <b className={`num op-sum ${(op.amount ?? 0) > 0 ? "ok-t" : ""}`}>{signed(op.amount)}</b>
             </div>
           ))}
         </div>
       )}
+      <p className="muted small">WB отдаёт 20 последних операций — старые копятся здесь.</p>
     </div>
   );
 }
