@@ -23,6 +23,7 @@ from sqlalchemy import (
     func,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -399,6 +400,31 @@ class Certificate(Base):
     wb_cert_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)  # = txId в истории баланса
     error_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     error_text: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    created_at: Mapped[datetime] = _now()
+    done_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class OrderPayment(Base):
+    """Оплата неоплаченных позиций аккаунта с WB Кошелька. api пишет pending, worker платит (та же очередь по прокси,
+    что у сертификатов).
+
+    status: pending → sending (коммит прямо перед POST orders_pay) → ok (все rids pay_state 4) | error (до WB не
+    дошли или WB отказал) | unknown (запрос мог пройти, оплату не подтвердили — проверьте заказы; сам не повторяется).
+    amount — «К оплате» по нашим ценам (Σ account_orders.price), считает сервер.
+    """
+
+    __tablename__ = "order_payments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.telegram_id", ondelete="CASCADE"))
+    account_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("wb_accounts.id", ondelete="SET NULL"), nullable=True, index=True)
+    rids: Mapped[list] = mapped_column(JSONB)
+    amount: Mapped[int] = mapped_column(Integer)  # ₽
+    status: Mapped[str] = mapped_column(String(16), default="pending", server_default="pending", index=True)
+    error_text: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    funds_before: Mapped[int | None] = mapped_column(Integer, nullable=True)  # ₽, Кошелёк WB перед оплатой
+    funds_after: Mapped[int | None] = mapped_column(Integer, nullable=True)  # ₽, после — разница = списано по факту
     created_at: Mapped[datetime] = _now()
     done_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 

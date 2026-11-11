@@ -168,6 +168,16 @@ async def state_job(bot) -> None:
         await poll_account(bot, acc)
 
 
+async def _save_state(acc_id: int, st: dict) -> int:
+    """Ответ account_api.fetch в БД (адреса ПВЗ, заказы, funds, state_at) — как обычный опрос. → сбоев прокси до этого."""
+    if st.get("orders"):
+        await _attach_offices(st["orders"], "dst_office_id")
+    async with Session() as s:
+        fails = await repo.save_account_state(s, acc_id, st)
+        await s.commit()
+    return fails
+
+
 async def poll_account(bot, acc: models.WbAccount) -> None:
     """Состояние одного аккаунта (по таймеру и сразу после входа).
 
@@ -199,11 +209,7 @@ async def poll_account(bot, acc: models.WbAccount) -> None:
     except Exception as e:
         log.warning("keeper: состояние аккаунта %s не получено: %s: %s", acc.id, type(e).__name__, str(e)[:200])
         return
-    if st.get("orders"):
-        await _attach_offices(st["orders"], "dst_office_id")
-    async with Session() as s:
-        fails = await repo.save_account_state(s, acc.id, st)
-        await s.commit()
+    fails = await _save_state(acc.id, st)
     if fails >= PROXY_ALERT_AFTER:  # о сбое пушили — скажем и о восстановлении
         log.info("keeper: аккаунт %s: прокси снова отвечает после %d сбоев", acc.title, fails)
         await _push_all(bot, f"✅ Прокси аккаунта WB <b>{acc.title}</b> снова отвечает")
@@ -599,28 +605,112 @@ async def _activate_cert(cert_id: int) -> None:
         log.warning("keeper: баланс %s после сертификата не получен: %s: %s", title, type(e).__name__, str(e)[:200])
 
 
-async def _cert_lane(proxy_id: int | None) -> None:
-    """Очередь одного прокси: по одному, пауза CERT_PAUSE_SEC между активациями; пусто — выходим."""
+# ---------- оплата заказов с WB Кошелька (order_payments: pending с сайта; та же очередь по прокси) ----------
+PAY_UNKNOWN = "WB не ответил — оплата могла пройти, проверьте заказы"
+PAY_UNCONFIRMED = "WB принял запрос, но оплату пока не подтвердил — проверьте заказы"
+PAY_CHECKS, PAY_CHECK_SEC = 3, 2  # pay_state 4 приходит в заказах через ~1 с
+
+
+async def _finish_pay(pid: int, status: str, **values) -> None:
+    async with Session() as s:
+        await s.execute(update(models.OrderPayment).where(models.OrderPayment.id == pid).values(
+            status=status, done_at=datetime.now(timezone.utc), **values))
+        await s.commit()
+
+
+async def _pay(pid: int) -> None:
+    """Одна оплата: баланс до → sending (коммит ДО запроса) → POST orders_pay → перечитать заказы и баланс (в БД, как
+    опрос). ok — только если все rids pay_state 4; WB отказал → error; иначе unknown (могла пройти, не повторяем)."""
+    async with Session() as s:
+        p = await s.get(models.OrderPayment, pid)
+        acc = p and p.account_id and await s.get(models.WbAccount, p.account_id)
+        if p is None or p.status != "pending":
+            return
+        if not acc:
+            p.status, p.error_text, p.done_at = "error", "аккаунт удалён", datetime.now(timezone.utc)
+            await s.commit()
+            return
+        rids, title, state, proxy_id, acc_id = list(p.rids), acc.title, decrypt_json(acc.state_enc), acc.proxy_id, acc.id
+    proxy = await proxy_url(proxy_id)
+    login = "нужен вход в аккаунт — войдите заново и оплатите ещё раз"
+    try:  # до оплаты: если баланс не взять — и не платим
+        bal = await account_api.fetch_balance(state, proxy)
+    except (account_api.Unauthorized, account_api.NoBearer):
+        return await _finish_pay(pid, "error", error_text=login)
+    except ProxyDown:
+        return await _finish_pay(pid, "error", error_text="прокси не отвечает — проверьте его в разделе «Прокси»")
+    except Exception as e:
+        log.warning("keeper: оплата %s: баланс %s не получен: %s: %s", pid, title, type(e).__name__, str(e)[:200])
+        return await _finish_pay(pid, "error", error_text="баланс WB не получен — оплату не отправляли, попробуйте ещё раз")
+    if bal.get("wallet_blocked"):
+        return await _finish_pay(pid, "error", error_text="Кошелёк заблокирован — оплата им недоступна")
+    async with Session() as s:
+        await s.execute(update(models.OrderPayment).where(models.OrderPayment.id == pid).values(
+            status="sending", funds_before=bal.get("funds")))
+        await s.commit()
+    wb_err = None
     try:
-        while True:
-            async with Session() as s:
-                cid = await s.scalar(select(models.Certificate.id).join(
-                    models.WbAccount, models.WbAccount.id == models.Certificate.account_id).where(
-                    models.Certificate.status == "pending",
-                    models.WbAccount.proxy_id.is_(None) if proxy_id is None else models.WbAccount.proxy_id == proxy_id)
-                    .order_by(models.Certificate.id).limit(1))
-            if cid is None:
-                return
+        wb_err = await account_api.pay_orders(state, proxy, rids)
+    except (account_api.Unauthorized, account_api.NoBearer):
+        return await _finish_pay(pid, "error", error_text=login)
+    except ProxyDown as e:  # до WB не дошли — не оплачено
+        log.warning("keeper: оплата %s (%s): прокси не отвечает: %s", pid, title, e)
+        return await _finish_pay(pid, "error", error_text="прокси не отвечает — проверьте его в разделе «Прокси»")
+    except Exception as e:  # PayUnknown и неожиданное: могла пройти — проверим заказами
+        log.warning("keeper: оплата %s (%s): ответа нет: %s: %s", pid, title, type(e).__name__, str(e)[:200])
+        wb_err = False
+    log.info("keeper: оплата %s (%s, %d поз.): WB %s", pid, title, len(rids),
+             "принял" if wb_err is None else "не ответил" if wb_err is False else f"отказал: {wb_err}")
+    st = None
+    for _ in range(PAY_CHECKS):
+        await asyncio.sleep(PAY_CHECK_SEC)
+        try:
+            st = await account_api.fetch(state, proxy)
+            await _save_state(acc_id, st)
+        except Exception as e:
+            log.warning("keeper: оплата %s: заказы %s не перечитаны: %s: %s", pid, title, type(e).__name__, str(e)[:200])
+            continue
+        if set(rids) <= {o["rid"] for o in st["orders"] if o.get("paid")} or wb_err:  # отказ WB — ждать нечего
+            break
+    paid = st is not None and set(rids) <= {o["rid"] for o in st["orders"] if o.get("paid")}
+    after = {"funds_after": st.get("funds")} if st else {}
+    if paid:
+        await _finish_pay(pid, "ok", **after)
+        log.info("keeper: оплата %s (%s): оплачено, Кошелёк %s → %s ₽", pid, title, bal.get("funds"), after.get("funds_after"))
+    elif wb_err:
+        await _finish_pay(pid, "error", error_text=wb_err[:256], **after)
+    else:
+        await _finish_pay(pid, "unknown", error_text=PAY_UNKNOWN if wb_err is False else PAY_UNCONFIRMED, **after)
+
+
+async def _next_job(proxy_id: int | None):
+    """Следующее дело очереди прокси: сначала сертификаты (пополнение перед оплатой), потом оплаты. → (модель, id) | None."""
+    async with Session() as s:
+        for m in (models.Certificate, models.OrderPayment):
+            jid = await s.scalar(select(m.id).join(models.WbAccount, models.WbAccount.id == m.account_id).where(
+                m.status == "pending",
+                models.WbAccount.proxy_id.is_(None) if proxy_id is None else models.WbAccount.proxy_id == proxy_id)
+                .order_by(m.id).limit(1))
+            if jid is not None:
+                return m, jid
+    return None
+
+
+async def _cert_lane(proxy_id: int | None) -> None:
+    """Очередь одного прокси (сертификаты и оплаты): по одному, пауза CERT_PAUSE_SEC между запросами; пусто — выходим."""
+    try:
+        while job := await _next_job(proxy_id):
+            m, jid = job
+            unknown = CERT_UNKNOWN if m is models.Certificate else PAY_UNKNOWN
             try:
-                await _activate_cert(cid)
+                await (_activate_cert if m is models.Certificate else _pay)(jid)
             except Exception as e:  # иначе строка зависнет в sending/pending, а очередь крутит её же
-                log.exception("keeper: активация сертификата %s", cid)
+                log.exception("keeper: очередь прокси %s: %s %s", proxy_id, m.__tablename__, jid)
                 async with Session() as s:
-                    c = models.Certificate
                     now = datetime.now(timezone.utc)
-                    await s.execute(update(c).where(c.id == cid, c.status == "sending").values(
-                        status="unknown", error_text=CERT_UNKNOWN, done_at=now))
-                    await s.execute(update(c).where(c.id == cid, c.status == "pending").values(  # до WB не дошли
+                    await s.execute(update(m).where(m.id == jid, m.status == "sending").values(
+                        status="unknown", error_text=unknown, done_at=now))
+                    await s.execute(update(m).where(m.id == jid, m.status == "pending").values(  # до WB не дошли
                         status="error", error_text=f"ошибка: {type(e).__name__}", done_at=now))
                     await s.commit()
             await asyncio.sleep(CERT_PAUSE_SEC)
@@ -630,14 +720,15 @@ async def _cert_lane(proxy_id: int | None) -> None:
 
 async def start_cert_lanes() -> int:
     """Запускает очереди прокси, у которых есть pending, а очередь ещё не идёт. → сколько запущено."""
+    lanes, orphans = set(), 0
     async with Session() as s:
-        orphan = await s.execute(update(models.Certificate).where(  # аккаунт удалили, пока ждал
-            models.Certificate.status == "pending", models.Certificate.account_id.is_(None)).values(
-            status="error", error_text="аккаунт удалён", done_at=datetime.now(timezone.utc)))
-        lanes = set(await s.scalars(select(models.WbAccount.proxy_id).distinct().join(
-            models.Certificate, models.Certificate.account_id == models.WbAccount.id).where(
-            models.Certificate.status == "pending")))
-        if orphan.rowcount:
+        for m in (models.Certificate, models.OrderPayment):
+            orphans += (await s.execute(update(m).where(  # аккаунт удалили, пока ждал
+                m.status == "pending", m.account_id.is_(None)).values(
+                status="error", error_text="аккаунт удалён", done_at=datetime.now(timezone.utc)))).rowcount
+            lanes |= set(await s.scalars(select(models.WbAccount.proxy_id).distinct().join(
+                m, m.account_id == models.WbAccount.id).where(m.status == "pending")))
+        if orphans:
             await s.commit()
     new = lanes - _cert_lanes
     for lane in new:
@@ -647,13 +738,15 @@ async def start_cert_lanes() -> int:
 
 
 async def certificates_loop() -> None:
-    """Фоновая задача worker'а. При старте sending → unknown (могли успеть отправить), pending остаются в очереди."""
-    async with Session() as s:
-        res = await s.execute(update(models.Certificate).where(models.Certificate.status == "sending").values(
-            status="unknown", error_text=CERT_UNKNOWN, done_at=datetime.now(timezone.utc)))
-        await s.commit()
-    if res.rowcount:
-        log.warning("keeper: %d сертификатов прервано рестартом посреди отправки — статус «проверьте баланс»", res.rowcount)
+    """Фоновая задача worker'а (сертификаты и оплаты). При старте sending → unknown (могли успеть отправить),
+    pending остаются в очереди."""
+    for m, text in ((models.Certificate, CERT_UNKNOWN), (models.OrderPayment, PAY_UNKNOWN)):
+        async with Session() as s:
+            res = await s.execute(update(m).where(m.status == "sending").values(
+                status="unknown", error_text=text, done_at=datetime.now(timezone.utc)))
+            await s.commit()
+        if res.rowcount:
+            log.warning("keeper: %s: %d прервано рестартом посреди отправки — статус unknown", m.__tablename__, res.rowcount)
     while True:
         try:
             await start_cert_lanes()

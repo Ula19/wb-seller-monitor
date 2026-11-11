@@ -793,6 +793,71 @@ async def certificates(ids: list[int] = Query(..., max_length=500), u=Depends(us
             for c, a in rows.all()]
 
 
+@app.get("/api/certificates/history")
+async def certificates_history(date_from: date | None = Query(None, alias="from"), date_to: date | None = Query(None, alias="to"),
+                               account_id: int | None = None, u=Depends(user), s=Depends(db)):
+    """История сертификатов: дни from–to по МСК включительно (нет — без границы), новые сверху."""
+    m = models.Certificate
+    q = (select(m, models.WbAccount).outerjoin(models.WbAccount, models.WbAccount.id == m.account_id)
+         .where(m.user_id == u.telegram_id).order_by(m.created_at.desc(), m.id.desc()).limit(5000))
+    if date_from:
+        q = q.where(m.created_at >= datetime.combine(date_from, dtime(), repo.MSK))
+    if date_to:
+        q = q.where(m.created_at < datetime.combine(date_to + timedelta(days=1), dtime(), repo.MSK))
+    if account_id is not None:
+        q = q.where(m.account_id == account_id)
+    return [{**{f: getattr(c, f) for f in CERT_FIELDS}, "account_title": a and a.title} for c, a in (await s.execute(q)).all()]
+
+
+# ---------- оплата заказов с WB Кошелька ----------
+PAY_FIELDS = ("id", "account_id", "rids", "amount", "status", "error_text", "funds_before", "funds_after",
+              "created_at", "done_at")
+
+
+class PayIn(BaseModel):
+    account_id: int
+    rids: list[str] = Field(min_length=1, max_length=200)
+    confirm_amount: int  # сумма, которую человек подтвердил; не совпала с нашей — 409, ничего не платим
+
+
+@app.post("/api/payments", status_code=201)
+async def add_payment(body: PayIn, u=Depends(user), s=Depends(db)):
+    """Оплата неоплаченных позиций аккаунта в очередь (платит worker). Сумма — по нашим ценам из account_orders.
+    Строка аккаунта под FOR UPDATE: двойной клик / два окна не создадут вторую оплату тех же rids."""
+    acc = await s.scalar(select(models.WbAccount).where(
+        models.WbAccount.id == body.account_id, models.WbAccount.user_id == u.telegram_id).with_for_update())
+    if acc is None:
+        raise HTTPException(404, "нет такого аккаунта")
+    if acc.status != "active":
+        raise HTTPException(422, "аккаунт не активен — нужен вход")
+    if acc.wallet_blocked:
+        raise HTTPException(422, "Кошелёк заблокирован — оплата им недоступна")
+    rids = list(dict.fromkeys(body.rids))
+    orders = {o.rid: o for o in await s.scalars(select(models.AccountOrder).where(
+        models.AccountOrder.account_id == acc.id, models.AccountOrder.rid.in_(rids)))}
+    if any(orders.get(r) is None or orders[r].paid is not False for r in rids):
+        raise HTTPException(422, "товар уже оплачен или пропал из заказов — обновите аккаунт")
+    p = models.OrderPayment
+    busy = await s.scalars(select(p.rids).where(p.account_id == acc.id, p.status.in_(("pending", "sending"))))
+    if set(rids) & {r for x in busy for r in x}:
+        raise HTTPException(409, "эти товары уже оплачиваются — дождитесь итога")
+    amount = sum(orders[r].price or 0 for r in rids)
+    if amount != body.confirm_amount:
+        raise HTTPException(409, f"сумма изменилась: {amount:,} ₽ — обновите и подтвердите заново".replace(",", " "))
+    row = p(user_id=u.telegram_id, account_id=acc.id, rids=rids, amount=amount)
+    s.add(row)
+    await s.commit()
+    return {"id": row.id, "amount": amount}
+
+
+@app.get("/api/payments")
+async def payments(ids: list[int] = Query(..., max_length=500), u=Depends(user), s=Depends(db)):
+    """Статусы оплат для окна (опрос раз в 1–2 с)."""
+    p = models.OrderPayment
+    rows = await s.scalars(select(p).where(p.id.in_(ids), p.user_id == u.telegram_id).order_by(p.id))
+    return [{f: getattr(x, f) for f in PAY_FIELDS} for x in rows]
+
+
 # ---------- уведомления WB (колокольчик) ----------
 NOTICE_FIELDS = ("id", "account_id", "topic_id", "title", "text", "url", "dt", "read_at")
 

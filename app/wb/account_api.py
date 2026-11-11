@@ -438,6 +438,44 @@ async def activate_cert(state: dict, proxy: str | None, code: str, sleep=None) -
     return res
 
 
+PAY_URL = "https://wbxoofex.wildberries.ru/api/v3/orders_pay"
+# ponytail: у всех наших позиций pay_type 12 (HAR + проба 2026-11-11); если появится другой — хранить у позиции
+PAY_TYPE = 12
+
+
+class PayUnknown(Exception):
+    """Запрос оплаты мог дойти до WB, а ответа нет — оплата могла пройти."""
+
+
+def pay_body(rids: list[str]) -> str:
+    return json.dumps({"rids": [{"rid": r, "flags": 1} for r in rids],
+                       "return_url": WWW + "/lk/myorders/delivery?paymentSuccess=true",
+                       "pay_type": PAY_TYPE, "bypass_balance": True, "app_type": 1})
+
+
+async def pay_orders(state: dict, proxy: str | None, rids: list[str]) -> str | None:
+    """Оплата позиций с WB Кошелька (без СМС/PIN). → None — WB принял ({}); текст — WB отказал.
+    ProxyDown — до WB не дошли; PayUnknown — мог дойти, ответа нет; Unauthorized/NoBearer — нужен вход."""
+    cookies = {c.get("name"): c.get("value") for c in state.get("cookies") or []}
+    async with _client(state, proxy) as (call, auth, _):
+        headers = {**auth, "Content-Type": "text/plain;charset=UTF-8", "Referer": WWW + "/lk/myorders/delivery",
+                   **{h: cookies[c] for h, c in (("wbauid", "_wbauid"), ("deviceid", "device_id")) if cookies.get(c)}}
+        try:
+            d = await call("POST", PAY_URL, headers=headers, data=pay_body(rids))
+        except ProxyDown as e:
+            if PRE_SEND.search(str(e)):
+                raise
+            raise PayUnknown(str(e)) from e
+        except Unauthorized:
+            raise
+        except Exception as e:
+            r = getattr(e, "response", None)
+            if isinstance(getattr(r, "status_code", None), int) and 400 <= r.status_code < 500:  # WB отказал
+                return f"WB отказал: HTTP {r.status_code} {(getattr(r, 'text', '') or '')[:200]}".strip()
+            raise PayUnknown(f"{type(e).__name__}: {str(e)[:200]}") from e
+    return None if d == {} else f"WB ответил: {json.dumps(d, ensure_ascii=False)[:200]}"
+
+
 async def fetch_balance(state: dict, proxy: str | None = None) -> dict:
     """Только full-balance (после активации — свежий funds)."""
     async with _client(state, proxy) as (call, _, with_vkey):
@@ -664,6 +702,12 @@ if __name__ == "__main__":  # self-check на формах ответов из H
                 return R(200, x)
         return S, sent
 
+    curl = lambda t: RequestException(f"Failed to perform, curl: {t}. See https://curl.se/libcurl/c/libcurl-errors.html")
+    pre = ("(28) Connection timed out after 20002 milliseconds", "(56) CONNECT tunnel failed, response 502",
+           "(35) TLS connect error: error:00000000:invalid library (0):OPENSSL_internal:invalid library (0)",
+           "(7) Failed to connect to 51.194.246.76 port 44347 after 3 ms: Couldn't connect to server")
+    post = ("(28) Operation timed out after 20001 milliseconds with 0 bytes received", "(52) Empty reply from server",
+            "(56) Recv failure: Connection reset by peer", "(92) HTTP/2 stream 1 was not closed cleanly")
     async def certs():
         naps = []
 
@@ -688,12 +732,6 @@ if __name__ == "__main__":  # self-check на формах ответов из H
         res, sent = await run([busy] * 4)  # повторов не больше трёх
         assert res["error_number"] == 5 and len(sent) == 4 and naps == [3, 3, 3]
         assert (await run([400]))[0] == {"ok": False, "error_number": None, "error_text": "WB отклонил запрос: HTTP 400"}
-        curl = lambda t: RequestException(f"Failed to perform, curl: {t}. See https://curl.se/libcurl/c/libcurl-errors.html")
-        pre = ("(28) Connection timed out after 20002 milliseconds", "(56) CONNECT tunnel failed, response 502",
-               "(35) TLS connect error: error:00000000:invalid library (0):OPENSSL_internal:invalid library (0)",
-               "(7) Failed to connect to 51.194.246.76 port 44347 after 3 ms: Couldn't connect to server")
-        post = ("(28) Operation timed out after 20001 milliseconds with 0 bytes received", "(52) Empty reply from server",
-                "(56) Recv failure: Connection reset by peer", "(92) HTTP/2 stream 1 was not closed cleanly")
         for t in pre:
             try:
                 await run([curl(t)])
@@ -724,6 +762,40 @@ if __name__ == "__main__":  # self-check на формах ответов из H
             except CertUnknown:
                 pass
     asyncio.run(certs())
+
+    # оплата (HAR pay_order.har): тело, заголовки, {} → принято, прочее → текст ошибки, ProxyDown до/после отправки
+    assert json.loads(pay_body(["r1", "r2"])) == {
+        "rids": [{"rid": "r1", "flags": 1}, {"rid": "r2", "flags": 1}],
+        "return_url": "https://www.wildberries.ru/lk/myorders/delivery?paymentSuccess=true",
+        "pay_type": 12, "bypass_balance": True, "app_type": 1}
+
+    async def pays():
+        async def run(script, cookies=()):
+            S, sent = cert_session(script)
+            with patch(f"{__name__}.AsyncSession", S), patch(f"{__name__}.web_proxy", lambda: None):
+                return await pay_orders({**st, "cookies": list(cookies)}, None, ["r1"]), sent
+        res, sent = await run([{}], [{"name": "_wbauid", "value": "123"}, {"name": "device_id", "value": "site_x"}])
+        m, url, kw = sent[0]
+        assert res is None and (m, url) == ("POST", PAY_URL) and json.loads(kw["data"])["rids"] == [{"rid": "r1", "flags": 1}]
+        h = kw["headers"]
+        assert (h["wbauid"], h["deviceid"], h["Content-Type"]) == ("123", "site_x", "text/plain;charset=UTF-8"), h
+        assert h["Authorization"].startswith("Bearer ") and h["Referer"].endswith("/lk/myorders/delivery")
+        assert "wbauid" not in (await run([{}]))[1][0][2]["headers"]  # кук нет — заголовков нет
+        assert (await run([{"error": "no money"}]))[0] == 'WB ответил: {"error": "no money"}'
+        assert (await run([400]))[0].startswith("WB отказал: HTTP 400")
+        for t in pre:
+            try:
+                await run([curl(t)])
+                raise AssertionError(t)
+            except ProxyDown:
+                pass
+        for x in [curl(t) for t in post] + [RuntimeError("json")]:
+            try:
+                await run([x])
+                raise AssertionError(x)
+            except PayUnknown:
+                pass
+    asyncio.run(pays())
 
     # уведомления (HAR notification.har): числа строкой, HTML в тексте, url из href или payload, только *.wildberries.ru
     pay = lambda url: json.dumps({"push_text": "x", "apns_custom_data": {"data": {"url": url, "urlType": "web"}}})
