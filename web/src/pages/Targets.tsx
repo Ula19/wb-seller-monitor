@@ -14,7 +14,7 @@ export default function Targets() {
   const { sorted, th } = useSort(shown, {
     target: (t) => t.target, best: (t) => t.best_price, gap: (t) => t.gap_pct,
     stock: (t) => t.stock, at: (t) => (t.below_at ? -new Date(t.below_at).getTime() : null),
-  });
+  }, "targets");
   const below = all.filter((t) => t.below).length;
   return (
     <section>

@@ -35,7 +35,8 @@ STATUSES_URL = "https://status-tracker.wb.ru/api/v6/statuses?lang=ru"
 TOKEN_KEYS = ("wbx__tokenData", "wbid-oauth-sdk-access-token")  # по порядку предпочтения
 WWW = "https://www.wildberries.ru"
 WALLET_WCTYPE = 1  # grade.payload.payments[]: способ оплаты «Кошелёк»
-PAY_STATE = {4: True, 1: False}  # rids[].pay_state: 4 оплачен, 1 не оплачен, прочее — не знаем
+# rids[].pay_state: 4 оплачен; 1 и 3 — не оплачен (3 — Katana 17 в ПВЗ, WB пишет «Не оплачен», проба paystate_probe); прочее — не знаем
+PAY_STATE = {4: True, 1: False, 3: False}
 JWT = re.compile(r"eyJ[\w-]+\.[\w-]+\.[\w-]+")
 HEADERS = {"Origin": "https://www.wildberries.ru", "Referer": "https://www.wildberries.ru/",
            "Accept": "application/json"}
@@ -477,12 +478,13 @@ if __name__ == "__main__":  # self-check на формах ответов из H
     # цена = total_price − discount (Аня, 2026-11-10): у неоплаченных price полная, скидка Кошелька — в discount
     o = parse_orders({"data": [{"rids": [
         {"uid": "rtx", "pay_state": 1, "total_price": 5538900, "price": 5538900, "discount": 332400},
-        {"uid": "katana", "pay_state": 1, "total_price": 9546900, "price": 9546900, "discount": 572900},
+        {"uid": "katana", "pay_state": 3, "total_price": 9546900, "price": 9546900, "discount": 572900},  # 3 — «Не оплачен»
         {"uid": "honor", "pay_state": 4, "total_price": 2760800, "price": 2595100, "discount": 165700},
         {"uid": "old", "price": 100000},  # без total_price — как раньше
         {"uid": "nodisc", "total_price": 50000, "price": 50000, "discount": None}]}]})
     assert [(x["rid"], x["price"]) for x in o] == [("rtx", 52065), ("katana", 89740), ("honor", 25951),
                                                    ("old", 1000), ("nodisc", 500)], o
+    assert [x["paid"] for x in o] == [False, False, True, None, None], o  # pay_state 3 — не оплачен, нет кода — не знаем
     assert parse_profile({"value": {"isAuthenticated": True, "firstName": " Анна ", "purchasePercent": 94,
                                     "formattedPhoneMobile": "+7 916 123-45-67"}}) == \
         {"name": "Анна", "phone": "+7 916 123-45-67", "purchase_pct": 94}

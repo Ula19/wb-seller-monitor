@@ -352,8 +352,7 @@ export default function Account() {
       </div>
       {a.site_lost && a.status === "active" && <div className="small bad-t">{a.visit_error}: код получения и история
         баланса не обновляются (лимит и заказы — обновляются)</div>}
-      {a.wallet_blocked && <div className="small bad-t">WB наложил ограничение на Кошелёк — оплата им недоступна
-        {a.wallet_arrested ? ` · под арестом ${rub(a.wallet_arrested)}` : ""}</div>}
+      {a.wallet_blocked && <div className="small bad-t">WB наложил ограничение на Кошелёк — оплата им недоступна</div>}
       {a.proxy_down && <div className="small up-t">прокси не ответил {a.proxy_fails} раз подряд, последний {time(a.proxy_fail_at)}</div>}
       <div className="tiles acc-tiles">
         <div className="tile"><b>{rub(a.funds)}</b><span>Кошелёк WB</span></div>

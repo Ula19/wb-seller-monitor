@@ -46,7 +46,7 @@ export default function Items() {
     shelf: (i) => i.shelf_price, wallet: (i) => i.wallet_price, biz: (i) => (i.price_stale ? null : i.price),
     delta: (i) => (delta(i) || null), stock: (i) => i.stock,
     gap: (i) => (i.target && i.best_price ? i.best_price - i.target : null),
-  });
+  }, "items");
 
   const CHIPS: [Chip, string][] = [["all", "Все"], ["target", "🎯 Ниже цели"], ["down", "▼ Подешевели"],
     ["up", "▲ Подорожали"], ["out", "Нет в наличии"]];

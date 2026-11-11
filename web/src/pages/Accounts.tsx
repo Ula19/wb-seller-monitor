@@ -115,7 +115,7 @@ export default function Accounts() {
   const { sorted: list, th } = useSort(all.filter((a) => matches(a, q)), {
     title: (a) => a.title, funds: (a) => a.funds, vb: (a) => a.vb_points, limit: (a) => a.limit_left,
     orders: (a) => inPvz(a) * 1000 + transit(a), unpaid: (a) => unpaid(a) || null,  // 0 — как пустое, внизу
-  });
+  }, "accounts");
   const sum = (f: (a: Account) => number) => all.reduce((s, a) => s + f(a), 0);
   const needLogin = all.filter((a) => a.status !== "active").length;
   return (
