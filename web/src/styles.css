@@ -360,3 +360,8 @@ tr.click:hover td { background: var(--bg); }
   .bell-panel { left: 8px; right: 8px; width: auto; top: 56px; max-height: calc(100vh - 140px); }
   .mob .bell { margin-left: auto; }
 }
+
+/* «Аккаунты»: номер строки, узкая «Обновлён» */
+.acc-table .no { width: 28px; padding-right: 0; text-align: right; font-size: 12px; }
+.acc-table .upd { width: 1%; white-space: nowrap; font-size: 12px; }
+.acc-head .no { margin-right: 2px; }

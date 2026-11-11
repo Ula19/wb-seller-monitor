@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError, rub, type Account, type Cert } from "../api";
-import { Blocked, Limit, visible } from "../accounts";
+import { Blocked, Limit, points, unpaid } from "../accounts";
 import { distribute, NOMINAL_MAX, NOMINAL_MIN, NOMINALS, normCode, parseList, parseNominal, type BadLine } from "../certs";
 
 // certId/orig — строка из неудачных прошлого круга («← Назад»): код не меняли — retry той же записи, поменяли — новый код
@@ -11,7 +11,6 @@ type Row = { key: number; code: string; nominal: string; account: number | null;
 type Known = Record<string, { status: string; title: string | null; done_at: string }>;
 let seq = 0;
 const newRow = (r: Partial<Row> = {}): Row => ({ key: ++seq, code: "", nominal: "", account: null, ...r });
-const unpaid = (a: Account) => visible(a.orders).filter((o) => o.paid === false).reduce((s, o) => s + (o.price ?? 0), 0);
 const sum = (xs: number[]) => xs.reduce((s, x) => s + x, 0);
 const pcs = (n: number) => `${n} шт.`;
 const FINAL = ["ok", "error", "unknown"];
@@ -43,7 +42,7 @@ function StepAccounts({ all, picked, setPicked }: { all: Account[]; picked: numb
       </div>
       <div className="table-wrap">
         <table className="cert-accs">
-          <thead><tr><th /><th>Аккаунт</th><th>Остаток лимита</th><th className="num">Кошелёк WB</th><th className="num">Не оплачено</th></tr></thead>
+          <thead><tr><th /><th>Аккаунт</th><th>Остаток лимита</th><th className="num">Кошелёк WB</th><th className="num">ВБ-баллы</th><th className="num">Не оплачено</th></tr></thead>
           <tbody>
             {list.map((a) => {
               const u = unpaid(a);
@@ -54,6 +53,7 @@ function StepAccounts({ all, picked, setPicked }: { all: Account[]; picked: numb
                     {a.proxy_down && <span className="pill warn">прокси не отвечает</span>}</td>
                   <td className="lim"><Limit a={a} short /></td>
                   <td className="num">{rub(a.funds)}</td>
+                  <td className="num">{points(a.vb_points)}</td>
                   <td className="num">{u ? <span className="up-t">{rub(u)}</span> : <span className="muted">—</span>}</td>
                 </tr>
               );

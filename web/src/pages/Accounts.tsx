@@ -4,7 +4,8 @@ import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError, rub, time, type Account } from "../api";
-import { Blocked, inPvz, Limit, points, StatusDot, transit } from "../accounts";
+import { Blocked, inPvz, Limit, points, StatusDot, transit, unpaid } from "../accounts";
+import { useSort } from "../sort";
 import CertModal from "./CertModal";
 import LoginModal from "./LoginModal";
 
@@ -31,6 +32,11 @@ function OrdersNote({ a }: { a: Account }) {
   return <>{t > 0 && `${t} в пути`}{t > 0 && p > 0 && " · "}{p > 0 && <b className="ok-t">{p} в ПВЗ</b>}</>;
 }
 
+function Unpaid({ a }: { a: Account }) {
+  const u = unpaid(a);
+  return u ? <span className="up-t">{rub(u)}</span> : <span className="muted">—</span>;
+}
+
 function Name({ a }: { a: Account }) {
   return (
     <span className="acc-name">
@@ -40,22 +46,28 @@ function Name({ a }: { a: Account }) {
   );
 }
 
-function ListView({ list }: { list: Account[] }) {
+type Th = ReturnType<typeof useSort<Account>>["th"];
+
+function ListView({ list, th, total }: { list: Account[]; th: Th; total: number }) {
   const nav = useNavigate();
   return (
     <div className="card table-wrap">
       <table className="acc-table">
-        <thead><tr><th>Аккаунт</th><th className="num">Кошелёк WB</th><th className="num">ВБ-баллы</th>
-          <th>Лимит скидки</th><th>Заказы</th><th>Обновлён</th></tr></thead>
+        <thead><tr><th className="no">№</th>
+          {th("title", `Аккаунт · ${list.length === total ? total : `${list.length} из ${total}`}`, "")}
+          {th("funds", "Кошелёк WB")}{th("vb", "ВБ-баллы")}{th("limit", "Лимит скидки", "")}{th("orders", "Заказы", "")}
+          {th("unpaid", "Не оплачено")}<th className="upd">Обновлён</th></tr></thead>
         <tbody>
-          {list.map((a) => (
+          {list.map((a, i) => (
             <tr key={a.id} className="click" onClick={() => nav(`/accounts/${a.id}`)}>
+              <td className="no muted">{i + 1}</td>
               <td><Name a={a} /></td>
               <td className="num">{rub(a.funds)}</td>
               <td className="num">{points(a.vb_points)}</td>
               <td className="lim"><Limit a={a} short /></td>
               <td><OrdersNote a={a} /></td>
-              <td className="muted">{a.polling ? <span className="spin" /> : time(a.state_at)}</td>
+              <td className="num"><Unpaid a={a} /></td>
+              <td className="upd muted">{a.polling ? <span className="spin" /> : time(a.state_at)}</td>
             </tr>
           ))}
         </tbody>
@@ -68,15 +80,16 @@ function TilesView({ list }: { list: Account[] }) {
   const nav = useNavigate();
   return (
     <div className="acc-grid">
-      {list.map((a) => (
+      {list.map((a, i) => (
         <div key={a.id} className="card acc click" onClick={() => nav(`/accounts/${a.id}`)}>
-          <div className="acc-head"><Name a={a} /><span className="muted small">{a.polling ? <span className="spin" /> : time(a.state_at)}</span></div>
+          <div className="acc-head"><span><span className="no muted small">{i + 1}</span> <Name a={a} /></span><span className="muted small">{a.polling ? <span className="spin" /> : time(a.state_at)}</span></div>
           <div className="kv">
             <div><span>Кошелёк WB</span><b>{rub(a.funds)}</b></div>
             <div><span>ВБ-баллы</span><b>{points(a.vb_points)}</b></div>
           </div>
           <div className="small"><span className="muted">Лимит скидки</span><Limit a={a} short /></div>
           <div className="small"><OrdersNote a={a} /></div>
+          {unpaid(a) > 0 && <div className="small"><span className="muted">Не оплачено </span><Unpaid a={a} /></div>}
         </div>
       ))}
     </div>
@@ -98,7 +111,11 @@ export default function Accounts() {
     onError: (e: unknown) => setNote(e instanceof ApiError ? e.message : "ошибка"),
   });
   const pick = (v: "list" | "tiles") => { setView(v); try { localStorage.setItem(VIEW_KEY, v); } catch { /* приватный режим */ } };
-  const list = all.filter((a) => matches(a, q));
+  // порядок — один для списка и плиток; по умолчанию — как пришёл с сервера
+  const { sorted: list, th } = useSort(all.filter((a) => matches(a, q)), {
+    title: (a) => a.title, funds: (a) => a.funds, vb: (a) => a.vb_points, limit: (a) => a.limit_left,
+    orders: (a) => inPvz(a) * 1000 + transit(a), unpaid: (a) => unpaid(a) || null,  // 0 — как пустое, внизу
+  });
   const sum = (f: (a: Account) => number) => all.reduce((s, a) => s + f(a), 0);
   const needLogin = all.filter((a) => a.status !== "active").length;
   return (
@@ -126,7 +143,7 @@ export default function Accounts() {
       {accounts.isLoading ? <p className="muted">Загрузка…</p>
         : !all.length ? <div className="card empty">Аккаунтов пока нет. <button className="link" onClick={() => setAdding(true)}>Добавить первый</button></div>
         : !list.length ? <div className="card empty">Ничего не нашлось</div>
-        : view === "list" ? <ListView list={list} /> : <TilesView list={list} />}
+        : view === "list" ? <ListView list={list} th={th} total={all.length} /> : <TilesView list={list} />}
       <LoginModal open={adding} onClose={() => setAdding(false)} relogin={null} />
       <CertModal open={certs} onClose={() => setCerts(false)} all={all} />
     </section>

@@ -9,6 +9,8 @@ export const GROUP: Record<number, string> = { 1: "оформлен", 2: "сбо
 export const visible = (orders: Order[]) => orders.filter((o) => !o.hidden);
 export const transit = (a: Account) => visible(a.orders).filter((o) => o.group_id === 3).length;
 export const inPvz = (a: Account) => visible(a.orders).filter((o) => o.group_id === 5).length;
+/** «Не оплачено»: сумма неоплаченных активных заказов (paid === false; «не знаем» не считаем), без скрытых. */
+export const unpaid = (a: Account) => visible(a.orders).filter((o) => o.paid === false).reduce((s, o) => s + (o.price ?? 0), 0);
 export const ddmm = (iso: string) => new Date(iso).toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit" });
 export const points = (n: number | null | undefined) => (n == null ? "—" : n.toLocaleString("ru-RU"));
 
