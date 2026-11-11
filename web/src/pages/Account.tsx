@@ -5,12 +5,12 @@ import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError, rub, time, type AccountFull, type BalanceOp, type Order, type Purchase, type VbOp } from "../api";
 import {
-  Blocked, byPvz, ddmm, GROUP, Limit, lines, pickupText, points, STATUS, StatusDot, Thumb, Title, useImg, visible, type Pvz,
+  Blocked, byPvz, CertCode, ddmm, GROUP, Limit, lines, Period, pickupText, points, STATUS, StatusDot, Thumb, Title, useImg,
+  usePeriod, visible, when, type Pvz,
 } from "../accounts";
 import LoginModal, { type Relogin } from "./LoginModal";
+import { PvzPay, toPay } from "./PayModal";
 
-const when = (iso: string | null) => (iso ? new Date(iso).toLocaleString("ru-RU",
-  { day: "2-digit", month: "2-digit", year: "2-digit", hour: "2-digit", minute: "2-digit" }) : "—");
 const signed = (n: number | null, unit = " ₽") => (n == null ? "—"
   : `${n > 0 ? "+" : n < 0 ? "−" : ""}${Math.abs(n).toLocaleString("ru-RU", { maximumFractionDigits: 2 })}${unit}`);
 const wbLink = (nm: number | null) => `https://www.wildberries.ru/catalog/${nm}/detail.aspx`;
@@ -77,6 +77,7 @@ function OrdersTab({ a, sync }: { a: AccountFull; sync: ReturnType<typeof useSyn
   const qc = useQueryClient();
   const img = useImg();
   const [shown, setShown] = useState<Set<number>>(new Set());  // ПВЗ, где показываем скрытые
+  const [paying, setPaying] = useState<number | null>(null);  // ПВЗ, где открыто окно оплаты
   // rid с точками (eAe.dc18….0.0) — в URL кодируем; «Скрыть» строки = все её позиции
   const toggle = useMutation({
     mutationFn: (os: Order[]) => Promise.all(os.map((o) => api(`/accounts/${a.id}/orders/${encodeURIComponent(o.rid)}`,
@@ -92,6 +93,7 @@ function OrdersTab({ a, sync }: { a: AccountFull; sync: ReturnType<typeof useSyn
         const ready = vis.filter((o) => o.group_id === 5).length;
         const going = vis.filter((o) => o.group_id === 3).length;
         const rows = lines(shown.has(g.id) ? g.orders : vis);
+        const due = toPay(a, g.orders).reduce((s, o) => s + (o.price ?? 0), 0);
         return (
           <div key={g.id} className="card pvz-group">
             <div className="pvz-head">
@@ -123,44 +125,20 @@ function OrdersTab({ a, sync }: { a: AccountFull; sync: ReturnType<typeof useSyn
               {hidden > 0 && <span className="muted small">Скрытых: {hidden} · <button className="link" onClick={() => {
                 const s = new Set(shown); s.has(g.id) ? s.delete(g.id) : s.add(g.id); setShown(s);
               }}>{shown.has(g.id) ? "убрать" : "показать"}</button></span>}
+              {due > 0 && <button className="btn" onClick={() => setPaying(g.id)}>Оплатить {rub(due)}</button>}
               {ready > 0 && <PickupButton g={g} a={a} sync={sync} />}
             </div>
           </div>
         );
       })}
       {sync.err && <p className="err">{sync.err}</p>}
+      {paying != null && byPvz(a.orders).some((g) => g.id === paying) &&
+        <PvzPay a={a} g={byPvz(a.orders).find((g) => g.id === paying)!} onClose={() => setPaying(null)} />}
     </div>
   );
 }
 
 // ---------- История заказов ----------
-const iso = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-const daysAgo = (n: number) => iso(new Date(Date.now() - n * 86400_000));
-/** День операции по МСК (YYYY-MM-DD) — так же режет период сервер у «Истории заказов». */
-const mskDay = (dt: string) => new Date(Date.parse(dt) + 3 * 3600_000).toISOString().slice(0, 10);
-
-/** «С / По» + «Всё время | 7 дней | 30 дней»; days — пресет по умолчанию (null — всё время). */
-function usePeriod(days: number | null) {
-  const [from, setFrom] = useState(() => (days == null ? "" : daysAgo(days - 1)));
-  const [to, setTo] = useState(() => (days == null ? "" : iso(new Date())));
-  const preset = (d: number | null) => { setFrom(d == null ? "" : daysAgo(d - 1)); setTo(d == null ? "" : iso(new Date())); };
-  const active = !from && !to ? "all" : to === iso(new Date()) && from === daysAgo(6) ? 7 : to === iso(new Date()) && from === daysAgo(29) ? 30 : "";
-  const has = (dt: string | null) => (!from && !to) || (!!dt && (!from || mskDay(dt) >= from) && (!to || mskDay(dt) <= to));
-  return { from, to, setFrom, setTo, preset, active, has };
-}
-
-function Period({ p }: { p: ReturnType<typeof usePeriod> }) {
-  return <>
-    <label className="small">С <input type="date" value={p.from} max={p.to || undefined} onChange={(e) => p.setFrom(e.target.value)} /></label>
-    <label className="small">По <input type="date" value={p.to} min={p.from || undefined} onChange={(e) => p.setTo(e.target.value)} /></label>
-    <div className="seg">
-      <button className={p.active === "all" ? "on" : ""} onClick={() => p.preset(null)}>Всё время</button>
-      <button className={p.active === 7 ? "on" : ""} onClick={() => p.preset(7)}>7 дней</button>
-      <button className={p.active === 30 ? "on" : ""} onClick={() => p.preset(30)}>30 дней</button>
-    </div>
-  </>;
-}
-
 function HistoryTab({ a }: { a: AccountFull }) {
   const img = useImg();
   const period = usePeriod(7);  // по умолчанию — 7 дней, включая сегодня
@@ -224,17 +202,6 @@ function Note({ a, op }: { a: AccountFull; op: BalanceOp }) {
       {state && <span className={`small ${state === "сохранено" ? "muted" : "bad-t"}`}>{state}</span>}
     </span>
   );
-}
-
-/** Код сертификата: клик — в буфер обмена, на 1,5 с «скопировано». */
-function CertCode({ code }: { code: string }) {
-  const [done, setDone] = useState("");
-  const copy = async () => {
-    try { await navigator.clipboard.writeText(code); setDone("скопировано"); } catch { setDone("не скопировалось"); }
-    setTimeout(() => setDone(""), 1500);
-  };
-  return <button className="cert-code" title="Скопировать код сертификата" onClick={copy}>
-    <code>{code}</code>{done && <span className={`small ${done === "скопировано" ? "ok-t" : "bad-t"}`}> {done}</span>}</button>;
 }
 
 function BalanceTab({ a, sync }: { a: AccountFull; sync: ReturnType<typeof useSync> }) {

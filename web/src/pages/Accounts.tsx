@@ -1,13 +1,15 @@
 // «Аккаунты»: поиск, список или плитки, итоги, «Обновить все», вход новым аккаунтом в модалке.
 // Клик по аккаунту — его страница (/accounts/:id) с заказами, историей, балансом и ВБ-баллами.
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError, rub, time, type Account } from "../api";
 import { Blocked, inPvz, Limit, points, StatusDot, transit, unpaid } from "../accounts";
 import { useSort } from "../sort";
+import CertHistory from "./CertHistory";
 import CertModal from "./CertModal";
 import LoginModal from "./LoginModal";
+import PayModal from "./PayModal";
 
 const VIEW_KEY = "accounts.view";  // «Список | Плитки» — помним в браузере
 const readView = (): "list" | "tiles" => {
@@ -43,6 +45,40 @@ function Name({ a }: { a: Account }) {
       <StatusDot a={a} /><Link to={`/accounts/${a.id}`} onClick={(e) => e.stopPropagation()}><b>{a.title}</b></Link>
       <span className="muted small"> {a.phone ?? a.phone_mask}</span> <Blocked a={a} />
     </span>
+  );
+}
+
+type Fn = "login" | "cert" | "history" | "pay";
+
+/** «Функции»: всё, что делается над аккаунтами, — одним меню по группам. Закрытие — клик вне или Esc. */
+function Functions({ on }: { on: (f: Fn) => void }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const click = (e: MouseEvent) => { if (!ref.current?.contains(e.target as Node)) setOpen(false); };
+    const esc = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
+    document.addEventListener("mousedown", click);
+    window.addEventListener("keydown", esc);
+    return () => { document.removeEventListener("mousedown", click); window.removeEventListener("keydown", esc); };
+  }, [open]);
+  const item = (f: Fn, t: string, d: string) => (
+    <button role="menuitem" className="fn-item" onClick={() => { setOpen(false); on(f); }}><b>{t}</b><span className="muted small">{d}</span></button>);
+  return (
+    <div className="fn" ref={ref}>
+      <button className="btn" aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(!open)}>Функции ▾</button>
+      {open && (
+        <div className="fn-menu card" role="menu">
+          <div className="fn-group">Аккаунты</div>
+          {item("login", "Добавить аккаунт", "Подключить аккаунт WB по номеру и коду")}
+          <div className="fn-group">Сертификаты</div>
+          {item("cert", "Добавить сертификат", "Пополнить кошельки кодами сертификатов")}
+          {item("history", "История сертификатов", "Все добавленные коды: когда, куда, номинал")}
+          <div className="fn-group">Заказы</div>
+          {item("pay", "Оплата товаров", "Оплатить неоплаченные заказы с кошелька")}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -102,8 +138,8 @@ export default function Accounts() {
   const all = accounts.data ?? [];
   const [q, setQ] = useState("");
   const [view, setView] = useState(readView);
-  const [adding, setAdding] = useState(false);
-  const [certs, setCerts] = useState(false);
+  const [fn, setFn] = useState<Fn | null>(null);
+  const close = () => setFn(null);
   const [note, setNote] = useState("");
   const pollAll = useMutation({
     mutationFn: () => api<{ count: number }>("/accounts/poll-all", { method: "POST" }),
@@ -129,8 +165,7 @@ export default function Accounts() {
         </div>
         <button className="btn ghost" disabled={pollAll.isPending || all.some((a) => a.polling)} onClick={() => pollAll.mutate()}>
           {all.some((a) => a.polling) ? <><span className="spin" /> Обновляю…</> : "↻ Обновить все"}</button>
-        <button className="btn ghost" disabled={!all.length} onClick={() => setCerts(true)}>🎁 Добавить сертификат</button>
-        <button className="btn" onClick={() => setAdding(true)}>+ Добавить аккаунт</button>
+        <Functions on={setFn} />
       </div>
       {note && <p className="muted small">{note}</p>}
       <div className="tiles">
@@ -141,11 +176,13 @@ export default function Accounts() {
         <div className="tile"><b>{all.length}</b><span>аккаунтов{needLogin > 0 && <span className="bad-t"> · {needLogin} нужен вход</span>}</span></div>
       </div>
       {accounts.isLoading ? <p className="muted">Загрузка…</p>
-        : !all.length ? <div className="card empty">Аккаунтов пока нет. <button className="link" onClick={() => setAdding(true)}>Добавить первый</button></div>
+        : !all.length ? <div className="card empty">Аккаунтов пока нет. <button className="link" onClick={() => setFn("login")}>Добавить первый</button></div>
         : !list.length ? <div className="card empty">Ничего не нашлось</div>
         : view === "list" ? <ListView list={list} th={th} total={all.length} /> : <TilesView list={list} />}
-      <LoginModal open={adding} onClose={() => setAdding(false)} relogin={null} />
-      <CertModal open={certs} onClose={() => setCerts(false)} all={all} />
+      <LoginModal open={fn === "login"} onClose={close} relogin={null} />
+      <CertModal open={fn === "cert"} onClose={close} all={all} />
+      <CertHistory open={fn === "history"} onClose={close} all={all} />
+      <PayModal open={fn === "pay"} onClose={close} all={all} />
     </section>
   );
 }

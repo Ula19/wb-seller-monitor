@@ -1,7 +1,8 @@
 // Общее для «Аккаунтов» (список) и страницы аккаунта: подписи, лимит, имя, картинки товаров.
-import { useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, rub, type Account, type Order } from "./api";
+import { api, MSK, mskDay, rub, type Account, type Order } from "./api";
+import { limitNote } from "./certs";
 
 export const STATUS: Record<string, string> = { active: "активен", relogin: "нужен вход", off: "выключен" };
 export const GROUP: Record<number, string> = { 1: "оформлен", 2: "сборка", 3: "в пути", 5: "в ПВЗ" };
@@ -11,14 +12,79 @@ export const transit = (a: Account) => visible(a.orders).filter((o) => o.group_i
 export const inPvz = (a: Account) => visible(a.orders).filter((o) => o.group_id === 5).length;
 /** «Не оплачено»: сумма неоплаченных активных заказов (paid === false; «не знаем» не считаем), без скрытых. */
 export const unpaid = (a: Account) => visible(a.orders).filter((o) => o.paid === false).reduce((s, o) => s + (o.price ?? 0), 0);
-export const ddmm = (iso: string) => new Date(iso).toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit" });
+export const ddmm = (iso: string) => new Date(iso).toLocaleDateString("ru-RU", { timeZone: MSK, day: "2-digit", month: "2-digit" });
+/** Дата и время по МСК: 11.11.26, 14:05. */
+export const when = (iso: string | null) => (iso ? new Date(iso).toLocaleString("ru-RU",
+  { timeZone: MSK, day: "2-digit", month: "2-digit", year: "2-digit", hour: "2-digit", minute: "2-digit" }) : "—");
 export const points = (n: number | null | undefined) => (n == null ? "—" : n.toLocaleString("ru-RU"));
 
 // сброс месячного лимита — 1-е число следующего месяца
-export const resetDate = () => {
-  const d = new Date();
-  return new Date(d.getFullYear(), d.getMonth() + 1, 1).toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit" });
-};
+export const resetDate = () => `01.${String((Number(mskDay(Date.now()).slice(5, 7)) % 12) + 1).padStart(2, "0")}`;
+
+/** Текст лимита при пополнении (+ красные предупреждения): n — сколько ₽ сертификатами идёт на аккаунт. */
+export function LimitNote({ a, n }: { a: Account; n: number }) {
+  const r = limitNote(a.limit_left, unpaid(a), a.funds ?? 0, n, resetDate());
+  return (
+    <div className="lim-note small">
+      <div className="muted">{r.text}</div>
+      {r.red.map((x) => <div key={x} className="red-box">{x}</div>)}
+    </div>
+  );
+}
+
+/** Окно поверх страницы; Esc закрывает. backClose — и клик по фону (где нечего потерять). */
+export function Modal({ label, onClose, wide = false, backClose = false, children }: {
+  label: string; onClose: () => void; wide?: boolean; backClose?: boolean; children: ReactNode;
+}) {
+  useEffect(() => {
+    const esc = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", esc);
+    return () => window.removeEventListener("keydown", esc);
+  }, [onClose]);
+  return (
+    <div className="modal-back" onClick={(e) => backClose && e.target === e.currentTarget && onClose()}>
+      <div className={`modal card${wide ? " wide" : ""}`} role="dialog" aria-modal="true" aria-label={label}>
+        <button className="modal-x link" aria-label="Закрыть" onClick={onClose}>✕</button>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+// ---------- период «С / По» + пресеты (дни — по МСК, как режет сервер) ----------
+const daysAgo = (n: number) => mskDay(Date.now() - n * 86400_000);
+
+/** days — пресет по умолчанию (null — всё время). */
+export function usePeriod(days: number | null) {
+  const [from, setFrom] = useState(() => (days == null ? "" : daysAgo(days - 1)));
+  const [to, setTo] = useState(() => (days == null ? "" : daysAgo(0)));
+  const preset = (d: number | null) => { setFrom(d == null ? "" : daysAgo(d - 1)); setTo(d == null ? "" : daysAgo(0)); };
+  const active = (d: number | null) => (d == null ? !from && !to : to === daysAgo(0) && from === daysAgo(d - 1));
+  const has = (dt: string | null) => (!from && !to) || (!!dt && (!from || mskDay(dt) >= from) && (!to || mskDay(dt) <= to));
+  return { from, to, setFrom, setTo, preset, active, has };
+}
+
+export function Period({ p, presets = [null, 7, 30] }: { p: ReturnType<typeof usePeriod>; presets?: (number | null)[] }) {
+  return <>
+    <label className="small">С <input type="date" value={p.from} max={p.to || undefined} onChange={(e) => p.setFrom(e.target.value)} /></label>
+    <label className="small">По <input type="date" value={p.to} min={p.from || undefined} onChange={(e) => p.setTo(e.target.value)} /></label>
+    <div className="seg">
+      {presets.map((d) => <button key={String(d)} className={p.active(d) ? "on" : ""} onClick={() => p.preset(d)}>
+        {d == null ? "Всё время" : d === 1 ? "1 день" : `${d} дней`}</button>)}
+    </div>
+  </>;
+}
+
+/** Код сертификата: клик — в буфер обмена, на 1,5 с «скопировано». */
+export function CertCode({ code }: { code: string }) {
+  const [done, setDone] = useState("");
+  const copy = async () => {
+    try { await navigator.clipboard.writeText(code); setDone("скопировано"); } catch { setDone("не скопировалось"); }
+    setTimeout(() => setDone(""), 1500);
+  };
+  return <button className="cert-code" title="Скопировать код сертификата" onClick={copy}>
+    <code>{code}</code>{done && <span className={`small ${done === "скопировано" ? "ok-t" : "bad-t"}`}> {done}</span>}</button>;
+}
 
 export function StatusDot({ a }: { a: Account }) {
   return <i className={`dot ${a.status === "active" ? "ok" : a.status === "relogin" ? "bad" : "off"}`} title={STATUS[a.status]} />;

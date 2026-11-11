@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError, rub, type Account, type Cert } from "../api";
-import { Blocked, Limit, points, unpaid } from "../accounts";
+import { Blocked, ddmm, Limit, LimitNote, points, unpaid } from "../accounts";
 import { distribute, NOMINAL_MAX, NOMINAL_MIN, NOMINALS, normCode, parseList, parseNominal, type BadLine } from "../certs";
 
 // certId/orig — строка из неудачных прошлого круга («← Назад»): код не меняли — retry той же записи, поменяли — новый код
@@ -73,7 +73,7 @@ function rowProblem(r: Row, dup: Set<string>, known: Known, server: Record<numbe
   if (!c) return "неверный код — нужно 16 латинских букв и цифр";
   if (dup.has(c)) return "код повторяется в списке";
   const k = r.certId && c === r.orig ? undefined : known[c];  // свой же неудачный код — не «уже добавлен»
-  if (k) return k.status === "ok" ? `уже активирован${k.title ? `: ${k.title}` : ""}, ${new Date(k.done_at).toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit" })}`
+  if (k) return k.status === "ok" ? `уже активирован${k.title ? `: ${k.title}` : ""}, ${ddmm(k.done_at)}`
     : "уже добавлен — ждёт активации или проверки баланса";
   return null;
 }
@@ -144,7 +144,8 @@ function StepCerts({ accs, rows, setRows, problems }: {
       <button className="link" onClick={() => setRows([...rows, newRow({ account: accs.length === 1 ? accs[0].id : null })])}>+ Ещё сертификат</button>
       <div className="cert-cards">
         {per.map(({ a, n, s }) => (
-          <div key={a.id} className="card sm"><b>{a.title}</b><div className="small">{n ? `${pcs(n)} · ${rub(s)}` : <span className="muted">пока нет сертификатов</span>}</div></div>
+          <div key={a.id} className="card sm"><b>{a.title}</b><div className="small">{n ? `${pcs(n)} · ${rub(s)}` : <span className="muted">пока нет сертификатов</span>}</div>
+            <LimitNote a={a} n={s} /></div>
         ))}
         {orphan > 0 && <div className="card sm warn"><b>Без аккаунта: {pcs(orphan)}</b><div className="small">выберите аккаунт</div></div>}
       </div>
@@ -174,6 +175,7 @@ function Summary({ accs, items, certs }: { accs: Account[]; items: Item[]; certs
               {!certs ? `${pcs(mine.length)} · ${rub(s)} · баланс станет ${rub((a.funds ?? 0) + s)}`
                 : `${pcs(ok.length)} · ${rub(sum(ok.map((c) => c.nominal ?? 0)))}${done ? ` · баланс теперь ${rub(funds)}` : ""}`}
             </div>
+            {!certs && <LimitNote a={a} n={s} />}
             <ul className="cert-lines">
               {mine.map((i) => {
                 const c = byCode.get(i.code);

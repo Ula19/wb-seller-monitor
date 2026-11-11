@@ -104,11 +104,21 @@ export type Notice = {
 };
 export type NoticeCheck = { state: "requested" | "running" | "done"; new?: number; failed?: string[]; at: string } | null;
 
+export type Payment = {
+  id: number; account_id: number | null; rids: string[]; amount: number;
+  status: "pending" | "sending" | "ok" | "error" | "unknown"; error_text: string | null;
+  funds_before: number | null; funds_after: number | null; created_at: string; done_at: string | null;
+};
+
+// всё время на сайте — по Москве, как у WB, в каком бы поясе ни был браузер
+export const MSK = "Europe/Moscow";
+/** День по МСК (YYYY-MM-DD). У Москвы нет летнего времени — просто +3 ч к UTC. */
+export const mskDay = (d: string | number | Date) => new Date(new Date(d).getTime() + 3 * 3600_000).toISOString().slice(0, 10);
 export const rub = (n: number | null | undefined) => (n == null ? "—" : `${n.toLocaleString("ru-RU")} ₽`);
 export const time = (iso: string | number | null) => {
   if (iso == null) return "—";
   const d = typeof iso === "number" ? new Date(iso * 1000) : new Date(iso);
-  const today = new Date().toDateString() === d.toDateString();
-  return d.toLocaleString("ru-RU", today ? { hour: "2-digit", minute: "2-digit" }
-    : { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+  const today = mskDay(Date.now()) === mskDay(d);
+  return d.toLocaleString("ru-RU", today ? { timeZone: MSK, hour: "2-digit", minute: "2-digit" }
+    : { timeZone: MSK, day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
 };

@@ -45,6 +45,26 @@ export function distribute<T>(rows: T[], accounts: number[]): (T & { account: nu
   return rows.map((r, i) => ({ ...r, account: accounts.length ? accounts[i % accounts.length] : null }));
 }
 
+const fmt = (n: number) => `${n.toLocaleString("ru-RU")} ₽`;
+
+/** Лимит при пополнении. L — остаток лимита скидки, U — неоплаченные товары, W — на кошельке, N — сертификатами сюда.
+ *  Неоплаченное съест лимит при оплате; сверх лимита — E = W + N − L (деньги на товары U не пропадают). Не блок. */
+export function limitNote(L: number | null, U: number, W: number, N: number, reset: string): { text: string; red: string[] } {
+  if (L == null) return { text: "Лимит скидки неизвестен", red: [] };
+  const red: string[] = [];
+  if (L - U <= 0) red.push("Лимит уже исчерпан неоплаченными товарами");
+  if (W + N - L > 0) red.push(`Сверх лимита ${fmt(W + N - L)} — потратить со скидкой не получится до сброса ${reset}`);
+  return {
+    text: `Лимит скидки ${fmt(L)} · неоплачено ${fmt(U)} → после оплаты лимит станет ${fmt(L - U)}. `
+      + `На кошельке ${fmt(W)} + сертификаты ${fmt(N)} − товары ${fmt(U)} = останется ${fmt(W + N - U)}`,
+    red,
+  };
+}
+
+/** Оплата больше остатка лимита — WB может снять скидку Кошелька со всей оплаты. */
+export const payOverLimit = (sum: number, L: number | null) => (L != null && sum > L
+  ? `Сумма больше остатка лимита ${fmt(L)} — скидка Кошелька может не примениться ко всей оплате; оплатите частями` : null);
+
 export function selfCheck() {
   const eq = (a: unknown, b: unknown) => { if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(`${JSON.stringify(a)} != ${JSON.stringify(b)}`); };
   for (const s of ["UYPMJUAFGZEVR89S", "uypm-juaf-gzev-r89s", "wbcert-UYPM-JUAF-GZEV-R89S", " WBCERT-uypmjuafgzevr89s ", "UYPM JUAF GZEV R89S"])
@@ -66,5 +86,12 @@ export function selfCheck() {
   eq(five, [10, 20, 10, 20, 10]);  // 3 + 2
   eq(distribute([{ n: 1 }], [10, 20, 30]).map((r) => r.account), [10]);  // 1 на 3 — только первому
   eq(distribute([{ n: 1 }], []).map((r) => r.account), [null]);
+  const k = 1000;
+  eq(limitNote(100 * k, 100 * k, 100 * k, 50 * k, "01.12").red.length, 2);  // сверх лимита 50 000 + исчерпан
+  eq(limitNote(100 * k, 100 * k, 100 * k, 50 * k, "01.12").red[1].startsWith("Сверх лимита 50"), true);
+  eq(limitNote(100 * k, 50 * k, 0, 100 * k, "01.12").red, []);  // ровно в лимит — не красное
+  eq(limitNote(100 * k, 0, 0, 100 * k + 1, "01.12").red.length, 1);
+  eq(limitNote(null, 5, 5, 5, "01.12"), { text: "Лимит скидки неизвестен", red: [] });
+  eq([payOverLimit(101, 100) != null, payOverLimit(100, 100), payOverLimit(5, null)], [true, null, null]);
   return "ok";
 }

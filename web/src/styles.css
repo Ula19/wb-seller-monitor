@@ -365,3 +365,28 @@ tr.click:hover td { background: var(--bg); }
 .acc-table .no { width: 28px; padding-right: 0; text-align: right; font-size: 12px; }
 .acc-table .upd { width: 1%; white-space: nowrap; font-size: 12px; }
 .acc-head .no { margin-right: 2px; }
+
+/* меню «Функции» */
+.fn { position: relative; }
+.fn-menu { position: absolute; right: 0; top: calc(100% + 6px); z-index: 30; width: 300px; padding: 6px; display: grid; gap: 2px; }
+.fn-group { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; padding: 8px 10px 2px; }
+.fn-item { display: grid; text-align: left; gap: 2px; border: 0; background: none; padding: 6px 10px; border-radius: 8px; cursor: pointer; font: inherit; }
+.fn-item:hover { background: var(--accent-soft); }
+@media (max-width: 768px) { .fn-menu { left: 0; right: auto; width: min(300px, calc(100vw - 32px)); } }
+
+/* лимит при пополнении, оплата */
+.lim-note { margin-top: 6px; display: grid; gap: 4px; }
+.red-box { color: var(--bad); background: var(--bad-soft); border-radius: 6px; padding: 4px 8px; font-weight: 600; }
+.pay-row { margin-top: 8px; display: grid; gap: 6px; }
+.pay-head { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: baseline; }
+.pay-act { margin-left: auto; display: inline-flex; gap: 12px; }
+.cert-add { display: grid; gap: 4px; }
+.cert-add-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.cert-add-row input { min-width: 0; flex: 1 1 140px; }
+.pay-kv { margin: 10px 0; }
+.pay-items { list-style: none; padding: 0; margin: 8px 0; display: grid; gap: 4px; }
+.pay-items label { display: flex; gap: 6px; align-items: baseline; }
+.pay-items .num { margin-left: auto; }
+.cert-hist td { vertical-align: top; }
+.wiz-btns { flex-wrap: wrap; justify-content: flex-end; }
+.wiz-btns .btn { max-width: 100%; white-space: normal; }
