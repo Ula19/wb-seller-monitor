@@ -61,9 +61,9 @@ export function limitNote(L: number | null, U: number, W: number, N: number, res
   };
 }
 
-/** Оплата больше остатка лимита — WB может снять скидку Кошелька со всей оплаты. */
+/** Оплата больше остатка лимита — с flags 0 WB, скорее всего, откажет (не спишет полную цену). */
 export const payOverLimit = (sum: number, L: number | null) => (L != null && sum > L
-  ? `Сумма больше остатка лимита ${fmt(L)} — скидка Кошелька может не примениться ко всей оплате; оплатите частями` : null);
+  ? `Сумма больше остатка лимита ${fmt(L)} — WB, скорее всего, откажет в оплате. Оплатите частями, чтобы уложиться в лимит` : null);
 
 export function selfCheck() {
   const eq = (a: unknown, b: unknown) => { if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(`${JSON.stringify(a)} != ${JSON.stringify(b)}`); };

@@ -448,7 +448,9 @@ class PayUnknown(Exception):
 
 
 def pay_body(rids: list[str]) -> str:
-    return json.dumps({"rids": [{"rid": r, "flags": 1} for r in rids],
+    # flags: бит 0 = isWalletLimitExceeded на фронте WB, 1 = оплата без скидки Кошелька; шлём всегда 0 — сверх лимита
+    # пусть WB лучше откажет, чем спишет полную цену
+    return json.dumps({"rids": [{"rid": r, "flags": 0} for r in rids],
                        "return_url": WWW + "/lk/myorders/delivery?paymentSuccess=true",
                        "pay_type": PAY_TYPE, "bypass_balance": True, "app_type": 1})
 
@@ -764,8 +766,9 @@ if __name__ == "__main__":  # self-check на формах ответов из H
     asyncio.run(certs())
 
     # оплата (HAR pay_order.har): тело, заголовки, {} → принято, прочее → текст ошибки, ProxyDown до/после отправки
+    assert all(x["flags"] == 0 for x in json.loads(pay_body([f"r{i}" for i in range(5)]))["rids"])  # 1 — без скидки
     assert json.loads(pay_body(["r1", "r2"])) == {
-        "rids": [{"rid": "r1", "flags": 1}, {"rid": "r2", "flags": 1}],
+        "rids": [{"rid": "r1", "flags": 0}, {"rid": "r2", "flags": 0}],
         "return_url": "https://www.wildberries.ru/lk/myorders/delivery?paymentSuccess=true",
         "pay_type": 12, "bypass_balance": True, "app_type": 1}
 
@@ -776,7 +779,7 @@ if __name__ == "__main__":  # self-check на формах ответов из H
                 return await pay_orders({**st, "cookies": list(cookies)}, None, ["r1"]), sent
         res, sent = await run([{}], [{"name": "_wbauid", "value": "123"}, {"name": "device_id", "value": "site_x"}])
         m, url, kw = sent[0]
-        assert res is None and (m, url) == ("POST", PAY_URL) and json.loads(kw["data"])["rids"] == [{"rid": "r1", "flags": 1}]
+        assert res is None and (m, url) == ("POST", PAY_URL) and json.loads(kw["data"])["rids"] == [{"rid": "r1", "flags": 0}]
         h = kw["headers"]
         assert (h["wbauid"], h["deviceid"], h["Content-Type"]) == ("123", "site_x", "text/plain;charset=UTF-8"), h
         assert h["Authorization"].startswith("Bearer ") and h["Referer"].endswith("/lk/myorders/delivery")
