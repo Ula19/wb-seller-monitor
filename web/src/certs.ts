@@ -47,18 +47,13 @@ export function distribute<T>(rows: T[], accounts: number[]): (T & { account: nu
 
 const fmt = (n: number) => `${n.toLocaleString("ru-RU")} ₽`;
 
-/** Лимит при пополнении. L — остаток лимита скидки, U — неоплаченные товары, W — на кошельке, N — сертификатами сюда.
- *  Неоплаченное съест лимит при оплате; сверх лимита — E = W + N − L (деньги на товары U не пропадают). Не блок. */
-export function limitNote(L: number | null, U: number, W: number, N: number, reset: string): { text: string; red: string[] } {
-  if (L == null) return { text: "Лимит скидки неизвестен", red: [] };
-  const red: string[] = [];
-  if (L - U <= 0) red.push("Лимит уже исчерпан неоплаченными товарами");
-  if (W + N - L > 0) red.push(`Сверх лимита ${fmt(W + N - L)} — потратить со скидкой не получится до сброса ${reset}`);
-  return {
-    text: `Лимит скидки ${fmt(L)} · неоплачено ${fmt(U)} → после оплаты лимит станет ${fmt(L - U)}. `
-      + `На кошельке ${fmt(W)} + сертификаты ${fmt(N)} − товары ${fmt(U)} = останется ${fmt(W + N - U)}`,
-    red,
-  };
+/** Сколько можно пополнить в пределах лимита скидки: L − W (неоплаченные не учитываем — слово владельца); null — лимит неизвестен. */
+export const canTopUp = (L: number | null, W: number) => (L == null ? null : Math.max(0, L - W));
+
+/** Текст подтверждения пополнения сверх лимита; никто не сверх — null (без подтверждения). */
+export function overConfirm(rows: { title: string; n: number; can: number | null }[]): string | null {
+  const over = rows.filter((r) => r.can != null && r.n > r.can);
+  return over.length ? `Сверх лимита скидки:\n\n${over.map((r) => `${r.title}: ${fmt(r.n)}, можно ${fmt(r.can!)} (сверх на ${fmt(r.n - r.can!)})`).join("\n")}\n\nВсё равно пополнить?` : null;
 }
 
 /** Оплата больше остатка лимита — с flags 0 WB, скорее всего, откажет (не спишет полную цену). */
@@ -86,12 +81,10 @@ export function selfCheck() {
   eq(five, [10, 20, 10, 20, 10]);  // 3 + 2
   eq(distribute([{ n: 1 }], [10, 20, 30]).map((r) => r.account), [10]);  // 1 на 3 — только первому
   eq(distribute([{ n: 1 }], []).map((r) => r.account), [null]);
-  const k = 1000;
-  eq(limitNote(100 * k, 100 * k, 100 * k, 50 * k, "01.12").red.length, 2);  // сверх лимита 50 000 + исчерпан
-  eq(limitNote(100 * k, 100 * k, 100 * k, 50 * k, "01.12").red[1].startsWith("Сверх лимита 50"), true);
-  eq(limitNote(100 * k, 50 * k, 0, 100 * k, "01.12").red, []);  // ровно в лимит — не красное
-  eq(limitNote(100 * k, 0, 0, 100 * k + 1, "01.12").red.length, 1);
-  eq(limitNote(null, 5, 5, 5, "01.12"), { text: "Лимит скидки неизвестен", red: [] });
+  eq([canTopUp(10000, 5000), canTopUp(10000, 12000), canTopUp(null, 5), canTopUp(0, 0)], [5000, 0, null, 0]);
+  eq(overConfirm([{ title: "Таня", n: 5000, can: 5000 }, { title: "Ира", n: 9, can: null }]), null);  // ровно в лимит и неизвестный — молча
+  const t = overConfirm([{ title: "Аня", n: 50000, can: 5000 }, { title: "Таня", n: 1, can: 5 }]) ?? "";
+  eq([t.includes("Аня: 50"), t.includes("можно 5"), t.includes("(сверх на 45"), t.includes("Таня"), t.endsWith("Всё равно пополнить?")], [true, true, true, false, true]);
   eq([payOverLimit(101, 100) != null, payOverLimit(100, 100), payOverLimit(5, null)], [true, null, null]);
   return "ok";
 }

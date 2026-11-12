@@ -2,7 +2,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, MSK, mskDay, rub, type Account, type Order } from "./api";
-import { limitNote } from "./certs";
+import { canTopUp, overConfirm } from "./certs";
 
 export const STATUS: Record<string, string> = { active: "активен", relogin: "нужен вход", off: "выключен" };
 export const GROUP: Record<number, string> = { 1: "оформлен", 2: "сборка", 3: "в пути", 5: "в ПВЗ" };
@@ -21,13 +21,22 @@ export const points = (n: number | null | undefined) => (n == null ? "—" : n.t
 // сброс месячного лимита — 1-е число следующего месяца
 export const resetDate = () => `01.${String((Number(mskDay(Date.now()).slice(5, 7)) % 12) + 1).padStart(2, "0")}`;
 
-/** Текст лимита при пополнении (+ красные предупреждения): n — сколько ₽ сертификатами идёт на аккаунт. */
+export const topUp = (a: Account) => canTopUp(a.limit_left, a.funds ?? 0);
+/** Перед пополнением: кто сверх лимита — confirm со списком; никого — сразу true. rows — сколько ₽ идёт на аккаунт. */
+export const confirmTopUp = (rows: { a: Account; n: number }[]) => {
+  const t = overConfirm(rows.map(({ a, n }) => ({ title: a.title, n, can: topUp(a) })));
+  return !t || confirm(t);
+};
+
+/** Лимит при пополнении одной строкой; n — сколько ₽ сертификатами идёт на аккаунт: больше «можно» — красным. */
 export function LimitNote({ a, n }: { a: Account; n: number }) {
-  const r = limitNote(a.limit_left, unpaid(a), a.funds ?? 0, n, resetDate());
+  const can = topUp(a);
   return (
     <div className="lim-note small">
-      <div className="muted">{r.text}</div>
-      {r.red.map((x) => <div key={x} className="red-box">{x}</div>)}
+      {can == null ? <div className="muted">Лимит неизвестен</div> : <>
+        <div className="muted">Лимит {rub(a.limit_left)} · можно пополнить на {rub(can)}</div>
+        {n > can && <div className="red-box">Сверх лимита на {rub(n - can)}</div>}
+      </>}
     </div>
   );
 }

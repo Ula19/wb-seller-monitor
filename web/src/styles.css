@@ -390,3 +390,15 @@ tr.click:hover td { background: var(--bg); }
 .cert-hist td { vertical-align: top; }
 .wiz-btns { flex-wrap: wrap; justify-content: flex-end; }
 .wiz-btns .btn { max-width: 100%; white-space: normal; }
+
+.money { font-size: 1.15em; font-weight: 700; }
+.pay-all { border-bottom: 1px solid var(--line); padding-bottom: 4px; }
+/* «Пункты выдачи» на /accounts */
+.pvz-board { margin-bottom: 16px; padding: 12px 16px; }
+.pvz-board h3 { margin: 0 0 6px; font-size: 15px; }
+.pvz-line + .pvz-line { border-top: 1px solid var(--line); }
+.pvz-row { display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: baseline; width: 100%; text-align: left; border: 0;
+  background: none; padding: 8px 0; cursor: pointer; font: inherit; color: inherit; }
+.pvz-row b { flex: 1 1 260px; min-width: 0; overflow-wrap: anywhere; }
+.pvz-row:hover b { color: var(--accent); }
+.pvz-pop { background: var(--accent-soft); border-radius: 8px; padding: 6px 10px; margin-bottom: 8px; }

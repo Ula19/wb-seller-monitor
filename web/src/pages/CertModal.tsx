@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError, rub, type Account, type Cert } from "../api";
-import { Blocked, ddmm, Limit, LimitNote, points, unpaid } from "../accounts";
+import { Blocked, confirmTopUp, ddmm, Limit, LimitNote, points, unpaid } from "../accounts";
 import { distribute, NOMINAL_MAX, NOMINAL_MIN, NOMINALS, normCode, parseList, parseNominal, type BadLine } from "../certs";
 
 // certId/orig — строка из неудачных прошлого круга («← Назад»): код не меняли — retry той же записи, поменяли — новый код
@@ -52,7 +52,7 @@ function StepAccounts({ all, picked, setPicked }: { all: Account[]; picked: numb
                   <td><b>{a.title}</b> {!can(a) && <span className="pill bad">нужен вход</span>} <Blocked a={a} />
                     {a.proxy_down && <span className="pill warn">прокси не отвечает</span>}</td>
                   <td className="lim"><Limit a={a} short /></td>
-                  <td className="num">{rub(a.funds)}</td>
+                  <td className="num money">{rub(a.funds)}</td>
                   <td className="num">{points(a.vb_points)}</td>
                   <td className="num">{u ? <span className="up-t">{rub(u)}</span> : <span className="muted">—</span>}</td>
                 </tr>
@@ -255,6 +255,7 @@ function Wizard({ all, onClose }: { all: Account[]; onClose: () => void }) {
       setStep(2);
     };
     const one = (r: Row) => ({ code: normCode(r.code)!, nominal: parseNominal(r.nominal)!, account_id: r.account! });
+    if (!confirmTopUp(accs.map((a) => ({ a, n: sum(items.filter((i) => i.account === a.id).map((i) => i.nominal)) })))) return;
     setBusy(true); setError("");
     try {
       let next = ids.filter((id) => !fresh.some((r) => r.certId === id));  // старая запись изменённого кода уходит из окна

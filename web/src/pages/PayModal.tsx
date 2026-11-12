@@ -1,10 +1,10 @@
 // «Оплата товаров» с WB Кошелька: окно на «Аккаунтах» (шаг 1 — выбор, шаг 2 — выбранные с сертификатом в строке)
 // и окно ПВЗ на странице аккаунта. Платит worker (очередь по прокси) — окна только создают оплату и опрашивают статус.
 // Сумму считает сервер по нашим ценам; confirm показывает её же (не совпала — 409, ничего не платим).
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError, rub, time, type Account, type Cert, type Order, type Payment } from "../api";
-import { Blocked, LimitNote, Modal, unpaid, visible, type Pvz } from "../accounts";
+import { Blocked, confirmTopUp, LimitNote, Modal, unpaid, visible, type Pvz } from "../accounts";
 import { NOMINALS, normCode, parseNominal, payOverLimit } from "../certs";
 
 const FINAL = ["ok", "error", "unknown"];
@@ -83,7 +83,8 @@ export function CertAdd({ a, need }: { a: Account; need: boolean }) {
         <input aria-label="Номинал ₽" list="pay-nominals" inputMode="numeric" placeholder="Номинал ₽" value={nominal}
           onChange={(e) => setNominal(e.target.value)} />
         <datalist id="pay-nominals">{NOMINALS.map((x) => <option key={x} value={x} />)}</datalist>
-        <button className="btn sm" disabled={!normCode(code) || !n || add.isPending || !!sending} onClick={() => add.mutate()}>
+        <button className="btn sm" disabled={!normCode(code) || !n || add.isPending || !!sending}
+          onClick={() => confirmTopUp([{ a, n }]) && add.mutate()}>
           Добавить сертификат</button>
       </div>}
       {id != null && !sending && <button className="link" onClick={() => setId(null)}>+ ещё сертификат</button>}
@@ -129,7 +130,7 @@ function Step1({ all, picked, setPicked }: { all: Account[]; picked: number[]; s
                   <td><b>{a.title}</b></td>
                   <td className="num">{toPay(a).length}</td>
                   <td className="num">{rub(unpaid(a))}</td>
-                  <td className="num">{rub(a.funds)}</td>
+                  <td className="num money">{rub(a.funds)}</td>
                   <td>{a.wallet_blocked ? <Blocked a={a} /> : a.status !== "active" ? <span className="pill bad">нужен вход</span>
                     : <Money a={a} sum={unpaid(a)} ok="Можно оплатить" />}</td>
                 </tr>
@@ -153,7 +154,7 @@ function Step2Row({ a, i, onRemove, p }: { a: Account; i: number; onRemove: () =
       <div className="pay-head">
         <span className="no muted">{i + 1}</span>
         <span><b>{a.title}</b> <span className="muted small">Обновлено {a.polling ? <span className="spin" /> : time(a.state_at)}</span></span>
-        <span className="small">Кошелёк WB <b>{rub(a.funds)}</b></span>
+        <span className="small">Кошелёк WB <b className="money">{rub(a.funds)}</b></span>
         <span className="small">Не оплачено <b className={u ? "up-t" : ""}>{rub(u)}</b></span>
         <span className="small"><Money a={a} sum={u} /></span>
         <span className="pay-act">
@@ -239,6 +240,8 @@ export function PvzPay({ a, g, onClose }: { a: Account; g: Pvz; onClose: () => v
   const pays = usePayments();
   const p = pays.byAcc[a.id];
   const chosen = list.filter((o) => !off.has(o.rid));
+  const allBox = useRef<HTMLInputElement>(null);
+  useEffect(() => { if (allBox.current) allBox.current.indeterminate = chosen.length > 0 && chosen.length < list.length; });
   const sum = total(chosen);
   const lack = sum > (a.funds ?? 0);
   const over = payOverLimit(sum, a.limit_left);
@@ -253,11 +256,15 @@ export function PvzPay({ a, g, onClose }: { a: Account; g: Pvz; onClose: () => v
       <div className="kv pay-kv">
         <div><span>Неоплаченных товаров</span><b>{list.length}</b></div>
         <div><span>К оплате</span><b>{rub(sum)}</b></div>
-        <div><span>Кошелёк WB</span><b>{rub(a.funds)}</b></div>
-        <div><span>Статус</span><b>{a.wallet_blocked ? <Blocked a={a} /> : <Money a={a} sum={sum} />}</b></div>
+        <div><span>Кошелёк WB</span><b className="money">{rub(a.funds)}</b></div>
+        <div><span>Статус</span><b>{a.wallet_blocked ? <Blocked a={a} />
+          : list.length && !chosen.length ? <span className="muted">Ничего не выбрано</span> : <Money a={a} sum={sum} />}</b></div>
       </div>
       {list.length > 1 && (
         <ul className="pay-items">
+          <li className="pay-all"><label>
+            <input ref={allBox} type="checkbox" checked={chosen.length === list.length}
+              onChange={() => setOff(chosen.length === list.length ? new Set(list.map((o) => o.rid)) : new Set())} /> Выбрать все</label></li>
           {list.map((o) => (
             <li key={o.rid}><label>
               <input type="checkbox" checked={!off.has(o.rid)} onChange={() => {

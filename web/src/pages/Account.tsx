@@ -322,7 +322,7 @@ export default function Account() {
       {a.wallet_blocked && <div className="small bad-t">WB наложил ограничение на Кошелёк — оплата им недоступна</div>}
       {a.proxy_down && <div className="small up-t">прокси не ответил {a.proxy_fails} раз подряд, последний {time(a.proxy_fail_at)}</div>}
       <div className="tiles acc-tiles">
-        <div className="tile"><b>{rub(a.funds)}</b><span>Кошелёк WB</span></div>
+        <div className="tile"><b className="money">{rub(a.funds)}</b><span>Кошелёк WB</span></div>
         <div className="tile"><b>{points(a.vb_points)}</b><span>ВБ-баллы</span></div>
         <div className="tile wide"><span>Лимит скидки</span><Limit a={a} /></div>
       </div>

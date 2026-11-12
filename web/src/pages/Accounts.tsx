@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError, rub, time, type Account } from "../api";
-import { Blocked, inPvz, Limit, points, StatusDot, transit, unpaid } from "../accounts";
+import { Blocked, inPvz, Limit, points, StatusDot, transit, unpaid, visible } from "../accounts";
 import { useSort } from "../sort";
 import CertHistory from "./CertHistory";
 import CertModal from "./CertModal";
@@ -45,6 +45,61 @@ function Name({ a }: { a: Account }) {
       <StatusDot a={a} /><Link to={`/accounts/${a.id}`} onClick={(e) => e.stopPropagation()}><b>{a.title}</b></Link>
       <span className="muted small"> {a.phone ?? a.phone_mask}</span> <Blocked a={a} />
     </span>
+  );
+}
+
+const plural = (n: number, one: string, few: string, many: string) =>
+  n % 10 === 1 && n % 100 !== 11 ? one : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 10 || n % 100 >= 20) ? few : many;
+type Board = { id: number; address: string; go: number; ready: number; accs: { a: Account; go: number; ready: number }[] };
+
+/** Все ПВЗ со всех аккаунтов (видимые заказы): в пути / выдача / сколько аккаунтов; клик — кто там, под строкой. */
+export function pvzBoard(all: Account[]): Board[] {
+  const m = new Map<number, Board>();
+  for (const a of all) for (const o of visible(a.orders)) {
+    if (o.group_id !== 3 && o.group_id !== 5) continue;
+    const id = o.dst_office_id ?? 0;
+    const b = m.get(id) ?? { id, address: o.office_address ?? (id ? `ПВЗ №${id}` : "ПВЗ не указан"), go: 0, ready: 0, accs: [] };
+    const x = b.accs.find((x) => x.a.id === a.id) ?? (b.accs.push({ a, go: 0, ready: 0 }), b.accs[b.accs.length - 1]);
+    const k = o.group_id === 5 ? "ready" : "go";
+    b[k] += 1; x[k] += 1;
+    m.set(id, b);
+  }
+  const order = (x: { go: number; ready: number }, y: { go: number; ready: number }) => y.ready - x.ready || y.go - x.go;
+  return [...m.values()].map((b) => ({ ...b, accs: b.accs.sort(order) })).sort(order);
+}
+
+function PvzBoard({ all }: { all: Account[] }) {
+  const [open, setOpen] = useState<number | null>(null);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (open == null) return;
+    const click = (e: MouseEvent) => { if (!ref.current?.contains(e.target as Node)) setOpen(null); };
+    const esc = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(null); };
+    document.addEventListener("mousedown", click);
+    window.addEventListener("keydown", esc);
+    return () => { document.removeEventListener("mousedown", click); window.removeEventListener("keydown", esc); };
+  }, [open]);
+  const rows = pvzBoard(all);
+  if (!rows.length) return null;
+  const counts = (x: { go: number; ready: number }) => <>
+    {x.go > 0 && <span>в пути {x.go}</span>}{x.ready > 0 && <span className="ok-t">выдача {x.ready}</span>}</>;
+  return (
+    <div className="card pvz-board" ref={ref}>
+      <h3>Пункты выдачи · {rows.length}</h3>
+      {rows.map((b) => (
+        <div key={b.id} className="pvz-line">
+          <button className="pvz-row" aria-expanded={open === b.id} onClick={() => setOpen(open === b.id ? null : b.id)}>
+            <b>{b.address}</b>{counts(b)}<span className="muted">{b.accs.length} {plural(b.accs.length, "аккаунт", "аккаунта", "аккаунтов")}</span>
+          </button>
+          {open === b.id && (
+            <div className="pvz-pop small">
+              {b.accs.map((x, i) => <span key={x.a.id}>{i > 0 && " · "}<Link to={`/accounts/${x.a.id}`}>{x.a.title}</Link> —{" "}
+                {[x.ready && `выдача ${x.ready}`, x.go && `в пути ${x.go}`].filter(Boolean).join(", ")}</span>)}
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -98,7 +153,7 @@ function ListView({ list, th, total }: { list: Account[]; th: Th; total: number 
             <tr key={a.id} className="click" onClick={() => nav(`/accounts/${a.id}`)}>
               <td className="no muted">{i + 1}</td>
               <td><Name a={a} /></td>
-              <td className="num">{rub(a.funds)}</td>
+              <td className="num money">{rub(a.funds)}</td>
               <td className="num">{points(a.vb_points)}</td>
               <td className="lim"><Limit a={a} short /></td>
               <td><OrdersNote a={a} /></td>
@@ -120,7 +175,7 @@ function TilesView({ list }: { list: Account[] }) {
         <div key={a.id} className="card acc click" onClick={() => nav(`/accounts/${a.id}`)}>
           <div className="acc-head"><span><span className="no muted small">{i + 1}</span> <Name a={a} /></span><span className="muted small">{a.polling ? <span className="spin" /> : time(a.state_at)}</span></div>
           <div className="kv">
-            <div><span>Кошелёк WB</span><b>{rub(a.funds)}</b></div>
+            <div><span>Кошелёк WB</span><b className="money">{rub(a.funds)}</b></div>
             <div><span>ВБ-баллы</span><b>{points(a.vb_points)}</b></div>
           </div>
           <div className="small"><span className="muted">Лимит скидки</span><Limit a={a} short /></div>
@@ -175,6 +230,7 @@ export default function Accounts() {
         <div className="tile"><b>{sum(inPvz)}</b><span>в ПВЗ</span></div>
         <div className="tile"><b>{all.length}</b><span>аккаунтов{needLogin > 0 && <span className="bad-t"> · {needLogin} нужен вход</span>}</span></div>
       </div>
+      <PvzBoard all={all} />
       {accounts.isLoading ? <p className="muted">Загрузка…</p>
         : !all.length ? <div className="card empty">Аккаунтов пока нет. <button className="link" onClick={() => setFn("login")}>Добавить первый</button></div>
         : !list.length ? <div className="card empty">Ничего не нашлось</div>
