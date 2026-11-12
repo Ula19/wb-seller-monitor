@@ -68,37 +68,45 @@ export function pvzBoard(all: Account[]): Board[] {
   return [...m.values()].map((b) => ({ ...b, accs: b.accs.sort(order) })).sort(order);
 }
 
-function PvzBoard({ all }: { all: Account[] }) {
+/** Шестая плитка «пунктов выдачи»: клик — панель под рядом плиток (поверх таблицы), внутри все ПВЗ; клик по ПВЗ — кто там. */
+function PvzTile({ all }: { all: Account[] }) {
+  const [shown, setShown] = useState(false);
   const [open, setOpen] = useState<number | null>(null);
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    if (open == null) return;
-    const click = (e: MouseEvent) => { if (!ref.current?.contains(e.target as Node)) setOpen(null); };
-    const esc = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(null); };
+    if (!shown) return;
+    const click = (e: MouseEvent) => { if (!ref.current?.contains(e.target as Node)) setShown(false); };
+    const esc = (e: KeyboardEvent) => { if (e.key === "Escape") setShown(false); };
     document.addEventListener("mousedown", click);
     window.addEventListener("keydown", esc);
     return () => { document.removeEventListener("mousedown", click); window.removeEventListener("keydown", esc); };
-  }, [open]);
+  }, [shown]);
   const rows = pvzBoard(all);
-  if (!rows.length) return null;
   const counts = (x: { go: number; ready: number }) => <>
     {x.go > 0 && <span>в пути {x.go}</span>}{x.ready > 0 && <span className="ok-t">выдача {x.ready}</span>}</>;
+  // ponytail: display: contents — плитка остаётся в сетке, а клик «вне» считается по плитке и панели вместе
   return (
-    <div className="card pvz-board" ref={ref}>
-      <h3>Пункты выдачи · {rows.length}</h3>
-      {rows.map((b) => (
-        <div key={b.id} className="pvz-line">
-          <button className="pvz-row" aria-expanded={open === b.id} onClick={() => setOpen(open === b.id ? null : b.id)}>
-            <b>{b.address}</b>{counts(b)}<span className="muted">{b.accs.length} {plural(b.accs.length, "аккаунт", "аккаунта", "аккаунтов")}</span>
-          </button>
-          {open === b.id && (
-            <div className="pvz-pop small">
-              {b.accs.map((x, i) => <span key={x.a.id}>{i > 0 && " · "}<Link to={`/accounts/${x.a.id}`}>{x.a.title}</Link> —{" "}
-                {[x.ready && `выдача ${x.ready}`, x.go && `в пути ${x.go}`].filter(Boolean).join(", ")}</span>)}
+    <div className="pvz-tile" ref={ref}>
+      <button className="tile" aria-expanded={shown} onClick={() => rows.length && setShown(!shown)}>
+        <b>{rows.length}</b><span>пунктов выдачи</span>
+      </button>
+      {shown && (
+        <div className="card pvz-board">
+          {rows.map((b) => (
+            <div key={b.id} className="pvz-line">
+              <button className="pvz-row" aria-expanded={open === b.id} onClick={() => setOpen(open === b.id ? null : b.id)}>
+                <b>{b.address}</b>{counts(b)}<span className="muted">{b.accs.length} {plural(b.accs.length, "аккаунт", "аккаунта", "аккаунтов")}</span>
+              </button>
+              {open === b.id && (
+                <div className="pvz-pop small">
+                  {b.accs.map((x, i) => <span key={x.a.id}>{i > 0 && " · "}<Link to={`/accounts/${x.a.id}`}>{x.a.title}</Link> —{" "}
+                    {[x.ready && `выдача ${x.ready}`, x.go && `в пути ${x.go}`].filter(Boolean).join(", ")}</span>)}
+                </div>
+              )}
             </div>
-          )}
+          ))}
         </div>
-      ))}
+      )}
     </div>
   );
 }
@@ -229,8 +237,8 @@ export default function Accounts() {
         <div className="tile"><b>{sum(transit)}</b><span>в пути</span></div>
         <div className="tile"><b>{sum(inPvz)}</b><span>в ПВЗ</span></div>
         <div className="tile"><b>{all.length}</b><span>аккаунтов{needLogin > 0 && <span className="bad-t"> · {needLogin} нужен вход</span>}</span></div>
+        <PvzTile all={all} />
       </div>
-      <PvzBoard all={all} />
       {accounts.isLoading ? <p className="muted">Загрузка…</p>
         : !all.length ? <div className="card empty">Аккаунтов пока нет. <button className="link" onClick={() => setFn("login")}>Добавить первый</button></div>
         : !list.length ? <div className="card empty">Ничего не нашлось</div>
