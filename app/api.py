@@ -484,6 +484,13 @@ async def put_poll_settings(body: dict, u=Depends(user), s=Depends(db)):
     if type(body.get("night")) is not bool:
         raise HTTPException(422, "night: нужно да/нет")
     cfg["night"] = body["night"]
+    for k in ("night_from", "night_to"):  # "HH:MM" по МСК
+        v = body.get(k)
+        if not (isinstance(v, str) and re.fullmatch(r"\d{2}:\d{2}", v) and int(v[:2]) < 24 and int(v[3:]) < 60):
+            raise HTTPException(422, f"{k}: нужно время ЧЧ:ММ")
+        cfg[k] = v
+    if cfg["night_from"] == cfg["night_to"]:
+        raise HTTPException(422, "Ночной режим: начало и конец совпадают")
     await repo.set_setting(s, repo.POLL_KEY, json.dumps(cfg))
     await s.commit()
     return cfg

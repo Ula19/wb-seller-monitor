@@ -161,16 +161,22 @@ async def refresh_job(bot) -> None:
 
 
 KINDS = (*account_api.API_KINDS, "notices")  # типы данных опроса; порядок — порядок запросов
-NIGHT = range(1, 7)  # 01:00–06:59 МСК — интервалы × night_x
 DUE_SLACK = 20  # сек: минутный тик не должен проскочить, например, 3-минутный интервал из-за длительности опроса
 # acc_id → {тип: время последней ПОПЫТКИ (и при сбое: мёртвый прокси не дёргаем каждую минуту), "vb_total": итог баллов}.
 # ponytail: в памяти — рестарт worker'а = всё сразу у всех; в БД — если рестарты станут частыми
 _last: dict[int, dict] = {}
 
 
+def is_night(now: datetime, frm: str, to: str) -> bool:
+    """Ночь по МСК — [frm, to), минуты суток; frm > to — окно через полночь (23:00–07:00)."""
+    m = lambda hhmm: int(hhmm[:2]) * 60 + int(hhmm[3:])
+    t, a, b = (lambda d: d.hour * 60 + d.minute)(now.astimezone(repo.MSK)), m(frm), m(to)
+    return a <= t < b if a < b else t >= a or t < b
+
+
 def due(last: dict, cfg: dict, now: datetime) -> list[str]:
     """Каким типам пора: с последней попытки прошло ≥ интервала (ночью × night_x)."""
-    x = cfg["night_x"] if cfg["night"] and now.astimezone(repo.MSK).hour in NIGHT else 1
+    x = cfg["night_x"] if cfg["night"] and is_night(now, cfg["night_from"], cfg["night_to"]) else 1
     return [k for k in KINDS if now.timestamp() - last.get(k, 0) >= cfg[k] * 60 * x - DUE_SLACK]
 
 
@@ -837,4 +843,13 @@ if __name__ == "__main__":  # self-check: маска номера, Bearer в с�
     for hh, mm in ((1, 0), (6, 59)):  # ночью 3 × 3 = 9
         assert not night(hh, mm, 8) and night(hh, mm, 9), (hh, mm)
     assert "orders" in due({"orders": at(1, 0).timestamp() - 180}, {**cfg, "night": False}, at(1, 0))  # ночной выключен
+    assert not night(1, 0, 8) and night(1, 0, 3) is False  # 01:00 по умолчанию — ночь
+    cfg = {**cfg, "night_from": "23:00", "night_to": "07:00"}  # окно через полночь — due берёт его из настроек
+    assert not night(23, 0, 8) and night(22, 59, 3)
+    # is_night по минутам суток (МСК), в т.ч. через полночь
+    for frm, to, yes, no in (("01:00", "07:00", [(1, 0), (6, 59)], [(0, 59), (7, 0)]),
+                             ("23:00", "07:00", [(23, 0), (0, 0), (6, 59)], [(22, 59), (7, 0), (12, 0)]),
+                             ("22:30", "23:15", [(22, 30), (23, 14)], [(22, 29), (23, 15)])):
+        assert all(is_night(at(*hm), frm, to) for hm in yes) and not any(is_night(at(*hm), frm, to) for hm in no), (frm, to)
+    assert is_night(datetime(2026, 11, 12, 22, 0, tzinfo=timezone.utc), "01:00", "07:00")  # 22:00 UTC = 01:00 МСК
     print("ok")

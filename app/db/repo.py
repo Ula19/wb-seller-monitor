@@ -419,8 +419,9 @@ async def save_account_state(s, account_id: int, st: dict) -> tuple[int, int]:
     return was or 0, len(gone)
 
 
-POLL_KEY = "poll"  # app_settings: частота опроса аккаунтов по типам, минуты; ночью (01–07 МСК) × night_x
-POLL_DEFAULTS = {"orders": 3, "balance": 10, "vb": 30, "grade": 360, "notices": 15, "night": True, "night_x": 3}
+POLL_KEY = "poll"  # app_settings: частота опроса аккаунтов по типам, минуты; ночью (night_from–night_to МСК) × night_x
+POLL_DEFAULTS = {"orders": 3, "balance": 10, "vb": 30, "grade": 360, "notices": 15, "night": True, "night_x": 3,
+                 "night_from": "01:00", "night_to": "07:00"}
 POLL_MAX = {"orders": 1440, "balance": 1440, "vb": 1440, "grade": 10080, "notices": 1440, "night_x": 10}
 
 
