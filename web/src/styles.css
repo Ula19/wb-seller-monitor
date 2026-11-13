@@ -413,7 +413,10 @@ button.tile[aria-expanded="true"] { border-color: var(--accent); }
 .poll-row .err { grid-column: 2; margin: 0; }
 .poll-in input { width: 90px; }
 .poll-in input[aria-invalid="true"] { border-color: var(--bad); }
-.poll-check { display: flex; gap: 8px; align-items: center; }
+.poll-card { max-width: 640px; }
+.poll-card h2 { margin: 0 0 4px; font-size: 17px; }
+.poll-check { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; }
+.poll-check .poll-in { display: inline-flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .poll-est { margin: 8px 0; }
 @media (max-width: 768px) { .poll-row { grid-template-columns: 1fr; } .poll-row .err { grid-column: 1; } }
 

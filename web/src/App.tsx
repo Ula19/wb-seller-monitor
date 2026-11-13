@@ -9,6 +9,7 @@ import Account from "./pages/Account";
 import Events from "./pages/Events";
 import Targets from "./pages/Targets";
 import Proxies from "./pages/Proxies";
+import PollSettings from "./pages/PollSettings";
 import Bell from "./Bell";
 
 const NAV = [
@@ -18,6 +19,7 @@ const NAV = [
   { to: "/accounts", label: "Аккаунты", icon: "◉" },
   { to: "/proxies", label: "Прокси", icon: "⇄" },
   { to: "/events", label: "События", icon: "≡" },
+  { to: "/settings", label: "Настройки", icon: "⚙" },
 ];
 
 function WorkerStatus() {
@@ -80,6 +82,7 @@ export default function App() {
           <Route path="/accounts/:id" element={<Account />} />
           <Route path="/proxies" element={<Proxies />} />
           <Route path="/events" element={<Events />} />
+          <Route path="/settings" element={<PollSettings />} />
           <Route path="*" element={<Navigate to="/items" replace />} />
         </Routes>
       </main>
