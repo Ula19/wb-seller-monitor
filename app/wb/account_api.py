@@ -249,15 +249,29 @@ async def _client(state: dict, proxy: str | None):
     vkey = next((c["value"] for c in state.get("cookies") or [] if c.get("name") == "wbx-validation-key"), None)
     with_vkey = {**auth, **({"Cookie": f"wbx-validation-key={vkey}"} if vkey else {})}
     proxy = curl_proxy(proxy or web_proxy())  # тот же выход, что у браузера аккаунта
-    async with AsyncSession(impersonate="chrome", timeout=20,
+    # подключение (CONNECT к прокси + TLS) — до 5 с, весь запрос — до 20 с, как было: зависший маршрут «прокси → WB»
+    # не съедает 20 с, а один повтор чинит короткие пропуски (SCOUT 2026-11-13)
+    async with AsyncSession(impersonate="chrome", timeout=CONNECT_READ,
                             proxies={"http": proxy, "https": proxy} if proxy else None) as s:
-        async def call(method, url, **kw):
+        async def send(method, url, **kw):
             try:
                 r = await s.request(method, url, **kw)
             except RequestException as e:  # до ответа WB не дошли: таймаут, обрыв, CONNECT 407
                 raise ProxyDown(f"{type(e).__name__}: {str(e)[:160]}") from e
             if r.status_code == 407:
                 raise ProxyDown("407 Proxy Authentication Required")
+            return r
+
+        async def call(method, url, **kw):
+            try:
+                r = await send(method, url, **kw)
+            except ProxyDown as e:
+                if not PRE_SEND.search(str(e)):  # могло дойти до WB (оплата, сертификат) — не повторяем
+                    raise
+                await asyncio.sleep(RETRY_SEC)
+                r = await send(method, url, **kw)  # второй сбой — ProxyDown с его текстом, как раньше
+                log.info("прокси %s: не подключились к %s, повтор спас", urlparse(proxy).netloc.rpartition("@")[2]
+                         if proxy else "напрямую", url.split("/")[2])
             if r.status_code == 401:
                 raise Unauthorized(url.split("/")[2])
             r.raise_for_status()
@@ -378,6 +392,8 @@ CERT_URL = "https://astro.wildberries.ru/api/v1/giftcards/certificates/activatio
 CERT_RE = re.compile(r"[A-Z0-9]{16}")
 CERT_BUSY = 5  # errorNumber «От вас слишком много запросов. Попробуйте через 2 сек.»
 CERT_RETRY_SEC, CERT_RETRIES = 3, 3
+CONNECT_READ = (5, 15)  # curl_cffi: CONNECTTIMEOUT 5 с, TIMEOUT 5 + 15 = 20 с
+RETRY_SEC = 1  # пауза перед единственным повтором сбоя до отправки
 # сбой curl ДО отправки запроса (до WB не дошли — можно считать ошибкой); всё прочее (Operation timed out, Empty
 # reply, Recv failure…) — после: запрос мог дойти. Голое «(28)» не годится — бывает обоих видов
 PRE_SEND = re.compile(r"\(28\) Connection timed out|\(56\) CONNECT tunnel failed|\(35\) TLS connect error|"
@@ -485,6 +501,7 @@ async def fetch_balance(state: dict, proxy: str | None = None) -> dict:
 
 
 if __name__ == "__main__":  # self-check на формах ответов из HAR (суммы в копейках)
+    RETRY_SEC = 0  # повтор сбоя до отправки — без паузы
     b = parse_balance({"wallet_balance_rub": 428500, "bonus_balance": 20100, "available_funds_rub": 448600, "discount": {
         "expenses": 23355900, "monthly_limit": 100000000, "max_order_price": 100000000, "max_rid_price": 50000000}})
     assert b == {"limit_left": 766441, "monthly_limit": 1000000, "max_order": 1000000, "max_rid": 500000,
@@ -697,6 +714,8 @@ if __name__ == "__main__":  # self-check на формах ответов из H
                 x = script.pop(0)
                 if isinstance(x, BaseException):
                     raise x
+                if x == 401:
+                    return R(401, None)
                 if x == 400:
                     r = R(400, None)
                     r.raise_for_status = lambda: (_ for _ in ()).throw(HTTP400())
@@ -736,7 +755,7 @@ if __name__ == "__main__":  # self-check на формах ответов из H
         assert (await run([400]))[0] == {"ok": False, "error_number": None, "error_text": "WB отклонил запрос: HTTP 400"}
         for t in pre:
             try:
-                await run([curl(t)])
+                await run([curl(t)] * 2)  # повтор тоже не подключился
                 raise AssertionError(t)
             except ProxyDown:
                 pass
@@ -788,7 +807,7 @@ if __name__ == "__main__":  # self-check на формах ответов из H
         assert (await run([400]))[0].startswith("WB отказал: HTTP 400")
         for t in pre:
             try:
-                await run([curl(t)])
+                await run([curl(t)] * 2)  # повтор тоже не подключился
                 raise AssertionError(t)
             except ProxyDown:
                 pass
@@ -799,6 +818,49 @@ if __name__ == "__main__":  # self-check на формах ответов из H
             except PayUnknown:
                 pass
     asyncio.run(pays())
+
+    # пропуски прокси: connect-таймаут 5 с; сбой до отправки — один повтор (+ строка в лог), после отправки / 401 / HTTP — нет
+    async def flaps():
+        made, sents = [], []
+
+        async def run(script, proxy=None):
+            S, sent = cert_session(script)
+            sents.append(sent)
+
+            class S2(S):
+                def __init__(self, **kw):
+                    made.append(kw)
+            with patch(f"{__name__}.AsyncSession", S2), patch(f"{__name__}.web_proxy", lambda: proxy):
+                async with _client(st, None) as (call, auth, _):
+                    return await call("GET", BALANCE_URL, headers=auth), sent
+        with patch(f"{__name__}.log") as lg:
+            res, sent = await run([curl(pre[0]), {"x": 1}], "http://user:pw@1.2.3.4:8080")
+            assert res == {"x": 1} and len(sent) == 2 and lg.info.call_count == 1, (sent, lg.info.call_args_list)
+            assert lg.info.call_args.args[1:] == ("1.2.3.4:8080", "wb-balance.wildberries.ru"), lg.info.call_args  # без пароля
+            assert made[-1]["timeout"] == (5, 15)
+            res, sent = await run([RequestException("Failed to perform, curl: (56) CONNECT tunnel failed, response 407"),
+                                   {"x": 1}])
+            assert len(sent) == 2 and lg.info.call_args.args[1] == "напрямую"
+            lg.info.reset_mock()
+            try:
+                await run([curl(pre[0]), curl(pre[0])])
+                raise AssertionError("2 сбоя")
+            except ProxyDown as e:
+                assert "(28) Connection timed out" in str(e) and len(sents[-1]) == 2 and not lg.info.called, e
+            for t in post:
+                try:
+                    await run([curl(t), {"x": 1}])
+                    raise AssertionError(t)
+                except ProxyDown as e:
+                    assert t[:20] in str(e) and len(sents[-1]) == 1, (t, sents[-1])  # могло дойти — не повторяем
+            for x, err in ((401, Unauthorized), (400, HTTP400)):
+                try:
+                    await run([x, {"x": 1}])
+                    raise AssertionError(x)
+                except err:
+                    assert len(sents[-1]) == 1, x
+            assert not lg.info.called
+    asyncio.run(flaps())
 
     # уведомления (HAR notification.har): числа строкой, HTML в тексте, url из href или payload, только *.wildberries.ru
     pay = lambda url: json.dumps({"push_text": "x", "apns_custom_data": {"data": {"url": url, "urlType": "web"}}})
