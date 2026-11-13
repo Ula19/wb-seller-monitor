@@ -74,16 +74,15 @@ async def main() -> None:
         keeper.refresh_job, "cron", hour=f"*/{settings.web_refresh_hours}", minute=5,  # 12 → 00:05 и 12:05 МСК
         args=[bot], max_instances=1,
     )
-    scheduler.add_job(  # история заказов (полученные)
-        keeper.purchases_job, "interval", hours=1, args=[bot], max_instances=1,
-        next_run_time=datetime.now(timezone.utc) + timedelta(minutes=2),
+    scheduler.add_job(  # история заказов (полученные) — раз в сутки; новая покупка — по событию из опроса аккаунта
+        keeper.purchases_job, "cron", hour=4, minute=30, args=[bot], max_instances=1,
     )
     scheduler.add_job(  # карта хостов картинок товаров для сайта
         keeper.img_hosts_job, "interval", days=1, max_instances=1,
         next_run_time=datetime.now(timezone.utc) + timedelta(seconds=30),
     )
-    scheduler.add_job(  # лимит/% Кошелька/заказы аккаунтов; 401 → рефреш → «войдите заново»
-        keeper.state_job, "interval", minutes=settings.account_poll_minutes, args=[bot], max_instances=1,
+    scheduler.add_job(  # тик опроса аккаунтов: каждому — типы, которым пора (Настройки); 401 → рефреш → «войдите заново»
+        keeper.state_job, "interval", minutes=1, args=[bot], max_instances=1,
         next_run_time=datetime.now(timezone.utc) + timedelta(minutes=1),
     )
     scheduler.start()

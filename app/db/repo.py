@@ -1,5 +1,6 @@
 """Доступ к данным: запросы и CRUD-помощники (схема v2)."""
 
+import json
 import re
 from datetime import datetime, timedelta, timezone
 
@@ -387,31 +388,45 @@ async def proxy_fail(s, account_id: int) -> int | None:
         proxy_fails=models.WbAccount.proxy_fails + 1, proxy_fail_at=_utcnow()).returning(models.WbAccount.proxy_fails))
 
 
-async def save_account_state(s, account_id: int, st: dict) -> int:
-    """Состояние из account_api.fetch: поля аккаунта + активные заказы (пропавшие rid — в архив, удаляем).
-    Опрос удался — прокси жив: счётчик сбоев в 0. Возвращает, сколько сбоев было до этого."""
+async def save_account_state(s, account_id: int, st: dict) -> tuple[int, int]:
+    """Пришедшее из account_api.fetch: только те поля аккаунта, что есть в st; заказы — только если пришли (пропавшие
+    rid — в архив, удаляем). Опрос удался — прокси жив: счётчик сбоев в 0. → (сколько сбоев было до этого, сколько
+    заказов пропало из активных)."""
     was = await s.scalar(select(models.WbAccount.proxy_fails).where(models.WbAccount.id == account_id).with_for_update())
     await s.execute(update(models.WbAccount).where(models.WbAccount.id == account_id).values(
-        state_at=_utcnow(), proxy_fails=0, proxy_fail_at=None, **{k: st.get(k) for k in ACCOUNT_STATE_FIELDS}))
-    orders = st.get("orders") or []
-    await s.execute(delete(models.AccountOrder).where(
-        models.AccountOrder.account_id == account_id,
-        models.AccountOrder.rid.not_in([o["rid"] for o in orders]) if orders else true()))
-    if st.get("vb_ops"):  # None — история баллов не пришла: накопленное не трогаем
+        state_at=_utcnow(), proxy_fails=0, proxy_fail_at=None, **{k: st[k] for k in ACCOUNT_STATE_FIELDS if k in st}))
+    if st.get("vb_ops"):  # нет / пусто — история баллов не пришла: накопленное не трогаем
         await upsert_vb_ops(s, account_id, st["vb_ops"])
+    if "orders" not in st:
+        return was or 0, 0
+    orders = st["orders"]
+    gone = (await s.execute(delete(models.AccountOrder).where(
+        models.AccountOrder.account_id == account_id,
+        models.AccountOrder.rid.not_in([o["rid"] for o in orders]) if orders else true())
+        .returning(models.AccountOrder.rid))).all()
     if orders:
         cols = ("nm_id", "name", "brand", "price", "dst_office_id", "status_name", "group_id",
-                "status_at", "ordered_at", "expiry_at", "delivery_at", "paid")
-        office = ("office_address", "office_hours")  # сбой справочника ПВЗ (None) не стирает сохранённый адрес
+                "ordered_at", "expiry_at", "delivery_at", "paid")
+        keep = ("office_address", "office_hours",  # сбой справочника ПВЗ (None) не стирает сохранённый адрес
+                "status_at")  # у позиций в ПВЗ статус без status-tracker — время статуса прежнее
         t = models.AccountOrder.__table__
         stmt = pg_insert(models.AccountOrder).values(
-            [{"account_id": account_id, "rid": o["rid"], **{c: o.get(c) for c in cols + office}} for o in orders])
+            [{"account_id": account_id, "rid": o["rid"], **{c: o.get(c) for c in cols + keep}} for o in orders])
         await s.execute(stmt.on_conflict_do_update(  # hidden не трогаем — скрытие переживает опросы
             index_elements=[models.AccountOrder.account_id, models.AccountOrder.rid],
             set_={**{c: stmt.excluded[c] for c in cols},
-                  **{c: func.coalesce(stmt.excluded[c], t.c[c]) for c in office}}))
-    return was or 0
+                  **{c: func.coalesce(stmt.excluded[c], t.c[c]) for c in keep}}))
+    return was or 0, len(gone)
 
+
+POLL_KEY = "poll"  # app_settings: частота опроса аккаунтов по типам, минуты; ночью (01–07 МСК) × night_x
+POLL_DEFAULTS = {"orders": 3, "balance": 10, "vb": 30, "grade": 360, "notices": 15, "night": True, "night_x": 3}
+POLL_MAX = {"orders": 1440, "balance": 1440, "vb": 1440, "grade": 10080, "notices": 1440, "night_x": 10}
+
+
+async def poll_settings(s) -> dict:
+    raw = await get_setting(s, POLL_KEY)
+    return {**POLL_DEFAULTS, **(json.loads(raw) if raw else {})}
 
 
 UPSERT_CHUNK = 1000  # строк за запрос: у Postgres/asyncpg лимит 32 767 параметров (≈ 3 000 строк по 10 полей)

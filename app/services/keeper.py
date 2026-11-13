@@ -160,35 +160,60 @@ async def refresh_job(bot) -> None:
             await _relogin(bot, acc)
 
 
+KINDS = (*account_api.API_KINDS, "notices")  # типы данных опроса; порядок — порядок запросов
+NIGHT = range(1, 7)  # 01:00–06:59 МСК — интервалы × night_x
+DUE_SLACK = 20  # сек: минутный тик не должен проскочить, например, 3-минутный интервал из-за длительности опроса
+# acc_id → {тип: время последней ПОПЫТКИ (и при сбое: мёртвый прокси не дёргаем каждую минуту), "vb_total": итог баллов}.
+# ponytail: в памяти — рестарт worker'а = всё сразу у всех; в БД — если рестарты станут частыми
+_last: dict[int, dict] = {}
+
+
+def due(last: dict, cfg: dict, now: datetime) -> list[str]:
+    """Каким типам пора: с последней попытки прошло ≥ интервала (ночью × night_x)."""
+    x = cfg["night_x"] if cfg["night"] and now.astimezone(repo.MSK).hour in NIGHT else 1
+    return [k for k in KINDS if now.timestamp() - last.get(k, 0) >= cfg[k] * 60 * x - DUE_SLACK]
+
+
 async def state_job(bot) -> None:
-    """Лимит, % Кошелька, балансы и активные заказы всех активных аккаунтов."""
+    """Минутный тик: каждому активному аккаунту по очереди — только типы, которым пора (настройки — app_settings «poll»,
+    читаем каждый тик: правка с сайта действует без рестарта)."""
     async with Session() as s:
         accounts = await repo.active_accounts(s)
+        cfg = await repo.poll_settings(s)
     for acc in accounts:
-        await poll_account(bot, acc)
+        kinds = due(_last.get(acc.id, {}), cfg, datetime.now(timezone.utc))
+        if kinds:
+            await poll_account(bot, acc, kinds)
 
 
-async def _save_state(acc_id: int, st: dict) -> int:
-    """Ответ account_api.fetch в БД (адреса ПВЗ, заказы, funds, state_at) — как обычный опрос. → сбоев прокси до этого."""
+async def _save_state(acc_id: int, st: dict) -> tuple[int, int]:
+    """Пришедшее из account_api.fetch в БД (адреса ПВЗ, заказы, поля аккаунта, state_at). → (сбоев прокси до этого,
+    сколько заказов пропало из активных)."""
     if st.get("orders"):
         await _attach_offices(st["orders"], "dst_office_id")
     async with Session() as s:
-        fails = await repo.save_account_state(s, acc_id, st)
+        res = await repo.save_account_state(s, acc_id, st)
         await s.commit()
-    return fails
+    return res
 
 
-async def poll_account(bot, acc: models.WbAccount) -> None:
-    """Состояние одного аккаунта (по таймеру и сразу после входа).
+async def poll_account(bot, acc: models.WbAccount, kinds=KINDS) -> None:
+    """Опрос аккаунта по типам (по умолчанию — все: ↻ с сайта, после входа; заодно сбрасывает их таймеры).
 
     401 = детектор разлогина, но не сразу: access живёт 30 дн., сначала один рефреш
     и повтор; relogin — только если и после рефреша 401. Прокси не отвечает — не relogin.
     """
+    last = _last.setdefault(acc.id, {})
+    now = datetime.now(timezone.utc).timestamp()
+    last.update(dict.fromkeys(kinds, now))
+    api_kinds = [k for k in kinds if k in account_api.API_KINDS]
     state = decrypt_json(acc.state_enc)
     proxy = await proxy_url(acc.proxy_id)
+    st, errs = {}, {}
     try:
         try:
-            st = await account_api.fetch(state, proxy)
+            if api_kinds:
+                st, errs = await account_api.fetch(state, proxy, api_kinds, last.get("vb_total"))
         except (account_api.Unauthorized, account_api.NoBearer) as e:
             log.info("keeper: аккаунт %s: %s, освежаю сессию и повторяю",
                      acc.id, f"401 ({e})" if isinstance(e, account_api.Unauthorized) else "нет Bearer")
@@ -196,8 +221,8 @@ async def poll_account(bot, acc: models.WbAccount) -> None:
             if state is None:
                 await _relogin(bot, acc)
                 return
-            st = await account_api.fetch(state, proxy)
-    except ProxyDown as e:
+            st, errs = await account_api.fetch(state, proxy, api_kinds, last.get("vb_total"))
+    except ProxyDown as e:  # рефреш через браузер не прошёл
         await _proxy_alert(bot, acc, e)
         return
     except account_api.Unauthorized:
@@ -209,18 +234,31 @@ async def poll_account(bot, acc: models.WbAccount) -> None:
     except Exception as e:
         log.warning("keeper: состояние аккаунта %s не получено: %s: %s", acc.id, type(e).__name__, str(e)[:200])
         return
-    fails = await _save_state(acc.id, st)
-    if fails >= PROXY_ALERT_AFTER:  # о сбое пушили — скажем и о восстановлении
-        log.info("keeper: аккаунт %s: прокси снова отвечает после %d сбоев", acc.title, fails)
-        await _push_all(bot, f"✅ Прокси аккаунта WB <b>{acc.title}</b> снова отвечает")
-    try:  # колокольчик — не главное: его сбой не ломает опрос
-        await _notices(acc, state, proxy)
-    except Exception as e:
-        log.warning("keeper: уведомления %s не получены: %s: %s", acc.title, type(e).__name__, str(e)[:200])
-    log.info("keeper: аккаунт %s: Кошелёк %s%%, лимит %s ₽, заказов %d", acc.title,
-             st.get("wallet_pct") if st.get("wallet_pct") is not None else "—",
-             f"{st['limit_left']:,}".replace(",", " ") if st.get("limit_left") is not None else "—",
-             len(st["orders"]))
+    if api_kinds and not st:  # не пришло ничего: прокси — тревога, как раньше; уведомления тем более не возьмём
+        down = next((e for e in errs.values() if isinstance(e, ProxyDown)), None)
+        if down:
+            await _proxy_alert(bot, acc, down)
+        return
+    if "vb_points" in st and ("vb_ops" in st or st["vb_points"] == last.get("vb_total")):
+        last["vb_total"] = st["vb_points"]  # история взята (или не нужна) — следующий раз только при смене итога
+    gone = 0
+    if st:
+        fails, gone = await _save_state(acc.id, st)
+        if fails >= PROXY_ALERT_AFTER:  # о сбое пушили — скажем и о восстановлении
+            log.info("keeper: аккаунт %s: прокси снова отвечает после %d сбоев", acc.title, fails)
+            await _push_all(bot, f"✅ Прокси аккаунта WB <b>{acc.title}</b> снова отвечает")
+    if gone:  # забрали заказ — в истории покупок новая позиция: догружаем сейчас, не ждём суток
+        try:
+            await _purchases(acc)
+        except Exception as e:
+            log.warning("keeper: история заказов %s не получена: %s: %s", acc.title, type(e).__name__, str(e)[:200])
+    if "notices" in kinds:
+        try:  # колокольчик — не главное: его сбой не ломает опрос
+            await _notices(acc, state, proxy)
+        except Exception as e:
+            log.warning("keeper: уведомления %s не получены: %s: %s", acc.title, type(e).__name__, str(e)[:200])
+    log.info("keeper: аккаунт %s: %s%s", acc.title, ", ".join(kinds),
+             f"; заказов {len(st['orders'])}" if "orders" in st else "")
 
 
 # ---------- вход по заявке с сайта (wb_login_requests) ----------
@@ -314,6 +352,10 @@ async def process_login_request(bot=None) -> bool:
         async with Session() as s:
             acc = await s.get(models.WbAccount, acc.id)
         await poll_account(bot, acc)
+        try:  # история покупок теперь раз в сутки — новому аккаунту не ждать до ночи
+            await _purchases(acc)
+        except Exception as e:
+            log.warning("keeper: история заказов %s не получена: %s: %s", acc.title, type(e).__name__, str(e)[:200])
     return True
 
 
@@ -450,7 +492,8 @@ async def _purchases(acc: models.WbAccount) -> None:
 
 
 async def purchases_job(bot=None) -> None:
-    """История заказов (полученные) всех активных аккаунтов — раз в час; копим по rid. Сбой одного — дальше."""
+    """История заказов (полученные) всех активных аккаунтов — раз в сутки (новая покупка по событию — заказ пропал из
+    активных, см. poll_account); копим по rid. Сбой одного — дальше."""
     async with Session() as s:
         accounts = await repo.active_accounts(s)
     for acc in accounts:
@@ -665,7 +708,10 @@ async def _pay(pid: int) -> None:
     for _ in range(PAY_CHECKS):
         await asyncio.sleep(PAY_CHECK_SEC)
         try:
-            st = await account_api.fetch(state, proxy)
+            _last.setdefault(acc_id, {}).update(dict.fromkeys(("orders", "balance"), datetime.now(timezone.utc).timestamp()))
+            st, errs = await account_api.fetch(state, proxy, ("orders", "balance"))
+            if "orders" not in st:
+                raise errs.get("orders") or RuntimeError("заказы не пришли")
             await _save_state(acc_id, st)
         except Exception as e:
             log.warning("keeper: оплата %s: заказы %s не перечитаны: %s: %s", pid, title, type(e).__name__, str(e)[:200])
@@ -773,4 +819,22 @@ if __name__ == "__main__":  # self-check: маска номера, Bearer в с�
     assert has_bearer({"origins": [{"origin": "https://www.wildberries.ru", "localStorage": [
         {"name": "wbid-oauth-sdk-access-token", "value": "eyJa.eyJb.c"}]}]})
     assert not has_bearer({"cookies": [], "origins": []})
+    # планировщик опроса: интервалы, ночь 01:00–06:59 МСК × night_x, первый раз — всё
+    cfg = repo.POLL_DEFAULTS
+    at = lambda hh, mm: datetime(2026, 11, 13, hh, mm, tzinfo=repo.MSK)
+    assert due({}, cfg, at(12, 0)) == list(KINDS)  # рестарт / новый аккаунт — всё сразу
+    t = at(12, 0).timestamp()
+    last = dict.fromkeys(KINDS, t)
+    assert due(last, cfg, at(12, 2)) == []
+    assert due(last, cfg, at(12, 3)) == ["orders"]  # 3 мин
+    assert due({**last, "orders": t + 5}, cfg, at(12, 3)) == ["orders"]  # опрос длился секунды — тик не проскакивает
+    assert due(last, cfg, at(12, 10)) == ["orders", "balance"]
+    assert due(last, cfg, at(12, 15)) == ["orders", "balance", "notices"]
+    assert due(last, cfg, at(12, 30)) == ["orders", "balance", "vb", "notices"]
+    assert due(last, cfg, at(18, 0)) == list(KINDS)  # % Кошелька — 6 ч
+    night = lambda hh, mm, ago: "orders" in due({"orders": at(hh, mm).timestamp() - ago * 60}, cfg, at(hh, mm))
+    assert night(0, 59, 3) and night(7, 0, 3)  # днём 3 мин
+    for hh, mm in ((1, 0), (6, 59)):  # ночью 3 × 3 = 9
+        assert not night(hh, mm, 8) and night(hh, mm, 9), (hh, mm)
+    assert "orders" in due({"orders": at(1, 0).timestamp() - 180}, {**cfg, "night": False}, at(1, 0))  # ночной выключен
     print("ok")

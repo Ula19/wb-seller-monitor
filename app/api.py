@@ -466,6 +466,29 @@ async def img_hosts(u=Depends(user), s=Depends(db)):
     return json.loads(raw) if raw else []
 
 
+@app.get("/api/settings/poll")
+async def get_poll_settings(u=Depends(user), s=Depends(db)):
+    """Частота опроса аккаунтов по типам (минуты) и ночной режим — общие для всех аккаунтов."""
+    return await repo.poll_settings(s)
+
+
+@app.put("/api/settings/poll")
+async def put_poll_settings(body: dict, u=Depends(user), s=Depends(db)):
+    """Сохранить частоту опроса; worker читает её каждый тик — без рестарта."""
+    cfg = {}
+    for k, hi in repo.POLL_MAX.items():
+        v = body.get(k)
+        if type(v) is not int or not 1 <= v <= hi:  # type — не isinstance: True/False тоже int
+            raise HTTPException(422, f"{k}: нужно целое от 1 до {hi}")
+        cfg[k] = v
+    if type(body.get("night")) is not bool:
+        raise HTTPException(422, "night: нужно да/нет")
+    cfg["night"] = body["night"]
+    await repo.set_setting(s, repo.POLL_KEY, json.dumps(cfg))
+    await s.commit()
+    return cfg
+
+
 @app.post("/api/accounts/{account_id:int}/poll")
 async def poll_account(account_id: int, u=Depends(user), s=Depends(db)):
     """↻ «Обновить»: worker опросит аккаунт вне расписания (polling — как checking у прокси)."""

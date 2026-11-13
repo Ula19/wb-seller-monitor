@@ -279,28 +279,53 @@ async def _client(state: dict, proxy: str | None):
         yield call, auth, with_vkey
 
 
-async def fetch(state: dict, proxy: str | None = None) -> dict:
-    """Баланс, лимит, % Кошелька, ВБ-баллы (+ их история) и активные заказы. Unauthorized на 401, ProxyDown — сеть
-    через прокси не работает (таймаут, обрыв, 407), прочие сбои — исключением. proxy — прокси аккаунта."""
+API_KINDS = ("orders", "balance", "vb", "grade")  # типы данных опроса здесь; пятый — уведомления (fetch_notices)
+PVZ_STATUS = "Приходите за товаром"  # status 210, group 5
+
+
+async def fetch(state: dict, proxy: str | None = None, kinds=API_KINDS, vb_total: int | None = None) -> tuple[dict, dict]:
+    """Только запрошенные типы: orders (заказы + статусы), balance (баланс, лимит), vb (ВБ-баллы; история — только если
+    итог не равен vb_total), grade (% Кошелька). → (пришедшее, {тип: исключение}): каждый тип отдельно, сбой одного
+    не отменяет остальные. 401 у orders/balance/grade — Unauthorized наверх (рефреш); у баллов — просто сбой, как было."""
+    out, errs = {}, {}
     async with _client(state, proxy) as (call, auth, with_vkey):
-        out = parse_balance(await call("GET", BALANCE_URL, headers=with_vkey))
-        try:  # баллы — не главное: их сбой не ломает опрос
+        async def orders():
+            rows = parse_orders(await call("GET", ORDERS_URL, headers=auth))
+            # срок хранения есть только у позиций в ПВЗ (прод 2026-11-13: 122 из 122 group 5, у групп 2/3 — ни одного) —
+            # их статус известен без status-tracker
+            ask = [o for o in rows if not o["expiry_at"]]
+            for o in rows:
+                if o["expiry_at"]:
+                    o.update(status_name=PVZ_STATUS, group_id=5, status_at=None)
+            if ask:
+                apply_statuses(ask, await call("POST", STATUSES_URL, headers=auth, json={"ids": [o["rid"] for o in ask]}))
+            out["orders"] = rows
+
+        async def balance():
+            out.update(parse_balance(await call("GET", BALANCE_URL, headers=with_vkey)))
+
+        async def vb():
             out["vb_points"] = parse_vb(await call("GET", VB_URL, headers=with_vkey))
-        except Exception as e:
-            out["vb_points"] = None
-            log.warning("ВБ-баллы не получены: %s: %s", type(e).__name__, str(e)[:200])
-        try:  # история баллов — тоже не главное; None = не трогать накопленное
-            out["vb_ops"] = parse_vb_history(await call("GET", VB_HISTORY_URL, headers=with_vkey))
-        except Exception as e:
-            out["vb_ops"] = None
-            log.warning("история ВБ-баллов не получена: %s: %s", type(e).__name__, str(e)[:200])
-        out["wallet_pct"] = parse_grade(await call("GET", GRADE_URL, headers=auth))
-        orders = parse_orders(await call("GET", ORDERS_URL, headers=auth))
-        if orders:  # одним запросом на все rid аккаунта
-            apply_statuses(orders, await call("POST", STATUSES_URL, headers=auth,
-                                              json={"ids": [o["rid"] for o in orders]}))
-        out["orders"] = orders
-        return out
+            if out["vb_points"] is not None and out["vb_points"] == vb_total:
+                return  # итог тот же — история не менялась
+            try:  # история не пришла — баллы всё равно сохраним; vb_ops нет = накопленное не трогать
+                out["vb_ops"] = parse_vb_history(await call("GET", VB_HISTORY_URL, headers=with_vkey))
+            except Exception as e:
+                log.warning("история ВБ-баллов не получена: %s: %s", type(e).__name__, str(e)[:200])
+
+        async def grade():
+            out["wallet_pct"] = parse_grade(await call("GET", GRADE_URL, headers=auth))
+        for k in kinds:
+            try:
+                await {"orders": orders, "balance": balance, "vb": vb, "grade": grade}[k]()
+            except Unauthorized:
+                if k != "vb":
+                    raise
+                errs[k] = Unauthorized(k)
+            except Exception as e:
+                errs[k] = e
+                log.warning("%s не получено: %s: %s", k, type(e).__name__, str(e)[:200])
+    return out, errs
 
 
 async def fetch_purchases(state: dict, proxy: str | None = None,
@@ -570,9 +595,13 @@ if __name__ == "__main__":  # self-check на формах ответов из H
             if self.status_code >= 400:
                 raise RuntimeError(f"HTTP {self.status_code}")
 
-    def session(vb):
-        bodies = {BALANCE_URL: R(200, {"available_funds_rub": 19788800}), VB_URL: vb, VB_HISTORY_URL: R(200, None),
-                  GRADE_URL: R(200, {"state": 0}), ORDERS_URL: R(200, {"data": []})}
+    ORD = {"data": [{"rids": [{"uid": "pvz", "expiry_dt": 1794603599}, {"uid": "go"}]}]}  # в ПВЗ (есть срок) и в пути
+
+    def session(**over):
+        bodies = {BALANCE_URL: R(200, {"available_funds_rub": 19788800}), VB_URL: R(200, {"data": {"total_bonuses": 9094}}),
+                  VB_HISTORY_URL: R(200, None), GRADE_URL: R(200, {"state": 0}), ORDERS_URL: R(200, {"data": []}),
+                  STATUSES_URL: R(200, [[{"rid": "go", "status_name": "Едет в пункт выдачи", "group_id": "3", "date": 10**18}]]),
+                  **over}
         seen = []
 
         class S:
@@ -586,21 +615,47 @@ if __name__ == "__main__":  # self-check на формах ответов из H
                 pass
 
             async def request(self, method, url, **kw):
-                seen.append((url, kw.get("headers", {}).get("Cookie")))
+                seen.append((url, kw.get("headers", {}).get("Cookie"), kw.get("json")))
                 return bodies[url]
         return S, seen
 
     async def demo():
-        for vb, want in ((R(200, {"data": {"total_bonuses": 9094}, "state": 0}), 9094), (R(500, {}), None),
-                         (R(401, {}), None)):
-            S, seen = session(vb)
+        async def run(kinds=API_KINDS, vb_total=None, **over):
+            S, seen = session(**over)
             with patch(f"{__name__}.AsyncSession", S), patch(f"{__name__}.web_proxy", lambda: None):
-                out = await fetch({**st, "cookies": [{"name": "wbx-validation-key", "value": "vk"}]})
-            assert (out["funds"], out["vb_points"], out["orders"], out["vb_ops"]) == (197888, want, [], []), out
-            assert (VB_URL, "wbx-validation-key=vk") in seen  # заголовки как у full-balance
-    with patch.object(log, "warning") as warn:
+                out, errs = await fetch({**st, "cookies": [{"name": "wbx-validation-key", "value": "vk"}]}, None, kinds, vb_total)
+            return out, errs, [u for u, *_ in seen], seen
+        out, errs, urls, seen = await run()
+        assert (out["funds"], out["vb_points"], out["orders"], out["vb_ops"], errs) == (197888, 9094, [], [], {}), out
+        assert (VB_URL, "wbx-validation-key=vk", None) in seen  # заголовки как у full-balance
+        assert STATUSES_URL not in urls  # заказов нет — статусы не спрашиваем
+        for vb in (R(500, {}), R(401, {})):  # баллы не пришли — ни баллов, ни истории, остальное есть; 401 баллов — не разлогин
+            out, errs, urls, _ = await run(**{VB_URL: vb})
+            assert set(errs) == {"vb"} and "vb_points" not in out and "vb_ops" not in out and out["funds"] == 197888, out
+            assert VB_HISTORY_URL not in urls
+        out, errs, urls, _ = await run(("vb",), vb_total=9094)  # итог тот же — история не нужна
+        assert out == {"vb_points": 9094} and urls == [VB_URL], (out, urls)
+        out, errs, urls, _ = await run(("vb",), vb_total=9000)
+        assert out == {"vb_points": 9094, "vb_ops": []} and urls == [VB_URL, VB_HISTORY_URL]
+        out, errs, urls, _ = await run(("vb",), **{VB_HISTORY_URL: R(500, {})})  # история упала — баллы всё равно есть
+        assert out == {"vb_points": 9094} and not errs
+        # только заказы: статусы — для позиций без срока хранения; в ПВЗ — «Приходите за товаром» без status-tracker
+        out, errs, urls, seen = await run(("orders",), **{ORDERS_URL: R(200, ORD)})
+        assert urls == [ORDERS_URL, STATUSES_URL] and seen[1][2] == {"ids": ["go"]} and set(out) == {"orders"}, seen
+        assert [(o["rid"], o["group_id"], o["status_name"]) for o in out["orders"]] == [
+            ("pvz", 5, PVZ_STATUS), ("go", 3, "Едет в пункт выдачи")], out
+        out, errs, urls, _ = await run(("orders",), **{ORDERS_URL: R(200, {"data": [ORD["data"][0] | {"rids": ORD["data"][0]["rids"][:1]}]})})
+        assert urls == [ORDERS_URL] and out["orders"][0]["group_id"] == 5  # все в ПВЗ — статусы не нужны
+        out, errs, urls, _ = await run(("balance", "orders"), **{BALANCE_URL: R(500, {}), ORDERS_URL: R(200, ORD)})
+        assert set(errs) == {"balance"} and len(out["orders"]) == 2 and "funds" not in out  # сбой баланса не мешает заказам
+        for k, url in (("balance", BALANCE_URL), ("orders", ORDERS_URL), ("grade", GRADE_URL)):
+            try:
+                await run(**{url: R(401, {})})
+                raise AssertionError(k)
+            except Unauthorized:
+                pass
+    with patch.object(log, "warning"):  # пустая история — не сбой: vb_ops == [] в первом прогоне
         asyncio.run(demo())
-    assert not any("истори" in str(c) for c in warn.call_args_list), warn.call_args_list  # пустая история — не сбой
 
     # история заказов (HAR боевого): цена = Price − PaymentSaleAmount — как в активных (A17: 17 094 − 1 026 = 16 068)
     item = lambda rid, **kw: {"Rid": rid, "NmId": 1656607451, "GoodsName": "Смартфон A17", "BrandName": "Samsung",
