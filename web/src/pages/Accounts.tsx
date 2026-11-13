@@ -10,6 +10,7 @@ import CertHistory from "./CertHistory";
 import CertModal from "./CertModal";
 import LoginModal from "./LoginModal";
 import PayModal from "./PayModal";
+import PollSettings from "./PollSettings";
 
 const VIEW_KEY = "accounts.view";  // «Список | Плитки» — помним в браузере
 const readView = (): "list" | "tiles" => {
@@ -111,7 +112,7 @@ function PvzTile({ all }: { all: Account[] }) {
   );
 }
 
-type Fn = "login" | "cert" | "history" | "pay";
+type Fn = "login" | "cert" | "history" | "pay" | "settings";
 
 /** «Функции»: всё, что делается над аккаунтами, — одним меню по группам. Закрытие — клик вне или Esc. */
 function Functions({ on }: { on: (f: Fn) => void }) {
@@ -139,6 +140,8 @@ function Functions({ on }: { on: (f: Fn) => void }) {
           {item("history", "История сертификатов", "Все добавленные коды: когда, куда, номинал")}
           <div className="fn-group">Заказы</div>
           {item("pay", "Оплата товаров", "Оплатить неоплаченные заказы с кошелька")}
+          <div className="fn-group">Система</div>
+          {item("settings", "Настройки", "Как часто опрашивать аккаунты, ночной режим")}
         </div>
       )}
     </div>
@@ -246,6 +249,7 @@ export default function Accounts() {
       <LoginModal open={fn === "login"} onClose={close} relogin={null} />
       <CertModal open={fn === "cert"} onClose={close} all={all} />
       <CertHistory open={fn === "history"} onClose={close} all={all} />
+      <PollSettings open={fn === "settings"} onClose={close} />
       <PayModal open={fn === "pay"} onClose={close} all={all} />
     </section>
   );

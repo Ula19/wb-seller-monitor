@@ -407,3 +407,13 @@ button.tile[aria-expanded="true"] { border-color: var(--accent); }
 .pvz-row b { flex: 1 1 260px; min-width: 0; overflow-wrap: anywhere; }
 .pvz-row:hover b { color: var(--accent); }
 .pvz-pop { background: var(--accent-soft); border-radius: 8px; padding: 6px 10px; margin-bottom: 8px; }
+/* «Настройки опроса» */
+.poll-grid { display: grid; gap: 10px; margin: 12px 0; }
+.poll-row { display: grid; grid-template-columns: 170px 1fr; gap: 4px 12px; align-items: center; }
+.poll-row .err { grid-column: 2; margin: 0; }
+.poll-in input { width: 90px; }
+.poll-in input[aria-invalid="true"] { border-color: var(--bad); }
+.poll-check { display: flex; gap: 8px; align-items: center; }
+.poll-est { margin: 8px 0; }
+@media (max-width: 768px) { .poll-row { grid-template-columns: 1fr; } .poll-row .err { grid-column: 1; } }
+
