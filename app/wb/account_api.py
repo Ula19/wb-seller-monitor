@@ -250,7 +250,7 @@ async def _client(state: dict, proxy: str | None):
     with_vkey = {**auth, **({"Cookie": f"wbx-validation-key={vkey}"} if vkey else {})}
     proxy = curl_proxy(proxy or web_proxy())  # тот же выход, что у браузера аккаунта
     # подключение (CONNECT к прокси + TLS) — до 5 с, весь запрос — до 20 с, как было: зависший маршрут «прокси → WB»
-    # не съедает 20 с, а один повтор чинит короткие пропуски (SCOUT 2026-11-13)
+    # не съедает 20 с, а повторы (1 и 3 с) чинят короткие пропуски: худшее 5+1+5+3+5 = 19 с (SCOUT 2026-11-13, 11-14)
     async with AsyncSession(impersonate="chrome", timeout=CONNECT_READ,
                             proxies={"http": proxy, "https": proxy} if proxy else None) as s:
         async def send(method, url, **kw):
@@ -263,15 +263,19 @@ async def _client(state: dict, proxy: str | None):
             return r
 
         async def call(method, url, **kw):
-            try:
-                r = await send(method, url, **kw)
-            except ProxyDown as e:
-                if not PRE_SEND.search(str(e)):  # могло дойти до WB (оплата, сертификат) — не повторяем
-                    raise
-                await asyncio.sleep(RETRY_SEC)
-                r = await send(method, url, **kw)  # второй сбой — ProxyDown с его текстом, как раньше
-                log.info("прокси %s: не подключились к %s, повтор спас", urlparse(proxy).netloc.rpartition("@")[2]
-                         if proxy else "напрямую", url.split("/")[2])
+            for n, pause in enumerate((0, *RETRY_SEC)):
+                if pause:
+                    await asyncio.sleep(pause)
+                try:
+                    r = await send(method, url, **kw)
+                    break
+                except ProxyDown as e:
+                    # после отправки (могло дойти до WB: оплата, сертификат) или повторы кончились — наверх с этим текстом
+                    if not PRE_SEND.search(str(e)) or n == len(RETRY_SEC):
+                        raise
+            if n:
+                log.info("прокси %s: не подключились к %s, повтор спас (%d-й)", urlparse(proxy).netloc.rpartition("@")[2]
+                         if proxy else "напрямую", url.split("/")[2], n)
             if r.status_code == 401:
                 raise Unauthorized(url.split("/")[2])
             r.raise_for_status()
@@ -418,7 +422,7 @@ CERT_RE = re.compile(r"[A-Z0-9]{16}")
 CERT_BUSY = 5  # errorNumber «От вас слишком много запросов. Попробуйте через 2 сек.»
 CERT_RETRY_SEC, CERT_RETRIES = 3, 3
 CONNECT_READ = (5, 15)  # curl_cffi: CONNECTTIMEOUT 5 с, TIMEOUT 5 + 15 = 20 с
-RETRY_SEC = 1  # пауза перед единственным повтором сбоя до отправки
+RETRY_SEC = (1, 3)  # паузы перед повторами сбоя до отправки; повторов = len (пропуски идут пачками — второй через 3 с)
 # сбой curl ДО отправки запроса (до WB не дошли — можно считать ошибкой); всё прочее (Operation timed out, Empty
 # reply, Recv failure…) — после: запрос мог дойти. Голое «(28)» не годится — бывает обоих видов
 PRE_SEND = re.compile(r"\(28\) Connection timed out|\(56\) CONNECT tunnel failed|\(35\) TLS connect error|"
@@ -526,7 +530,11 @@ async def fetch_balance(state: dict, proxy: str | None = None) -> dict:
 
 
 if __name__ == "__main__":  # self-check на формах ответов из HAR (суммы в копейках)
-    RETRY_SEC = 0  # повтор сбоя до отправки — без паузы
+    slept = []
+
+    async def _nap(sec):  # паузы повторов сбоя до отправки не ждём, а записываем
+        slept.append(sec)
+    asyncio.sleep = _nap
     b = parse_balance({"wallet_balance_rub": 428500, "bonus_balance": 20100, "available_funds_rub": 448600, "discount": {
         "expenses": 23355900, "monthly_limit": 100000000, "max_order_price": 100000000, "max_rid_price": 50000000}})
     assert b == {"limit_left": 766441, "monthly_limit": 1000000, "max_order": 1000000, "max_rid": 500000,
@@ -810,7 +818,7 @@ if __name__ == "__main__":  # self-check на формах ответов из H
         assert (await run([400]))[0] == {"ok": False, "error_number": None, "error_text": "WB отклонил запрос: HTTP 400"}
         for t in pre:
             try:
-                await run([curl(t)] * 2)  # повтор тоже не подключился
+                await run([curl(t)] * 3)  # оба повтора тоже не подключились
                 raise AssertionError(t)
             except ProxyDown:
                 pass
@@ -862,7 +870,7 @@ if __name__ == "__main__":  # self-check на формах ответов из H
         assert (await run([400]))[0].startswith("WB отказал: HTTP 400")
         for t in pre:
             try:
-                await run([curl(t)] * 2)  # повтор тоже не подключился
+                await run([curl(t)] * 3)  # оба повтора тоже не подключились
                 raise AssertionError(t)
             except ProxyDown:
                 pass
@@ -872,9 +880,16 @@ if __name__ == "__main__":  # self-check на формах ответов из H
                 raise AssertionError(x)
             except PayUnknown:
                 pass
+        for t in post:  # повтор подключился, но упал после отправки — оплата могла пройти
+            try:
+                await run([curl(pre[0]), curl(t)])
+                raise AssertionError(t)
+            except PayUnknown as e:
+                assert t[:20] in str(e), e
     asyncio.run(pays())
 
-    # пропуски прокси: connect-таймаут 5 с; сбой до отправки — один повтор (+ строка в лог), после отправки / 401 / HTTP — нет
+    # пропуски прокси: connect-таймаут 5 с; сбой до отправки — до двух повторов через 1 и 3 с (+ строка в лог с номером),
+    # после отправки / 401 / HTTP — нет
     async def flaps():
         made, sents = [], []
 
@@ -889,25 +904,37 @@ if __name__ == "__main__":  # self-check на формах ответов из H
                 async with _client(st, None) as (call, auth, _):
                     return await call("GET", BALANCE_URL, headers=auth), sent
         with patch(f"{__name__}.log") as lg:
+            slept.clear()
             res, sent = await run([curl(pre[0]), {"x": 1}], "http://user:pw@1.2.3.4:8080")
-            assert res == {"x": 1} and len(sent) == 2 and lg.info.call_count == 1, (sent, lg.info.call_args_list)
-            assert lg.info.call_args.args[1:] == ("1.2.3.4:8080", "wb-balance.wildberries.ru"), lg.info.call_args  # без пароля
+            assert res == {"x": 1} and len(sent) == 2 and lg.info.call_count == 1 and slept == [1], (sent, slept)
+            assert lg.info.call_args.args[1:] == ("1.2.3.4:8080", "wb-balance.wildberries.ru", 1), lg.info.call_args  # без пароля
+            assert "повтор спас (%d-й)" in lg.info.call_args.args[0]
             assert made[-1]["timeout"] == (5, 15)
             res, sent = await run([RequestException("Failed to perform, curl: (56) CONNECT tunnel failed, response 407"),
                                    {"x": 1}])
             assert len(sent) == 2 and lg.info.call_args.args[1] == "напрямую"
+            slept.clear()
+            res, sent = await run([curl(pre[2]), curl(pre[3]), {"x": 2}])  # пропуски пачкой: спас второй, через 3 с
+            assert res == {"x": 2} and len(sent) == 3 and slept == [1, 3] and lg.info.call_args.args[3] == 2, slept
             lg.info.reset_mock()
+            slept.clear()
             try:
-                await run([curl(pre[0]), curl(pre[0])])
-                raise AssertionError("2 сбоя")
+                await run([curl(pre[0])] * 3 + [{"x": 1}])
+                raise AssertionError("3 сбоя")
             except ProxyDown as e:
-                assert "(28) Connection timed out" in str(e) and len(sents[-1]) == 2 and not lg.info.called, e
+                assert "(28) Connection timed out" in str(e) and len(sents[-1]) == 3 and not lg.info.called, e
+                assert slept == [1, 3], slept  # третьего повтора нет
             for t in post:
                 try:
                     await run([curl(t), {"x": 1}])
                     raise AssertionError(t)
                 except ProxyDown as e:
                     assert t[:20] in str(e) and len(sents[-1]) == 1, (t, sents[-1])  # могло дойти — не повторяем
+                try:
+                    await run([curl(pre[1]), curl(t), {"x": 1}])  # повтор упал после отправки — дальше не повторяем
+                    raise AssertionError(t)
+                except ProxyDown as e:
+                    assert t[:20] in str(e) and len(sents[-1]) == 2, (t, sents[-1])
             for x, err in ((401, Unauthorized), (400, HTTP400)):
                 try:
                     await run([x, {"x": 1}])
