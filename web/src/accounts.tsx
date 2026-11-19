@@ -8,7 +8,8 @@ export const STATUS: Record<string, string> = { active: "активен", relogi
 export const GROUP: Record<number, string> = { 1: "оформлен", 2: "сборка", 3: "в пути", 5: "в ПВЗ" };
 
 export const visible = (orders: Order[]) => orders.filter((o) => !o.hidden);
-export const transit = (a: Account) => visible(a.orders).filter((o) => o.group_id === 3).length;
+// «в пути» — всё, что ещё не в ПВЗ: оформлен, сборка, в пути и без группы (статус от WB ещё не пришёл)
+export const transit = (a: Account) => visible(a.orders).filter((o) => o.group_id !== 5).length;
 export const inPvz = (a: Account) => visible(a.orders).filter((o) => o.group_id === 5).length;
 /** «Не оплачено»: сумма неоплаченных активных заказов (paid === false; «не знаем» не считаем), без скрытых. */
 export const unpaid = (a: Account) => visible(a.orders).filter((o) => o.paid === false).reduce((s, o) => s + (o.price ?? 0), 0);

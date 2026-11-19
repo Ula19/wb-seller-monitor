@@ -91,7 +91,7 @@ function OrdersTab({ a, sync }: { a: AccountFull; sync: ReturnType<typeof useSyn
         const vis = visible(g.orders);
         const hidden = g.orders.length - vis.length;
         const ready = vis.filter((o) => o.group_id === 5).length;
-        const going = vis.filter((o) => o.group_id === 3).length;
+        const going = vis.length - ready;  // всё, что не в ПВЗ, — «в пути», как transit
         const rows = lines(shown.has(g.id) ? g.orders : vis);
         const due = toPay(a, g.orders).reduce((s, o) => s + (o.price ?? 0), 0);
         return (

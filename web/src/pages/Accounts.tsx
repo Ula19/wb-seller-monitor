@@ -57,11 +57,10 @@ type Board = { id: number; address: string; go: number; ready: number; accs: { a
 export function pvzBoard(all: Account[]): Board[] {
   const m = new Map<number, Board>();
   for (const a of all) for (const o of visible(a.orders)) {
-    if (o.group_id !== 3 && o.group_id !== 5) continue;
     const id = o.dst_office_id ?? 0;
     const b = m.get(id) ?? { id, address: o.office_address ?? (id ? `ПВЗ №${id}` : "ПВЗ не указан"), go: 0, ready: 0, accs: [] };
     const x = b.accs.find((x) => x.a.id === a.id) ?? (b.accs.push({ a, go: 0, ready: 0 }), b.accs[b.accs.length - 1]);
-    const k = o.group_id === 5 ? "ready" : "go";
+    const k = o.group_id === 5 ? "ready" : "go";  // не в ПВЗ — «в пути», как transit
     b[k] += 1; x[k] += 1;
     m.set(id, b);
   }
