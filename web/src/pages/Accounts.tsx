@@ -9,6 +9,7 @@ import { useSort } from "../sort";
 import CertHistory from "./CertHistory";
 import CertModal from "./CertModal";
 import LoginModal from "./LoginModal";
+import OrderModal from "./OrderModal";
 import PayModal from "./PayModal";
 
 const VIEW_KEY = "accounts.view";  // «Список | Плитки» — помним в браузере
@@ -111,7 +112,7 @@ function PvzTile({ all }: { all: Account[] }) {
   );
 }
 
-type Fn = "login" | "cert" | "history" | "pay";
+type Fn = "login" | "cert" | "history" | "order" | "pay";
 
 /** «Функции»: всё, что делается над аккаунтами, — одним меню по группам. Закрытие — клик вне или Esc. */
 function Functions({ on }: { on: (f: Fn) => void }) {
@@ -138,6 +139,7 @@ function Functions({ on }: { on: (f: Fn) => void }) {
           {item("cert", "Добавить сертификат", "Пополнить кошельки кодами сертификатов")}
           {item("history", "История сертификатов", "Все добавленные коды: когда, куда, номинал")}
           <div className="fn-group">Заказы</div>
+          {item("order", "Заказать товар", "Корзина на несколько аккаунтов, пункты выдачи, оплата")}
           {item("pay", "Оплата товаров", "Оплатить неоплаченные заказы с кошелька")}
         </div>
       )}
@@ -246,6 +248,7 @@ export default function Accounts() {
       <LoginModal open={fn === "login"} onClose={close} relogin={null} />
       <CertModal open={fn === "cert"} onClose={close} all={all} />
       <CertHistory open={fn === "history"} onClose={close} all={all} />
+      <OrderModal open={fn === "order"} onClose={close} all={all} />
       <PayModal open={fn === "pay"} onClose={close} all={all} />
     </section>
   );

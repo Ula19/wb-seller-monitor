@@ -51,7 +51,7 @@ export function PayStatus({ p }: { p: Payment }) {
 
 /** Сертификат прямо в строке: код + номинал → та же очередь активации, что в мастере; текст лимита — тот же.
  *  need — денег не хватает; хватило после активации — поля прячутся, итог активации остаётся. */
-export function CertAdd({ a, need }: { a: Account; need: boolean }) {
+export function CertAdd({ a, need, onDone }: { a: Account; need: boolean; onDone?: () => void }) {
   const qc = useQueryClient();
   const [code, setCode] = useState("");
   const [nominal, setNominal] = useState("");
@@ -62,7 +62,10 @@ export function CertAdd({ a, need }: { a: Account; need: boolean }) {
     queryFn: () => api<Cert[]>(`/certificates?ids=${id}`),
     refetchInterval: (q) => (q.state.data?.every((c) => FINAL.includes(c.status)) ? false : 1500) });
   const c = cert.data?.[0];
-  useEffect(() => { if (c && FINAL.includes(c.status)) qc.invalidateQueries({ queryKey: ["accounts"] }); }, [c?.status]);
+  useEffect(() => {
+    if (c && FINAL.includes(c.status)) qc.invalidateQueries({ queryKey: ["accounts"] });
+    if (c?.status === "ok") onDone?.();  // «Заказать товар»: зачислено — пересчитать предпросмотр
+  }, [c?.status]);
   const add = useMutation({
     mutationFn: () => api<{ ids: number[] }>("/certificates", { method: "POST",
       body: { items: [{ code: normCode(code) ?? code, nominal: n, account_id: a.id }] } }),

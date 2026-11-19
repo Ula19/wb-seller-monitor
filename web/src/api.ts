@@ -122,3 +122,26 @@ export const time = (iso: string | number | null) => {
   return d.toLocaleString("ru-RU", today ? { timeZone: MSK, hour: "2-digit", minute: "2-digit" }
     : { timeZone: MSK, day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
 };
+
+// ---------- «Заказать товар»: деньги в КОПЕЙКАХ (как у WB) ----------
+export type Quote<T> = { id: number; kind: string; status: "pending" | "working" | "done" | "error"; result: T | null; error: string | null };
+export type ProductCard = { nm: number; name: string | null; brand: string | null; color: string | null; price: number | null;
+  stock: number; in_stock: boolean };
+export type PickupPoint = { id: number; address: string | null; hours: string | null; lat: number | null; lon: number | null;
+  accounts?: number[] };
+export type PreviewLine = { nm: number; qty: number; pvz_id: number; name?: string | null; total?: number; final?: number;
+  now?: number; stock?: number; no_discount?: string | null; error?: string };
+export type PreviewAccount = { account_id: number; title?: string; error?: string; wallet_pct?: number; funds?: number | null;
+  limit_left?: number | null; wallet_blocked?: boolean | null; postpaid_limit?: number | null; postpaid_left?: number;
+  prepaid_only?: boolean; lines?: PreviewLine[]; note?: string | null };
+export type Preview = { accounts: PreviewAccount[]; stock_over: { nm: number; need: number; stock: number }[] };
+export type BuyOrder = {
+  id: number; account_id: number | null; nm: number; name: string | null; qty: number; pvz_id: number; pay_now: boolean;
+  price_ok: number; total: number | null; final: number | null; error: string | null; rids: string[];
+  status: "pending" | "sending" | "ok" | "error" | "unknown" | "cancelled";
+  cancel_state: "pending" | "error" | null; cancel_error: string | null; created_at: string; done_at: string | null;
+  can_cancel: boolean;
+};
+/** Копейки → «1 234 ₽» (копейки — только если есть). */
+export const rubk = (k: number | null | undefined) =>
+  k == null ? "—" : `${(k / 100).toLocaleString("ru-RU", { maximumFractionDigits: 2 })} ₽`;

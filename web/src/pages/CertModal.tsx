@@ -25,8 +25,10 @@ function Steps({ step }: { step: number }) {
   );
 }
 
-// ---------- шаг 1 ----------
-function StepAccounts({ all, picked, setPicked }: { all: Account[]; picked: number[]; setPicked: (p: number[]) => void }) {
+// ---------- шаг 1 (его же берёт «Заказать товар») ----------
+export function StepAccounts({ all, picked, setPicked, text = "Выберите аккаунты, на которые будут добавлены сертификаты. Можно один или несколько." }: {
+  all: Account[]; picked: number[]; setPicked: (p: number[]) => void; text?: string;
+}) {
   const [q, setQ] = useState("");
   const can = (a: Account) => a.status === "active";
   const list = all.filter((a) => [a.title, a.name, a.label].some((t) => t?.toLowerCase().includes(q.trim().toLowerCase())));
@@ -34,7 +36,7 @@ function StepAccounts({ all, picked, setPicked }: { all: Account[]; picked: numb
   const toggle = (id: number) => setPicked(all.map((a) => a.id).filter((x) => (x === id) !== picked.includes(x)));
   return (
     <>
-      <p className="muted">Выберите аккаунты, на которые будут добавлены сертификаты. Можно один или несколько.</p>
+      <p className="muted">{text}</p>
       <div className="filters">
         <input className="search" placeholder="Поиск по имени" value={q} onChange={(e) => setQ(e.target.value)} />
         <button className="link" onClick={() => setPicked(all.filter((a) => can(a) && (picked.includes(a.id) || list.includes(a))).map((a) => a.id))}>Выбрать все</button>
