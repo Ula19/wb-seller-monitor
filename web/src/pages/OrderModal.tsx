@@ -78,6 +78,15 @@ function FindProduct({ have, onAdd }: { have: number[]; onAdd: (p: ProductCard) 
   );
 }
 
+/** Цена с Кошельком, как считает WB: вниз до рубля. % у аккаунтов бывает разный (3 / 6) — тогда «от–до». */
+const withWallet = (price: number | null, accs: Account[]) => {
+  const pcts = [...new Set(accs.map((a) => a.wallet_pct).filter((w): w is number => w != null))].sort((x, y) => y - x);
+  if (price == null || !pcts.length) return null;
+  const f = (w: number) => Math.floor((price * (100 - w)) / 100 / 100) * 100;
+  const lo = f(pcts[0]), hi = f(pcts[pcts.length - 1]);
+  return `≈ ${lo === hi ? rubk(lo) : `${rubk(lo).replace(" ₽", "")}–${rubk(hi)}`} с Кошельком`;
+};
+
 function ProductQty({ p, accs, mine, setN, onRemove }: {
   p: ProductCard; accs: Account[]; mine: Record<number, number>; setN: (acc: number, n: number) => void; onRemove: () => void;
 }) {
@@ -86,7 +95,7 @@ function ProductQty({ p, accs, mine, setN, onRemove }: {
     <div className="card sm prod">
       <div className="prod-head"><b>{p.name ?? `Товар ${p.nm}`}</b>
         <button className="x" aria-label="Убрать товар" onClick={onRemove}>✕</button></div>
-      <div className="small muted">{[p.color, `арт. ${p.nm}`, `≈ ${rubk(p.price)} за шт.`].filter(Boolean).join(" · ")}
+      <div className="small muted">{[p.color, `арт. ${p.nm}`, `≈ ${rubk(p.price)} за шт.`, withWallet(p.price, accs)].filter(Boolean).join(" · ")}
         {" "}(точная цена — на шаге «Оплата»: зависит от пункта выдачи)</div>
       <div className="small">Осталось у продавца {pcs(p.stock)} · распределено {pcs(given)}
         {given < p.stock ? <span className="muted"> · можно ещё {pcs(p.stock - given)}</span> : <span className="up-t"> · больше нет</span>}</div>
