@@ -11,6 +11,7 @@ from sqlalchemy import (
     Boolean,
     Date,
     DateTime,
+    Float,
     ForeignKey,
     Identity,
     Index,
@@ -427,6 +428,28 @@ class OrderPayment(Base):
     funds_after: Mapped[int | None] = mapped_column(Integer, nullable=True)  # ₽, после — разница = списано по факту
     created_at: Mapped[datetime] = _now()
     done_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class PickupPoint(Base):
+    """Справочник ПВЗ WB из all-poo-fr-v12.json (pickups.sync_job 2 раза в сутки). Заказ уходит только по id отсюда:
+    адрес — подпись, а dest, координаты и подпись ПВЗ (sign, sign_v2) идут в тело заказа. Пропал из справочника →
+    closed_at (закрытые WB держит в отдельном all-poo-frn); строку не удаляем — на неё ссылаются заказы."""
+
+    __tablename__ = "wb_pickup_points"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)  # номер ПВЗ у WB
+    country: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    address: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    dest: Mapped[int | None] = mapped_column(BigInteger, nullable=True)  # регион цен/складов (detail с dest)
+    lat: Mapped[float | None] = mapped_column(Float, nullable=True)
+    lon: Mapped[float | None] = mapped_column(Float, nullable=True)
+    type_point: Mapped[int | None] = mapped_column(Integer, nullable=True)  # typePoint (8 — ПВЗ WB)
+    sign: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    sign_v2: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    status: Mapped[int | None] = mapped_column(Integer, nullable=True)  # как у WB, смысл не знаем (3 — заказ проходит)
+    week: Mapped[list | None] = mapped_column(JSONB, nullable=True)  # 7 строк «10:00–22:00» | null, пн…вс
+    seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))  # последний раз был в справочнике
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class AppSetting(Base):

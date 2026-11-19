@@ -15,6 +15,7 @@ from app.db.base import Session
 from app.services import backup, keeper
 from app.services.monitor import monitoring_job, report_job
 from app.wb.client import wb_client
+from app.wb import pickups
 
 log = logging.getLogger(__name__)
 
@@ -85,6 +86,11 @@ async def main() -> None:
         keeper.state_job, "interval", minutes=1, args=[bot], max_instances=1,
         next_run_time=datetime.now(timezone.utc) + timedelta(minutes=1),
     )
+    scheduler.add_job(  # справочник ПВЗ (all-poo-fr → wb_pickup_points) 2 раза в сутки; при старте — только если старый
+        pickups.sync_job, "cron", hour="3,15", minute=20, max_instances=1,
+    )
+    scheduler.add_job(pickups.sync_job, "date", run_date=datetime.now(timezone.utc) + timedelta(minutes=2),
+                      kwargs={"only_if_stale": True})
     scheduler.start()
     login_task = asyncio.create_task(keeper.login_requests_loop(bot))  # вход в WB по заявкам сайта
     proxy_task = asyncio.create_task(keeper.proxy_checks_loop())  # «Проверить» прокси с сайта
