@@ -1049,8 +1049,11 @@ async def order_place(body: PlaceIn, u=Depends(user), s=Depends(db)):
     if _dupes(body.items):
         raise HTTPException(422, "товар повторяется у аккаунта — укажите количество в одной строке")
     preview = await _preview_for_place(s, u, body.quote_id)
-    if over := preview.get("stock_over"):
-        raise HTTPException(422, "товара не хватает: " + ", ".join(f"{x['nm']} — нужно {x['need']}, есть {x['stock']}" for x in over))
+    need: dict[int, int] = {}
+    for it in body.items:  # остаток — только по тому, что заказываем (неготовые строки сайт не шлёт)
+        need[it.nm] = need.get(it.nm, 0) + it.qty
+    if over := [x for x in preview.get("stock_over") or [] if need.get(x["nm"], 0) > x["stock"]]:
+        raise HTTPException(422, "товара не хватает: " + ", ".join(f"{x['nm']} — нужно {need[x['nm']]}, есть {x['stock']}" for x in over))
     w = models.WbAccount
     accs = {a.id: a for a in await s.scalars(select(w).where(
         w.id.in_({it.account_id for it in body.items}), w.user_id == u.telegram_id).order_by(w.id).with_for_update())}
