@@ -54,9 +54,14 @@ class NoBearer(Exception):
     """В localStorage сессии нет Bearer сайта — браузерный рефреш может его дописать."""
 
 
+def www_storage(state: dict) -> dict:
+    """localStorage сайта www из storageState браузера: {ключ: значение}."""
+    return {it.get("name"): it.get("value") or "" for o in state.get("origins") or [] if o.get("origin") == WWW
+            for it in o.get("localStorage") or []}
+
+
 def bearer(state: dict) -> str | None:
-    www = {it.get("name"): it.get("value") or "" for o in state.get("origins") or [] if o.get("origin") == WWW
-           for it in o.get("localStorage") or []}
+    www = www_storage(state)
     for key in TOKEN_KEYS:
         if m := JWT.search(www.get(key, "")):
             return m[0]
