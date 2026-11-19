@@ -735,51 +735,72 @@ async def _pay(pid: int) -> None:
         await _finish_pay(pid, "unknown", error_text=PAY_UNKNOWN if wb_err is False else PAY_UNCONFIRMED, **after)
 
 
-async def _next_job(proxy_id: int | None):
-    """Следующее дело очереди прокси: сначала сертификаты (пополнение перед оплатой), потом оплаты. → (модель, id) | None."""
+async def _fail_job(m, unknown: str, jid: int, e: Exception) -> None:
+    """Неожиданное исключение в деле очереди: иначе строка зависнет в sending/pending, а очередь крутит её же."""
     async with Session() as s:
-        for m in (models.Certificate, models.OrderPayment):
+        now = datetime.now(timezone.utc)
+        await s.execute(update(m).where(m.id == jid, m.status == "sending").values(
+            status="unknown", error_text=unknown, done_at=now))
+        await s.execute(update(m).where(m.id == jid, m.status == "pending").values(  # до WB не дошли
+            status="error", error_text=f"ошибка: {type(e).__name__}", done_at=now))
+        await s.commit()
+
+
+def _jobs() -> tuple:
+    """Дела очереди прокси по порядку: (модель, условие, сделать, при сбое). Пополнение → оплата → отмена заказа
+    (исправление ошибки: пока ждёт, у заказа заняты лимит постоплаты и деньги) → новый заказ."""
+    from app.services import autobuy  # autobuy сам импортирует keeper — здесь, чтобы не было круга
+    a = models.AutobuyOrder
+    return (
+        (models.Certificate, models.Certificate.status == "pending", _activate_cert,
+         lambda jid, e: _fail_job(models.Certificate, CERT_UNKNOWN, jid, e)),
+        (models.OrderPayment, models.OrderPayment.status == "pending", _pay,
+         lambda jid, e: _fail_job(models.OrderPayment, PAY_UNKNOWN, jid, e)),
+        (a, a.cancel_state == "pending", autobuy.cancel, autobuy.fail_cancel),
+        (a, a.status == "pending", autobuy.place, autobuy.fail_place),
+    )
+
+
+async def _next_job(proxy_id: int | None):
+    """Следующее дело очереди прокси (порядок — _jobs). → (сделать, при сбое, id, название) | None."""
+    async with Session() as s:
+        for m, cond, run, fail in _jobs():
             jid = await s.scalar(select(m.id).join(models.WbAccount, models.WbAccount.id == m.account_id).where(
-                m.status == "pending",
-                models.WbAccount.proxy_id.is_(None) if proxy_id is None else models.WbAccount.proxy_id == proxy_id)
+                cond, models.WbAccount.proxy_id.is_(None) if proxy_id is None else models.WbAccount.proxy_id == proxy_id)
                 .order_by(m.id).limit(1))
             if jid is not None:
-                return m, jid
+                return run, fail, jid, f"{m.__tablename__}.{run.__name__}"
     return None
 
 
 async def _cert_lane(proxy_id: int | None) -> None:
-    """Очередь одного прокси (сертификаты и оплаты): по одному, пауза CERT_PAUSE_SEC между запросами; пусто — выходим."""
+    """Очередь одного прокси (сертификаты, оплаты, отмены и заказы): по одному, пауза CERT_PAUSE_SEC; пусто — выходим."""
     try:
         while job := await _next_job(proxy_id):
-            m, jid = job
-            unknown = CERT_UNKNOWN if m is models.Certificate else PAY_UNKNOWN
+            run, fail, jid, name = job
             try:
-                await (_activate_cert if m is models.Certificate else _pay)(jid)
-            except Exception as e:  # иначе строка зависнет в sending/pending, а очередь крутит её же
-                log.exception("keeper: очередь прокси %s: %s %s", proxy_id, m.__tablename__, jid)
-                async with Session() as s:
-                    now = datetime.now(timezone.utc)
-                    await s.execute(update(m).where(m.id == jid, m.status == "sending").values(
-                        status="unknown", error_text=unknown, done_at=now))
-                    await s.execute(update(m).where(m.id == jid, m.status == "pending").values(  # до WB не дошли
-                        status="error", error_text=f"ошибка: {type(e).__name__}", done_at=now))
-                    await s.commit()
+                await run(jid)
+            except Exception as e:
+                log.exception("keeper: очередь прокси %s: %s %s", proxy_id, name, jid)
+                await fail(jid, e)
             await asyncio.sleep(CERT_PAUSE_SEC)
     finally:
         _cert_lanes.discard(proxy_id)
 
 
 async def start_cert_lanes() -> int:
-    """Запускает очереди прокси, у которых есть pending, а очередь ещё не идёт. → сколько запущено."""
+    """Запускает очереди прокси, у которых есть дела, а очередь ещё не идёт. → сколько запущено."""
+    from app.services import autobuy
     lanes, orphans = set(), 0
     async with Session() as s:
         for m in (models.Certificate, models.OrderPayment):
             orphans += (await s.execute(update(m).where(  # аккаунт удалили, пока ждал
                 m.status == "pending", m.account_id.is_(None)).values(
                 status="error", error_text="аккаунт удалён", done_at=datetime.now(timezone.utc)))).rowcount
+        orphans += await autobuy.sweep_orphans(s)
+        for m, cond, *_ in _jobs():
             lanes |= set(await s.scalars(select(models.WbAccount.proxy_id).distinct().join(
-                m, m.account_id == models.WbAccount.id).where(m.status == "pending")))
+                m, m.account_id == models.WbAccount.id).where(cond)))
         if orphans:
             await s.commit()
     new = lanes - _cert_lanes
@@ -790,8 +811,9 @@ async def start_cert_lanes() -> int:
 
 
 async def certificates_loop() -> None:
-    """Фоновая задача worker'а (сертификаты и оплаты). При старте sending → unknown (могли успеть отправить),
-    pending остаются в очереди."""
+    """Фоновая задача worker'а (сертификаты, оплаты, заказы и отмены). При старте sending → unknown (могли успеть
+    отправить), pending остаются в очереди."""
+    from app.services import autobuy
     for m, text in ((models.Certificate, CERT_UNKNOWN), (models.OrderPayment, PAY_UNKNOWN)):
         async with Session() as s:
             res = await s.execute(update(m).where(m.status == "sending").values(
@@ -799,6 +821,8 @@ async def certificates_loop() -> None:
             await s.commit()
         if res.rowcount:
             log.warning("keeper: %s: %d прервано рестартом посреди отправки — статус unknown", m.__tablename__, res.rowcount)
+    if n := await autobuy.on_restart():
+        log.warning("keeper: autobuy_orders: %d прервано рестартом посреди отправки — статус unknown", n)
     while True:
         try:
             await start_cert_lanes()

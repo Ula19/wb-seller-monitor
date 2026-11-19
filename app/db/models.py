@@ -430,6 +430,56 @@ class OrderPayment(Base):
     done_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class AutobuyOrder(Base):
+    """Заказ товара на аккаунт с сайта («Заказать товар»): один артикул на один аккаунт. api пишет pending, worker
+    шлёт (очередь по прокси, как у сертификатов и оплат). Деньги — в КОПЕЙКАХ (как у WB: цены бывают с копейками).
+
+    status: pending → sending (коммит прямо перед отправкой) → ok | error (не отправляли или WB отказал — текст WB
+    как есть; после status 3/4/7 заказ мог создаться, rids есть) | unknown (мог создаться — не повторяется сам).
+    cancelled — WB начал отмену по всем rids. cancel_state: pending (ждёт worker) | error (cancel_error) | null.
+    """
+
+    __tablename__ = "autobuy_orders"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.telegram_id", ondelete="CASCADE"))
+    account_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("wb_accounts.id", ondelete="SET NULL"), nullable=True, index=True)
+    uid: Mapped[str] = mapped_column(String(40), unique=True)  # order_uid для WB — до отправки, повтор только с ним
+    nm: Mapped[int] = mapped_column(BigInteger)
+    name: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    qty: Mapped[int] = mapped_column(Integer)
+    pvz_id: Mapped[int] = mapped_column(BigInteger)
+    pay_now: Mapped[bool] = mapped_column(Boolean)  # Кошельком сразу / при получении
+    price_ok: Mapped[int] = mapped_column(Integer)  # коп. за шт — подтвердили в окне; выросла → не шлём
+    total: Mapped[int | None] = mapped_column(Integer, nullable=True)  # коп. за шт на момент отправки
+    final: Mapped[int | None] = mapped_column(Integer, nullable=True)  # коп. за шт со скидкой Кошелька
+    status: Mapped[str] = mapped_column(String(16), default="pending", server_default="pending", index=True)
+    error: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    rids: Mapped[list] = mapped_column(JSONB, default=list, server_default="[]")
+    cancel_state: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+    cancel_error: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    created_at: Mapped[datetime] = _now()
+    done_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class OrderQuote(Base):
+    """Запрос сайта к worker'у (api в WB не ходит): kind product — карточка товара по артикулу/ссылке, preview —
+    цены на ПВЗ, лимиты и деньги аккаунтов перед заказом. status: pending → working → done | error."""
+
+    __tablename__ = "order_quotes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.telegram_id", ondelete="CASCADE"))
+    kind: Mapped[str] = mapped_column(String(16))
+    request: Mapped[dict] = mapped_column(JSONB)
+    result: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="pending", server_default="pending", index=True)
+    error: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    created_at: Mapped[datetime] = _now()
+    done_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class PickupPoint(Base):
     """Справочник ПВЗ WB из all-poo-fr-v12.json (pickups.sync_job 2 раза в сутки). Заказ уходит только по id отсюда:
     адрес — подпись, а dest, координаты и подпись ПВЗ (sign, sign_v2) идут в тело заказа. Пропал из справочника →

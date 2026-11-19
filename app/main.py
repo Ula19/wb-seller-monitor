@@ -12,7 +12,7 @@ from app.bot.middlewares import AuthMiddleware
 from app.config import settings
 from app.db import repo
 from app.db.base import Session
-from app.services import backup, keeper
+from app.services import autobuy, backup, keeper
 from app.services.monitor import monitoring_job, report_job
 from app.wb.client import wb_client
 from app.wb import pickups
@@ -97,6 +97,7 @@ async def main() -> None:
     poll_task = asyncio.create_task(keeper.account_polls_loop(bot))  # ↻ «Обновить» аккаунт с сайта
     sync_task = asyncio.create_task(keeper.browser_syncs_loop(bot))  # визит в браузере по кнопке с сайта
     cert_task = asyncio.create_task(keeper.certificates_loop())  # активация сертификатов с сайта
+    quote_task = asyncio.create_task(autobuy.quotes_loop())  # «Заказать товар»: карточка товара и предпросмотр
     bell_task = asyncio.create_task(keeper.notices_check_loop())  # «Проверить сейчас» уведомления с сайта
 
     try:
@@ -108,6 +109,7 @@ async def main() -> None:
         poll_task.cancel()
         sync_task.cancel()
         cert_task.cancel()
+        quote_task.cancel()
         bell_task.cancel()
         await wb_client.close()
         await bot.session.close()
