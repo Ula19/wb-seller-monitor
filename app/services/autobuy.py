@@ -106,6 +106,41 @@ def _line(ln: dict, pvzs: dict, got: dict, wallet_pct: int) -> dict:
             **({} if stock(p) else {"error": "нет в наличии"})}
 
 
+def _kop(bal: dict, key: str) -> int | None:
+    return None if bal.get(key) is None else bal[key] * 100  # parse_balance отдаёт ₽
+
+
+def discount_lost(order_final: int, unit_final: int, bal: dict, left: int | None = None) -> str | None:
+    """Почему WB снимет скидку Кошелька со ВСЕГО заказа (память wb-wallet-discount, корзина 04.11; orders_pay): сумма
+    больше остатка месячного лимита, больше разового лимита заказа, позиция дороже лимита позиции. None — скидка будет.
+    left — остаток лимита с учётом заказов перед этим (в предпросмотре), иначе из баланса."""
+    left = _kop(bal, "limit_left") if left is None else left
+    if left is not None and order_final > left:
+        return f"остаток лимита {rub(left)}"
+    if (cap := _kop(bal, "max_order")) is not None and order_final > cap:
+        return f"заказ больше {rub(cap)}"
+    if (cap := _kop(bal, "max_rid")) is not None and unit_final > cap:
+        return f"товар дороже {rub(cap)}"
+    return None
+
+
+def _pay_now_sums(rows: list, bal: dict) -> list[str]:
+    """Каждой строке (= отдельный заказ, по порядку) — now (к оплате сейчас) и no_discount (причина или None);
+    лимит месяца расходуется заказами по очереди. → причины без повторов."""
+    left, reasons = _kop(bal, "limit_left"), []
+    for row in rows:
+        if "final" not in row:
+            continue
+        order_final = row["final"] * row["qty"]
+        row["no_discount"] = why = discount_lost(order_final, row["final"], bal, left)
+        row["now"] = row["total"] * row["qty"] if why else order_final
+        if why:
+            reasons.append(why)
+        elif left is not None:
+            left -= order_final
+    return list(dict.fromkeys(reasons))
+
+
 async def _fresh_account(acc: models.WbAccount) -> tuple[dict, dict]:
     """Свежие grade и full-balance аккаунта через его прокси. QuoteError — с понятной причиной."""
     state, proxy = decrypt_json(acc.state_enc), await keeper.proxy_url(acc.proxy_id)
@@ -121,8 +156,8 @@ async def _fresh_account(acc: models.WbAccount) -> tuple[dict, dict]:
 
 
 async def _preview_account(aid: int, acc, lines: list, pvzs: dict, got: dict, recent: int) -> dict:
-    """По аккаунту: деньги, лимиты и строки. now_sum — к оплате сейчас: сверх остатка лимита скидки WB снимает
-    скидку со всего заказа (доказано на orders_pay) → total, а не final."""
+    """По аккаунту: деньги, лимиты и строки. now_sum — к оплате сейчас: у заказа без скидки Кошелька (discount_lost)
+    — total, а не final."""
     if acc is None:
         return {"account_id": aid, "error": "нет такого аккаунта"}
     try:
@@ -133,17 +168,16 @@ async def _preview_account(aid: int, acc, lines: list, pvzs: dict, got: dict, re
     rows = [_line(ln, pvzs, got, w) for ln in lines]
     total = sum(r["total"] * r["qty"] for r in rows if "total" in r)
     final = sum(r["final"] * r["qty"] for r in rows if "final" in r)
-    funds = None if bal.get("funds") is None else bal["funds"] * 100
-    limit_left = None if bal.get("limit_left") is None else bal["limit_left"] * 100
-    over = limit_left is not None and final > limit_left
-    now_sum = total if over else final
+    funds, limit_left = _kop(bal, "funds"), _kop(bal, "limit_left")
+    reasons = _pay_now_sums(rows, bal)
+    now_sum = sum(r["now"] for r in rows if "now" in r)
     postpaid_left = (g.get("remaining_postpaid_limit") or 0) - recent
     prepaid_only = bool((g.get("fraud") or {}).get("is_prepaid"))
     return {"account_id": aid, "title": acc.title, "wallet_pct": w, "funds": funds, "limit_left": limit_left,
             "wallet_blocked": bal.get("wallet_blocked"), "postpaid_limit": g.get("postpaid_limit"),
             "postpaid_left": postpaid_left, "prepaid_only": prepaid_only, "lines": rows, "total": total,
-            "final": final, "now_sum": now_sum, "discount_over": over,
-            "note": f"скидки не будет: остаток лимита {rub(limit_left)}" if over else None,
+            "final": final, "now_sum": now_sum, "discount_over": bool(reasons),
+            "note": "скидки не будет: " + "; ".join(reasons) if reasons else None,
             "can_postpay": not prepaid_only and postpaid_left >= total,
             "wallet_enough": not bal.get("wallet_blocked") and funds is not None and funds >= now_sum}
 
@@ -241,7 +275,7 @@ async def _refresh_account(acc_id: int, state: dict, proxy: str | None, title: s
 
 def precheck(o, p: dict | None, grade: dict, bal: dict | None) -> tuple[str | None, int | None, int | None]:
     """Перед отправкой: → (причина не слать | None, total, final) за штуку. Цена выше подтверждённой — не шлём, ниже —
-    шлём. Кошельком сразу: денег меньше суммы (сверх лимита скидки — без скидки) — не шлём."""
+    шлём. Кошельком сразу: денег меньше суммы (без скидки Кошелька, если WB её снимет — discount_lost) — не шлём."""
     if not p:
         return "товар не найден" + NOT_SENT, None, None
     try:
@@ -253,10 +287,8 @@ def precheck(o, p: dict | None, grade: dict, bal: dict | None) -> tuple[str | No
     if o.pay_now:
         if bal.get("wallet_blocked"):
             return "Кошелёк заблокирован — оплата им недоступна", total, final
-        need = final * o.qty
-        if bal.get("limit_left") is not None and need > bal["limit_left"] * 100:
-            need = total * o.qty  # сверх остатка лимита скидки WB снимет скидку со всего заказа
-        funds = None if bal.get("funds") is None else bal["funds"] * 100
+        need = total * o.qty if discount_lost(final * o.qty, final, bal) else final * o.qty
+        funds = _kop(bal, "funds")
         if funds is None or funds < need:
             return f"на Кошельке {rub(funds)}, нужно {rub(need)}", total, final
     return None, total, final
