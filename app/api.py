@@ -12,6 +12,7 @@ import hmac
 import json
 import re
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, time as dtime, timedelta, timezone
 from pathlib import Path
@@ -29,7 +30,7 @@ from app.crypto import encrypt_json
 from app.db import models, repo
 from app.db.base import Session
 from app.wallet import best_offer, offer_text, wallet_price
-from app.wb import account_api, media
+from app.wb import account_api, media, pickups
 from app.wb.web_session import VISIT_SESSION
 from app.wb.proxy_check import is_parser_proxy, parse_proxy
 
@@ -886,6 +887,224 @@ async def payments(ids: list[int] = Query(..., max_length=500), u=Depends(user),
     p = models.OrderPayment
     rows = await s.scalars(select(p).where(p.id.in_(ids), p.user_id == u.telegram_id).order_by(p.id))
     return [{f: getattr(x, f) for f in PAY_FIELDS} for x in rows]
+
+
+# ---------- «Заказать товар» (в WB ходит worker: order_quotes — карточка/предпросмотр, autobuy_orders — заказы) ----------
+QUOTE_TTL = timedelta(hours=1)  # старые запросы к worker'у чистим при создании нового
+PREVIEW_TTL = timedelta(minutes=10)  # заказ — только по свежему предпросмотру
+ORDER_QTY_MAX = 100
+AUTOBUY_FIELDS = ("id", "account_id", "nm", "name", "qty", "pvz_id", "pay_now", "price_ok", "total", "final", "status",
+                "error", "rids", "cancel_state", "cancel_error", "created_at", "done_at")
+
+
+def _rub(kop: int | None) -> str:
+    return "? ₽" if kop is None else (f"{kop / 100:,.2f}" if kop % 100 else f"{kop // 100:,}").replace(",", " ") + " ₽"
+
+
+async def _new_quote(s, u: Viewer, kind: str, req: dict) -> dict:
+    q = models.OrderQuote
+    await s.execute(delete(q).where(q.created_at < datetime.now(timezone.utc) - QUOTE_TTL))
+    row = q(user_id=u.telegram_id, kind=kind, request=req)
+    s.add(row)
+    await s.commit()
+    return {"id": row.id}
+
+
+class ProductIn(BaseModel):
+    q: str = Field(min_length=1, max_length=500)
+
+
+@app.post("/api/order/product", status_code=201)
+async def order_product(body: ProductIn, u=Depends(user), s=Depends(db)):
+    """Карточка товара по артикулу или ссылке — запрос worker'у; итог — GET /api/order/quote/{id}."""
+    return await _new_quote(s, u, "product", {"q": body.q.strip()})
+
+
+class OrderLine(BaseModel):
+    account_id: int
+    nm: int = Field(gt=0)
+    qty: int = Field(ge=1, le=ORDER_QTY_MAX)
+    pvz_id: int = Field(gt=0)
+
+
+class PreviewIn(BaseModel):
+    lines: list[OrderLine] = Field(min_length=1, max_length=200)
+
+
+def _dupes(lines) -> bool:
+    keys = [(ln.account_id, ln.nm) for ln in lines]
+    return len(keys) != len(set(keys))
+
+
+@app.post("/api/order/preview", status_code=201)
+async def order_preview(body: PreviewIn, u=Depends(user), s=Depends(db)):
+    """Цены на ПВЗ, деньги и лимиты аккаунтов — запрос worker'у (одна строка = один заказ: артикул на аккаунт)."""
+    mine = {a.id for a in await repo.user_accounts(s, u.telegram_id)}
+    if any(ln.account_id not in mine for ln in body.lines):
+        raise HTTPException(404, "нет такого аккаунта")
+    if _dupes(body.lines):
+        raise HTTPException(422, "товар повторяется у аккаунта — укажите количество в одной строке")
+    return await _new_quote(s, u, "preview", {"lines": [ln.model_dump() for ln in body.lines]})
+
+
+@app.get("/api/order/quote/{quote_id:int}")
+async def order_quote(quote_id: int, u=Depends(user), s=Depends(db)):
+    """Итог запроса (сайт опрашивает раз в ~0,5 с): status pending | working | done | error."""
+    q = await s.scalar(select(models.OrderQuote).where(models.OrderQuote.id == quote_id,
+                                                       models.OrderQuote.user_id == u.telegram_id))
+    if q is None:
+        raise HTTPException(404, "запрос не найден — начните заново")
+    return {"id": q.id, "kind": q.kind, "status": q.status, "result": q.result, "error": q.error}
+
+
+def _pvz_out(p: models.PickupPoint) -> dict:
+    return {"id": p.id, "address": p.address, "hours": pickups.hours(p.week), "lat": p.lat, "lon": p.lon}
+
+
+@app.get("/api/pickups/search")
+async def pickups_search(q: str = Query(min_length=1, max_length=200), u=Depends(user), s=Depends(db)):
+    """ПВЗ из справочника, только открытые: цифры — точный номер, иначе все слова адреса (ILIKE), до 20 строк.
+    ponytail: без индекса (~200 мс на 97 тыс.); станет медленно — pg_trgm по address."""
+    p, q = models.PickupPoint, q.strip()
+    query = select(p).where(p.closed_at.is_(None))
+    if q.isdigit():
+        query = query.where(p.id == int(q))
+    else:
+        words = re.findall(r"\w+", q)[:8]
+        if not words:
+            return []
+        for w in words:  # «_» в слове — буквально, не «любой символ»
+            pat = "%" + w.replace("_", "\\_") + "%"
+            query = query.where(p.address.ilike(pat, escape="\\"))
+    return [_pvz_out(x) for x in await s.scalars(query.order_by(p.address).limit(20))]
+
+
+@app.get("/api/order/pickups")
+async def order_pickups(accounts: list[int] = Query(..., max_length=200), u=Depends(user), s=Depends(db)):
+    """ПВЗ из активных заказов выбранных аккаунтов (без дублей, только открытые) + чьи они — для выбора по умолчанию."""
+    mine = {a.id for a in await repo.user_accounts(s, u.telegram_id)} & set(accounts)
+    o, p = models.AccountOrder, models.PickupPoint
+    pairs = (await s.execute(select(o.dst_office_id, o.account_id).distinct().where(
+        o.account_id.in_(mine), o.dst_office_id.is_not(None)))).all()
+    whose: dict[int, list] = {}
+    for pid, aid in pairs:
+        whose.setdefault(pid, []).append(aid)
+    rows = await s.scalars(select(p).where(p.id.in_(whose), p.closed_at.is_(None)).order_by(p.address))
+    return [{**_pvz_out(x), "accounts": sorted(whose[x.id])} for x in rows]
+
+
+class PlaceItem(OrderLine):
+    pay_now: bool
+
+
+class PlaceIn(BaseModel):
+    quote_id: int
+    items: list[PlaceItem] = Field(min_length=1, max_length=200)
+    confirm_total: int  # коп.: «Заказать · сумма» — Σ (сейчас: now строки, при получении: total × qty)
+
+
+async def _preview_for_place(s, u: Viewer, quote_id: int) -> dict:
+    q = await s.scalar(select(models.OrderQuote).where(
+        models.OrderQuote.id == quote_id, models.OrderQuote.user_id == u.telegram_id, models.OrderQuote.kind == "preview"))
+    if q is None or q.status != "done":
+        raise HTTPException(409, "предпросмотр не готов — обновите")
+    if q.created_at < datetime.now(timezone.utc) - PREVIEW_TTL:
+        raise HTTPException(409, "цены устарели — обновите предпросмотр")
+    return q.result
+
+
+def _place_errors(items, preview: dict, accs: dict, open_pvz: set) -> list[dict]:
+    """Строки заказа против предпросмотра (цены — с сервера, клиенту не верим). → [{row, error}]."""
+    by_acc = {a["account_id"]: a for a in preview.get("accounts") or []}
+    bad, need = [], {}
+    for i, it in enumerate(items):
+        acc, pa = accs.get(it.account_id), by_acc.get(it.account_id) or {}
+        line = next((ln for ln in pa.get("lines") or [] if (ln["nm"], ln["pvz_id"], ln["qty"]) == (it.nm, it.pvz_id, it.qty)), None)
+        err = ("нет такого аккаунта" if acc is None else "аккаунт не активен — нужен вход" if acc.status != "active"
+               else pa.get("error") or ("заказ отличается от предпросмотра — обновите" if line is None else line.get("error"))
+               or ("ПВЗ закрыт — выберите другой" if it.pvz_id not in open_pvz else None)
+               or ("только «Оплатить сейчас»: аккаунту доступна лишь предоплата" if not it.pay_now and pa.get("prepaid_only") else None)
+               or ("Кошелёк заблокирован — оплата им недоступна" if it.pay_now and pa.get("wallet_blocked") else None))
+        if err:
+            bad.append({"row": i, "error": err})
+            continue
+        sums = need.setdefault(it.account_id, {"now": 0, "post": 0, "rows": []})
+        sums["now" if it.pay_now else "post"] += line["now"] if it.pay_now else line["total"] * it.qty
+        sums["rows"].append(i)
+    for aid, sums in need.items():  # деньги и постоплата — на весь аккаунт
+        pa = by_acc[aid]
+        if sums["post"] > (pa.get("postpaid_left") or 0):
+            bad += [{"row": i, "error": f"лимит постоплаты: доступно {_rub(pa.get('postpaid_left'))}, нужно {_rub(sums['post'])}"}
+                    for i in sums["rows"] if not items[i].pay_now]
+        if sums["now"] > (pa.get("funds") or 0):
+            bad += [{"row": i, "error": f"на Кошельке {_rub(pa.get('funds'))}, нужно {_rub(sums['now'])}"}
+                    for i in sums["rows"] if items[i].pay_now]
+    return bad
+
+
+@app.post("/api/order/place", status_code=201)
+async def order_place(body: PlaceIn, u=Depends(user), s=Depends(db)):
+    """Заказы в очередь (шлёт worker, заново проверив цену и деньги). Цены — из предпросмотра на сервере; сумма не
+    совпала с confirm_total → 409. Строки аккаунтов под FOR UPDATE: двойной клик не создаст второй заказ."""
+    if _dupes(body.items):
+        raise HTTPException(422, "товар повторяется у аккаунта — укажите количество в одной строке")
+    preview = await _preview_for_place(s, u, body.quote_id)
+    if over := preview.get("stock_over"):
+        raise HTTPException(422, "товара не хватает: " + ", ".join(f"{x['nm']} — нужно {x['need']}, есть {x['stock']}" for x in over))
+    w = models.WbAccount
+    accs = {a.id: a for a in await s.scalars(select(w).where(
+        w.id.in_({it.account_id for it in body.items}), w.user_id == u.telegram_id).order_by(w.id).with_for_update())}
+    open_pvz = set(await s.scalars(select(models.PickupPoint.id).where(
+        models.PickupPoint.id.in_({it.pvz_id for it in body.items}), models.PickupPoint.closed_at.is_(None))))
+    if bad := _place_errors(body.items, preview, accs, open_pvz):
+        raise HTTPException(422, {"code": "bad_items", "items": bad})
+    a = models.AutobuyOrder
+    busy = set((await s.execute(select(a.account_id, a.nm).where(
+        a.account_id.in_(accs), a.status.in_(("pending", "sending"))))).all())
+    if any((it.account_id, it.nm) in busy for it in body.items):
+        raise HTTPException(409, "этот товар уже заказывается на аккаунт — дождитесь итога")
+    lines = {(ln["nm"], ln["pvz_id"], ln["qty"], x["account_id"]): ln
+             for x in preview["accounts"] for ln in x.get("lines") or []}
+    picked = [(it, lines[(it.nm, it.pvz_id, it.qty, it.account_id)]) for it in body.items]
+    total = sum(ln["now"] if it.pay_now else ln["total"] * it.qty for it, ln in picked)
+    if total != body.confirm_total:
+        raise HTTPException(409, f"сумма изменилась: {_rub(total)} — обновите и подтвердите заново")
+    rows = [a(user_id=u.telegram_id, account_id=it.account_id, uid="d" + uuid.uuid4().hex, nm=it.nm, name=ln.get("name"),
+              qty=it.qty, pvz_id=it.pvz_id, pay_now=it.pay_now, price_ok=ln["total"]) for it, ln in picked]
+    s.add_all(rows)
+    await s.commit()
+    return {"ids": [r.id for r in rows], "total": total}
+
+
+def _can_cancel(o: models.AutobuyOrder) -> bool:
+    """Заказ мог создаться (ok, unknown, error после status 3/4/7 — у них есть rids) и отмена ещё не идёт."""
+    return bool(o.rids) and o.status in ("ok", "error", "unknown") and o.cancel_state != "pending"
+
+
+@app.get("/api/order/status")
+async def order_status(ids: list[int] = Query(..., max_length=500), u=Depends(user), s=Depends(db)):
+    """Итог заказов для окна (опрос раз в 1–2 с) + можно ли отменить."""
+    a = models.AutobuyOrder
+    rows = await s.scalars(select(a).where(a.id.in_(ids), a.user_id == u.telegram_id).order_by(a.id))
+    return [{**{f: getattr(x, f) for f in AUTOBUY_FIELDS}, "can_cancel": _can_cancel(x)} for x in rows]
+
+
+class CancelIn(BaseModel):
+    id: int
+
+
+@app.post("/api/order/cancel")
+async def order_cancel(body: CancelIn, u=Depends(user), s=Depends(db)):
+    """Отмена заказа по его rids — в очередь (отменяет worker, раньше новых заказов)."""
+    a = models.AutobuyOrder
+    o = await s.scalar(select(a).where(a.id == body.id, a.user_id == u.telegram_id).with_for_update())
+    if o is None:
+        raise HTTPException(404, "заказ не найден")
+    if not _can_cancel(o):
+        raise HTTPException(409, "этот заказ отменить нельзя" if o.cancel_state != "pending" else "отмена уже идёт")
+    o.cancel_state, o.cancel_error = "pending", None
+    await s.commit()
+    return {"id": o.id}
 
 
 # ---------- уведомления WB (колокольчик) ----------
