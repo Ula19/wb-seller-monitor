@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select, update
 
+from app.bot.utils import send_safe
 from app.config import settings
 from app.crypto import decrypt_json, encrypt_json
 from app.db import models, repo
@@ -68,10 +69,7 @@ async def _relogin(bot, acc: models.WbAccount) -> None:
 
 async def _push_all(bot, text: str) -> None:
     for uid in settings.superadmins:  # одно пространство — всем из списка
-        try:
-            await bot.send_message(uid, text, parse_mode="HTML")
-        except Exception:
-            pass
+        await send_safe(bot, uid, text, parse_mode="HTML")
 
 
 async def _proxy_alert(bot, acc: models.WbAccount, e: Exception) -> None:

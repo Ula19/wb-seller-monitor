@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 from aiogram.types import BufferedInputFile
 
+from app.bot.utils import send_safe
 from app.config import settings
 from app.crypto import decrypt_json
 from app.db import repo
@@ -181,8 +182,10 @@ async def sync_seller(supplier_id: int, *, slot=None):
 
 
 async def notify(bot, seller, notes) -> None:
-    """Каждая заметка — отдельным сообщением владельцу источника."""
+    """Каждая заметка — отдельным сообщением всем из списка. Чата нет (chat not found / бот заблокирован) — этому uid
+    в этом вызове больше не шлём: пачка таких ошибок и вызывает Flood control у Telegram."""
     name = seller.name or str(seller.supplier_id)
+    dead: set[int] = set()
     for src, p, events in notes:
         if events is None:
             text = reporting.new_caption(name, p, src.b2b)
@@ -192,10 +195,9 @@ async def notify(bot, seller, notes) -> None:
         else:
             text = reporting.change_caption(name, p, events, src.b2b)
         for uid in settings.superadmins:  # одно пространство: цены и новинки — всем из списка
-            try:
-                await bot.send_message(uid, text, parse_mode="HTML", reply_markup=reporting.wb_button(p.url))
-            except Exception as e:
-                log.warning("уведомление не доставлено %s: %s", uid, e)
+            if uid not in dead and await send_safe(bot, uid, text, parse_mode="HTML",
+                                                   reply_markup=reporting.wb_button(p.url)) is False:
+                dead.add(uid)
 
 
 async def sync_and_notify(bot, supplier_id: int, slot=None) -> list[NormProduct] | None:
@@ -218,12 +220,11 @@ async def send_report_to(bot, user_ids, seller, products) -> None:
             except Exception as e:
                 log.warning("отчёт (xlsx) не доставлен %s: %s", uid, e)
     else:
+        dead: set[int] = set()  # чата нет — остальные куски отчёта ему не шлём
         for chunk in reporting.chunk_text(reporting.hourly_report_text(name, products, seller.b2b)):
             for uid in user_ids:
-                try:
-                    await bot.send_message(uid, chunk, parse_mode="HTML")
-                except Exception as e:
-                    log.warning("отчёт не доставлен %s: %s", uid, e)
+                if uid not in dead and await send_safe(bot, uid, chunk, parse_mode="HTML") is False:
+                    dead.add(uid)
 
 
 GUARDIUM_WARN_HOURS = 6  # за сколько часов до конца guardium предупредить
@@ -242,10 +243,7 @@ def _guardium_problem() -> str | None:
 
 async def alert_all(bot, text: str) -> None:
     """Системные алерты (веб-каталог, guardium, зависание) — только владельцу (первый ID)."""
-    try:
-        await bot.send_message(settings.owner_id, text, parse_mode="HTML")
-    except Exception as e:
-        log.warning("алерт не доставлен %s: %s", settings.owner_id, e)
+    await send_safe(bot, settings.owner_id, text, parse_mode="HTML")
 
 
 async def _check_health(bot) -> None:
