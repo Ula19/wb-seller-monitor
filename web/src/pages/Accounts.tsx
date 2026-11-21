@@ -127,9 +127,8 @@ function Functions({ on }: { on: (f: Fn) => void }) {
     window.addEventListener("keydown", esc);
     return () => { document.removeEventListener("mousedown", click); window.removeEventListener("keydown", esc); };
   }, [open]);
-  const item = (f: Fn, t: string, d: string, icon?: string) => (
-    <button role="menuitem" className={`fn-item${icon ? " ico" : ""}`} onClick={() => { setOpen(false); on(f); }}>
-      {icon && <i aria-hidden="true">{icon}</i>}<b>{t}</b><span className="muted small">{d}</span></button>);
+  const item = (f: Fn, t: string, d: string) => (
+    <button role="menuitem" className="fn-item" onClick={() => { setOpen(false); on(f); }}><b>{t}</b><span className="muted small">{d}</span></button>);
   return (
     <div className="fn" ref={ref}>
       <button className="btn" aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(!open)}>Функции ▾</button>
@@ -143,9 +142,9 @@ function Functions({ on }: { on: (f: Fn) => void }) {
           <div className="fn-group">Заказы</div>
           {item("order", "Заказать товар", "Корзина на несколько аккаунтов, пункты выдачи, оплата")}
           {item("pay", "Оплата товаров", "Оплатить неоплаченные заказы с кошелька")}
-          {item("pickup", "Общий забор", "Одним кликом в Telegram — всё, что доехало до ПВЗ", "✈")}
+          {item("pickup", "Общий забор", "Одним кликом в Telegram — всё, что доехало до ПВЗ")}
           <div className="fn-group">Журнал</div>
-          {item("journal", "Журнал действий", "Заказали, отменили, оплатили — все аккаунты на одном экране", "☰")}
+          {item("journal", "Журнал действий", "Заказали, отменили, оплатили — все аккаунты на одном экране")}
         </div>
       )}
     </div>
