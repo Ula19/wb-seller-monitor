@@ -25,7 +25,10 @@ BALANCE_URL = "https://wb-balance.wildberries.ru/wb-balance/api/v1/balance/full-
 VB_URL = "https://loyalty-balances.wildberries.ru/public/api/v1/bonuses/info"  # ВБ-баллы, авторизация как у full-balance
 VB_HISTORY_URL = "https://loyalty-balances.wildberries.ru/public/api/v1/bonuses/history?limit=50&offset=0&currency_id=1"
 # история заказов: только полученные (status=32), листаем offset; Bearer + кука wbx-validation-key
-PURCHASES_URL = "https://astro.wildberries.ru/api/v1/shopper/api/v2/purchases/list?offset={offset}&status=32&limit={limit}"
+# архив ВСЕХ статусов (как на сайте WB): журнал видит отмены; «Покупки» — только PURCHASE_GOT
+PURCHASES_URL = "https://astro.wildberries.ru/api/v1/shopper/api/v2/purchases/list?offset={offset}&limit={limit}"
+PURCHASE_GOT = 32  # Status «получен»
+PURCHASE_CANCELLED = (64, 65536)  # «Отмена заказа» (64/1, 64/101, 64/102, 64/122) и «не был оплачен» (65536/666)
 PURCHASES_PAGE = 100
 PURCHASES_MAX_PAGES = 200  # предохранитель: 20 000 покупок (у живых аккаунтов уже 3 000+)
 GRADE_URL = "https://user-grade.wildberries.ru/api/v6/grade?curr=RUB&uf_loc=ru"
@@ -153,8 +156,8 @@ def _purchase_items(d) -> list:
 
 
 def parse_purchases(d) -> list[dict]:
-    """astro purchases/list → полученные позиции. Цена = Price − PaymentSaleAmount (скидка Кошелька), копейки → ₽;
-    Dt — дата статуса, для «получен» это «забрали»."""
+    """astro purchases/list → позиции архива. Цена = Price − PaymentSaleAmount (скидка Кошелька), копейки → ₽;
+    Dt — дата статуса («получен» — когда забрали, отмена — когда отменили), CreateDt — когда заказали."""
     out = []
     for it in _purchase_items(d):
         if not it.get("Rid"):
@@ -162,7 +165,8 @@ def parse_purchases(d) -> list[dict]:
         price, sale = it.get("Price"), it.get("PaymentSaleAmount") or 0
         out.append({"rid": it["Rid"], "nm_id": it.get("NmId"), "name": it.get("GoodsName"), "brand": it.get("BrandName"),
                     "price": _rub(price - sale) if isinstance(price, int) and isinstance(sale, int) else None,
-                    "dt": _iso(it.get("Dt")), "office_id": it.get("DstOfficeId")})
+                    "dt": _iso(it.get("Dt")), "office_id": it.get("DstOfficeId"), "status": it.get("Status"),
+                    "status_id": it.get("StatusId"), "created_at": _iso(it.get("CreateDt"))})
     return out
 
 
@@ -338,10 +342,10 @@ async def fetch(state: dict, proxy: str | None = None, kinds=API_KINDS, vb_total
 
 
 async def fetch_purchases(state: dict, proxy: str | None = None,
-                          known: set[str] | None = None) -> tuple[list[dict], bool]:
-    """История полученных заказов, новые сверху, по PURCHASES_PAGE. → (позиции, дошли ли до конца).
-    known=None — полная загрузка до последней (неполной) страницы; known — догрузка: стоп на первой странице,
-    где все rid уже известны."""
+                          known: dict[str, int | None] | None = None) -> tuple[list[dict], bool]:
+    """Архив заказов (все статусы), новые сверху, по PURCHASES_PAGE. → (позиции, дошли ли до конца).
+    known=None — полная загрузка до последней (неполной) страницы; known {rid: статус} — догрузка: стоп на первой
+    странице, где все rid известны С ТЕМ ЖЕ статусом (сменился — например, стал «получен» — листаем и обновляем)."""
     out: list[dict] = []
     async with _client(state, proxy) as (call, _, with_vkey):
         for page in range(PURCHASES_MAX_PAGES):
@@ -351,7 +355,7 @@ async def fetch_purchases(state: dict, proxy: str | None = None,
             out += got
             if len(_purchase_items(d)) < PURCHASES_PAGE:
                 return out, True
-            if known is not None and all(p["rid"] in known for p in got):
+            if known is not None and all(p["rid"] in known and known[p["rid"]] == p["status"] for p in got):
                 return out, False
     return out, False
 
@@ -679,6 +683,13 @@ if __name__ == "__main__":  # self-check на формах ответов из H
     assert [(x["rid"], x["price"]) for x in pur] == [("eA5.a.0.0", 16068), ("eA5.b.0.0", 17094)], pur
     assert pur[0]["dt"] == datetime(2026, 11, 9, 10, 35, 38, tzinfo=timezone.utc) and pur[0]["office_id"] == 50044805
     assert parse_purchases({}) == [] and parse_purchases(None) == []
+    # архив без фильтра (HAR orders_pay, Яна 14.11): отмена — Status 64 / StatusId 122, CreateDt — когда заказали
+    cx = parse_purchases({"data": {"purchases": {"data": {"Items": [item(
+        "ebA.d5ac157163ea54564934598a41b2f9468.0.0", Status=64, StatusId=122, Price=18200, PaymentSaleAmount=0,
+        Dt="2026-11-14T11:56:34Z", CreateDt="2026-11-14T11:55:48Z")]}}}})[0]
+    assert (cx["status"], cx["status_id"], cx["price"]) == (64, 122, 182), cx
+    assert cx["created_at"] == datetime(2026, 11, 14, 11, 55, 48, tzinfo=timezone.utc) and pur[0]["created_at"] is None
+    assert "status=" not in PURCHASES_URL and PURCHASE_GOT == 32
     # история ВБ-баллов
     vb = parse_vb_history({"data": {"icons": {}, "history": [
         {"tx_id": "01a162d7", "description": "Вы выполнили задание", "title": "Баллы за задание",
@@ -729,14 +740,17 @@ if __name__ == "__main__":  # self-check на формах ответов из H
         with patch(f"{__name__}.AsyncSession", S), patch(f"{__name__}.web_proxy", lambda: None):
             got, complete = await fetch_purchases(st)
             assert len(got) == 2 * PURCHASES_PAGE + 1 and complete and len(urls) == 3, urls
-            assert "offset=100&status=32&limit=100" in urls[1]
+            assert "offset=100&limit=100" in urls[1]
             urls.clear()
-            known = {p["rid"] for p in got if p["rid"].startswith("r0_")}  # первая страница уже есть
-            got, complete = await fetch_purchases(st, known={"r0_1"})  # на 1-й странице есть новые — листаем дальше
+            known = {p["rid"]: 32 for p in got if p["rid"].startswith("r0_")}  # первая страница уже есть
+            got, complete = await fetch_purchases(st, known={"r0_1": 32})  # на 1-й странице есть новые — листаем дальше
             assert len(urls) == 3 and complete
             urls.clear()
             got, complete = await fetch_purchases(st, known=known)
             assert len(urls) == 1 and not complete and len(got) == PURCHASES_PAGE  # всё известно — стоп
+            urls.clear()
+            got, complete = await fetch_purchases(st, known={**known, "r0_7": 64})  # был отменён, стал «получен» — листаем
+            assert len(urls) == 3 and complete
     asyncio.run(pages())
 
     # сертификаты: код в любом виде → 16 символов; в WB — с дефисами

@@ -447,7 +447,8 @@ async def _upsert(s, model, account_id: int, key: str, rows: list[dict], cols, k
 
 async def upsert_purchases(s, account_id: int, items: list[dict]) -> None:
     await _upsert(s, models.AccountPurchase, account_id, "rid", items,
-                  ("nm_id", "name", "brand", "price", "dt", "office_id", "office_address", "office_hours"),
+                  ("nm_id", "name", "brand", "price", "dt", "office_id", "office_address", "office_hours", "status",
+                   "status_id", "created_at"),
                   keep=("office_address", "office_hours"))
 
 
@@ -461,6 +462,7 @@ async def upsert_balance_ops(s, account_id: int, ops: list[dict]) -> None:
 
 
 PICKUP_TO = "pickup_to"  # app_settings: «Общий забор» — кому слать, JSON-список Telegram ID
+JOURNAL_CHECK = "journal_check"  # app_settings: «Обновить» журнала — {state, done, total, failed, at}
 NOTICES_CHECK = "notices_check"  # app_settings: «Проверить сейчас» — {state: requested|running|done, new, failed, at}
 NOTICE_COLS = ("topic_id", "title", "text", "url", "dt", "wb_read_at")
 

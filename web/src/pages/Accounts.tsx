@@ -12,6 +12,7 @@ import LoginModal from "./LoginModal";
 import OrderModal from "./OrderModal";
 import PayModal from "./PayModal";
 import PickupModal from "./PickupModal";
+import JournalModal from "./JournalModal";
 
 const VIEW_KEY = "accounts.view";  // «Список | Плитки» — помним в браузере
 const readView = (): "list" | "tiles" => {
@@ -112,7 +113,7 @@ function PvzTile({ all }: { all: Account[] }) {
   );
 }
 
-type Fn = "login" | "cert" | "history" | "order" | "pay" | "pickup";
+type Fn = "login" | "cert" | "history" | "order" | "pay" | "pickup" | "journal";
 
 /** «Функции»: всё, что делается над аккаунтами, — одним меню по группам. Закрытие — клик вне или Esc. */
 function Functions({ on }: { on: (f: Fn) => void }) {
@@ -143,6 +144,8 @@ function Functions({ on }: { on: (f: Fn) => void }) {
           {item("order", "Заказать товар", "Корзина на несколько аккаунтов, пункты выдачи, оплата")}
           {item("pay", "Оплата товаров", "Оплатить неоплаченные заказы с кошелька")}
           {item("pickup", "Общий забор", "Одним кликом в Telegram — всё, что доехало до ПВЗ", "✈")}
+          <div className="fn-group">Журнал</div>
+          {item("journal", "Журнал действий", "Заказали, отменили, оплатили — все аккаунты на одном экране", "☰")}
         </div>
       )}
     </div>
@@ -253,6 +256,7 @@ export default function Accounts() {
       <OrderModal open={fn === "order"} onClose={close} all={all} />
       <PayModal open={fn === "pay"} onClose={close} all={all} />
       <PickupModal open={fn === "pickup"} onClose={close} all={all} />
+      <JournalModal open={fn === "journal"} onClose={close} all={all} />
     </section>
   );
 }

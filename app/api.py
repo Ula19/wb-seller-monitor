@@ -366,14 +366,20 @@ async def account(account_id: int, u=Depends(user), s=Depends(db)):
     """Страница аккаунта: карточка + заказы + код получения (только сегодняшний — он действует до 00:00 МСК)
     + счётчики вкладок."""
     acc = await _my_account(s, u, account_id)
-    count = lambda m: s.scalar(select(func.count()).select_from(m).where(m.account_id == acc.id))
+    count = lambda m, *w: s.scalar(select(func.count()).select_from(m).where(m.account_id == acc.id, *w))
     return {**(await _account_views(s, [acc]))[0], "browser_sync": acc.browser_sync,
             "pickup_code": acc.pickup_code if acc.pickup_code_date == repo.msk_today() else None,
-            "counts": {"purchases": await count(models.AccountPurchase), "balance": await count(models.AccountBalanceOp),
+            "counts": {"purchases": await count(models.AccountPurchase, _got(models.AccountPurchase)),
+                       "balance": await count(models.AccountBalanceOp),
                        "vb": await count(models.AccountVbOp)}}
 
 
 PURCHASE_FIELDS = ("rid", "nm_id", "name", "brand", "price", "dt", "office_id", "office_address", "office_hours")
+
+
+def _got(m):
+    """«Покупки» — только полученные; null — строки архива до 0024 (тогда в нём были только полученные)."""
+    return (m.status == account_api.PURCHASE_GOT) | m.status.is_(None)
 
 
 def _msk_start(d: date) -> datetime:
@@ -386,7 +392,7 @@ async def purchases(account_id: int, d_from: date | None = Query(None, alias="fr
     """История заказов (полученные), новые сверху; from/to — дни по МСК включительно."""
     acc = await _my_account(s, u, account_id)
     m = models.AccountPurchase
-    q = select(m).where(m.account_id == acc.id)
+    q = select(m).where(m.account_id == acc.id, _got(m))
     if d_from:
         q = q.where(m.dt >= _msk_start(d_from))
     if d_to:
@@ -1205,6 +1211,88 @@ async def pickups_sends(ids: list[int] = Query(..., max_length=500), u=Depends(u
     return [{"id": x.id, "account_id": x.account_id, "office_id": x.office_id, "address": x.address, "status": x.status,
              "error": x.error, "sent_at": x.sent_at, "need_code": not (a and a.pickup_code and a.pickup_code_date == today)}
             for x, a in rows.all()]
+
+
+# ---------- «Журнал действий» (всё из БД; «Обновить» — флаг для worker'а) ----------
+JOURNAL_MAX = 5000
+CANCEL_WHY = {122: "отменили сами", 101: "не забрали вовремя", 666: "не оплачен"}  # 101 — гипотеза (expiredDg)
+
+
+def _order_uid(rid: str) -> str:
+    """rid «<стикер>.<заказ>.<товар>.<n>» → заказ (как OrderId архива)."""
+    parts = rid.split(".")
+    return parts[1] if len(parts) >= 3 else rid
+
+
+async def _journal_ordered(s, ids, within) -> list[dict]:
+    """«Заказали»: активные (ordered_at) ∪ архив (created_at) — по (аккаунт, заказ, артикул), штуки по rid без повторов."""
+    o, p = models.AccountOrder, models.AccountPurchase
+    groups: dict[tuple, dict] = {}
+    rows = [*(await s.execute(select(o.account_id, o.rid, o.nm_id, o.name, o.office_address, o.ordered_at)
+                                .where(o.account_id.in_(ids), *within(o.ordered_at)))).all(),
+            *(await s.execute(select(p.account_id, p.rid, p.nm_id, p.name, p.office_address, p.created_at)
+                                .where(p.account_id.in_(ids), *within(p.created_at)))).all()]
+    for aid, rid, nm, name, addr, at in rows:
+        g = groups.setdefault((aid, _order_uid(rid), nm), {"at": at, "rids": set(), "name": name, "address": addr})
+        g["rids"].add(rid)
+        g["at"], g["address"], g["name"] = min(g["at"], at), g["address"] or addr, g["name"] or name
+    return [{"type": "ordered", "at": g["at"], "account_id": k[0],
+             "text": f"Заказ: {g['name'] or f'арт. {k[2]}'} × {len(g['rids'])}" + (f" · {g['address']}" if g["address"] else "")}
+            for k, g in groups.items()]
+
+
+async def _journal_cancelled(s, ids, within) -> list[dict]:
+    p = models.AccountPurchase
+    groups: dict[tuple, dict] = {}
+    for x in await s.scalars(select(p).where(p.account_id.in_(ids), p.status.in_(account_api.PURCHASE_CANCELLED),
+                                              *within(p.dt))):
+        g = groups.setdefault((x.account_id, _order_uid(x.rid), x.nm_id, x.status_id), {"at": x.dt, "n": 0, "name": x.name})
+        g["n"] += 1
+        g["at"] = max(g["at"], x.dt)
+    return [{"type": "cancelled", "at": g["at"], "account_id": k[0],
+             "text": f"Отмена: {g['name'] or f'арт. {k[2]}'} × {g['n']}" + (f" · {CANCEL_WHY[k[3]]}" if k[3] in CANCEL_WHY else "")}
+            for k, g in groups.items()]
+
+
+@app.get("/api/journal")
+async def journal(date_from: date | None = Query(None, alias="from"), date_to: date | None = Query(None, alias="to"),
+                  account_id: int | None = None, u=Depends(user), s=Depends(db)):
+    """Журнал действий по всем аккаунтам из БД (WB не трогаем): заказали, отменили, оплатили, сертификаты, заборы.
+    from/to — дни по МСК включительно (нет — без границы); новые сверху; counts — по типам за период."""
+    accs = {a.id: a for a in await repo.user_accounts(s, u.telegram_id)}
+    if account_id is not None and account_id not in accs:
+        raise HTTPException(404, "нет такого аккаунта")
+    ids = [account_id] if account_id is not None else list(accs)
+    lo = _msk_start(date_from) if date_from else None
+    hi = _msk_start(date_to + timedelta(days=1)) if date_to else None
+    within = lambda col: [col.is_not(None), *([col >= lo] if lo else []), *([col < hi] if hi else [])]
+    pay, cert, ps = models.OrderPayment, models.Certificate, models.PickupSend
+    ev = [*await _journal_ordered(s, ids, within), *await _journal_cancelled(s, ids, within)]
+    ev += [{"type": "paid", "at": x.done_at, "account_id": x.account_id,
+            "text": f"Оплата товаров на {x.amount:,} ₽ · {len(x.rids)} шт.".replace(",", " ")}
+           for x in await s.scalars(select(pay).where(pay.account_id.in_(ids), pay.status == "ok", *within(pay.done_at)))]
+    ev += [{"type": "cert", "at": x.done_at, "account_id": x.account_id,
+            "text": f"Сертификат добавлен: +{(x.nominal or x.nominal_entered):,} ₽".replace(",", " ")}
+           for x in await s.scalars(select(cert).where(cert.account_id.in_(ids), cert.status == "ok", *within(cert.done_at)))]
+    ev += [{"type": "pickup", "at": x.sent_at, "account_id": x.account_id,
+            "text": f"Забор: {sum(i['n'] for i in x.items)} шт. · {x.address or f'ПВЗ №{x.office_id}'}"}
+           for x in await s.scalars(select(ps).where(ps.account_id.in_(ids), ps.status == "sent", *within(ps.sent_at)))]
+    ev.sort(key=lambda e: e["at"], reverse=True)
+    counts = {t: sum(e["type"] == t for e in ev) for t in ("ordered", "cancelled", "paid", "cert", "pickup")}
+    raw = await repo.get_setting(s, repo.JOURNAL_CHECK)
+    return {"events": [{**e, "account_title": accs[e["account_id"]].title} for e in ev[:JOURNAL_MAX]],
+            "counts": {"all": len(ev), **counts}, "check": json.loads(raw) if raw else None}
+
+
+@app.post("/api/journal/refresh")
+async def journal_refresh(u=Depends(user), s=Depends(db)):
+    """«Обновить»: флаг для worker'а — заказы всех аккаунтов (API в WB не ходит). Уже идёт — 409."""
+    raw = await repo.get_setting(s, repo.JOURNAL_CHECK)
+    if raw and json.loads(raw).get("state") in ("requested", "running"):
+        raise HTTPException(409, "обновление уже идёт")
+    await repo.set_setting(s, repo.JOURNAL_CHECK, json.dumps({"state": "requested", "at": datetime.now(timezone.utc).isoformat()}))
+    await s.commit()
+    return {"ok": True}
 
 
 # ---------- уведомления WB (колокольчик) ----------

@@ -99,6 +99,7 @@ async def main() -> None:
     cert_task = asyncio.create_task(keeper.certificates_loop())  # активация сертификатов с сайта
     quote_task = asyncio.create_task(autobuy.quotes_loop())  # «Заказать товар»: карточка товара и предпросмотр
     zabor_task = asyncio.create_task(pickup_sends.pickup_sends_loop(bot))  # «Общий забор» в Telegram
+    journal_task = asyncio.create_task(keeper.journal_check_loop(bot))  # «Обновить» журнала действий
     bell_task = asyncio.create_task(keeper.notices_check_loop())  # «Проверить сейчас» уведомления с сайта
 
     try:
@@ -112,6 +113,7 @@ async def main() -> None:
         cert_task.cancel()
         quote_task.cancel()
         zabor_task.cancel()
+        journal_task.cancel()
         bell_task.cancel()
         await wb_client.close()
         await bot.session.close()

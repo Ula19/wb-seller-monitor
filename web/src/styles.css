@@ -476,3 +476,9 @@ button.tile[aria-expanded="true"] { border-color: var(--accent); }
   .zabor-kv { flex-basis: 100%; text-align: left; padding-left: 26px; }
 }
 .poll-card + .poll-card { margin-top: 16px; }
+.journal-upd { margin-left: auto; display: inline-flex; gap: 8px; align-items: center; }
+.journal-tabs { flex-wrap: wrap; margin-bottom: 10px; }
+.journal-tabs button { white-space: nowrap; }
+.journal { max-height: 55vh; overflow: auto; }
+.journal td { vertical-align: top; }
+@media (max-width: 768px) { .journal-upd { margin-left: 0; } }

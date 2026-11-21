@@ -221,6 +221,10 @@ class AccountPurchase(Base):
     office_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     office_address: Mapped[str | None] = mapped_column(String(256), nullable=True)
     office_hours: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # архив всех статусов (0024): 32 получен, 64/65536 отмена; null — строки до 0024 (тогда брали только 32)
+    status: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    status_id: Mapped[int | None] = mapped_column(Integer, nullable=True)  # причина: 122 отменили сами, 666 не оплачен…
+    created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)  # когда заказали
 
 
 class AccountVbOp(Base):

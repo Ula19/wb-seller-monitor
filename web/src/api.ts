@@ -152,3 +152,9 @@ export type PickupBoard = { office_id: number; address: string;
   accounts: { account_id: number; title: string; n: number; sum: number; items: PickupItem[] }[] }[];
 export type PickupSend = { id: number; account_id: number | null; office_id: number; address: string | null;
   status: "pending" | "sent" | "error"; error: string | null; sent_at: string | null; need_code: boolean };
+
+// ---------- «Журнал действий» ----------
+export type JournalType = "ordered" | "cancelled" | "paid" | "cert" | "pickup";
+export type JournalEvent = { type: JournalType; at: string; account_id: number; account_title: string; text: string };
+export type JournalCheck = { state: "requested" | "running" | "done"; done?: number; total?: number; failed?: string[]; at: string } | null;
+export type Journal = { events: JournalEvent[]; counts: Record<JournalType | "all", number>; check: JournalCheck };

@@ -479,10 +479,10 @@ async def _purchases(acc: models.WbAccount) -> None:
     (purchases_full_at пуст) — грузим целиком: прерванная на середине первая загрузка иначе оставила бы старые
     покупки недогруженными навсегда. Потом — только догрузка до страницы, где всё уже известно."""
     known = None
-    if acc.purchases_full_at:
+    if acc.purchases_full_at:  # {rid: статус}: догрузка листает, пока на странице есть новые rid или сменился статус
         async with Session() as s:
-            known = set(await s.scalars(select(models.AccountPurchase.rid)
-                                        .where(models.AccountPurchase.account_id == acc.id)))
+            m = models.AccountPurchase
+            known = dict((await s.execute(select(m.rid, m.status).where(m.account_id == acc.id))).all())
     items, complete = await account_api.fetch_purchases(decrypt_json(acc.state_enc), await proxy_url(acc.proxy_id), known)
     await _attach_offices(items, "office_id")
     async with Session() as s:
@@ -531,10 +531,10 @@ async def _notices(acc: models.WbAccount, state: dict, proxy: str | None, force:
     return new
 
 
-async def _set_check(value: dict) -> None:
+async def _set_check(value: dict, key: str = NOTICES_CHECK) -> None:
     async with Session() as s:
-        await repo.set_setting(s, NOTICES_CHECK, json.dumps({**value, "at": datetime.now(timezone.utc).isoformat()},
-                                                            ensure_ascii=False))
+        await repo.set_setting(s, key, json.dumps({**value, "at": datetime.now(timezone.utc).isoformat()},
+                                                  ensure_ascii=False))
         await s.commit()
 
 
@@ -583,6 +583,53 @@ async def notices_check_loop() -> None:
         except Exception:
             log.exception("keeper: цикл проверки уведомлений")
             await _set_check({"state": "done", "new": 0, "failed": ["проверка упала — см. логи"]})
+        await asyncio.sleep(LOGIN_POLL_SEC)
+
+
+# ---------- «Обновить» журнала: только заказы всех аккаунтов (пропавшие сами догрузят архив) ----------
+async def process_journal_check(bot) -> bool:
+    """Обход активных аккаунтов с kinds=("orders",) — wbxoofex + status-tracker; разные прокси — параллельно, на одном —
+    по очереди; после каждого — прогресс {done, total} для «обновляю N из M». False — не просили."""
+    async with Session() as s:
+        raw = await repo.get_setting(s, repo.JOURNAL_CHECK)
+        accounts = await repo.active_accounts(s)
+        inactive = [a.title for a in await s.scalars(select(models.WbAccount).where(models.WbAccount.status != "active"))]
+    if (json.loads(raw) if raw else {}).get("state") != "requested":
+        return False
+    done, total = 0, len(accounts)
+    await _set_check({"state": "running", "done": 0, "total": total}, repo.JOURNAL_CHECK)
+    lanes: dict[int | None, list] = {}
+    for acc in accounts:
+        lanes.setdefault(acc.proxy_id, []).append(acc)
+
+    async def lane(accs):
+        nonlocal done
+        for acc in accs:
+            try:
+                await poll_account(bot, acc, ("orders",))  # сбои — внутри (лог, тревога прокси, relogin)
+            except Exception as e:
+                log.warning("keeper: журнал: аккаунт %s: %s: %s", acc.title, type(e).__name__, str(e)[:200])
+            done += 1
+            await _set_check({"state": "running", "done": done, "total": total}, repo.JOURNAL_CHECK)
+    await asyncio.gather(*(lane(g) for g in lanes.values()))
+    await _set_check({"state": "done", "done": done, "total": total, "failed": [f"{t} (нужен вход)" for t in inactive]},
+                     repo.JOURNAL_CHECK)
+    log.info("keeper: журнал обновлён: аккаунтов %d", total)
+    return True
+
+
+async def journal_check_loop(bot) -> None:
+    """Фоновая задача worker'а для «Обновить» журнала. Зависшая с прошлого запуска (running) — закрываем."""
+    async with Session() as s:
+        raw = await repo.get_setting(s, repo.JOURNAL_CHECK)
+    if (json.loads(raw) if raw else {}).get("state") in ("running", "requested"):
+        await _set_check({"state": "done", "failed": ["обновление прервано рестартом — нажмите ещё раз"]}, repo.JOURNAL_CHECK)
+    while True:
+        try:
+            await process_journal_check(bot)
+        except Exception:
+            log.exception("keeper: цикл обновления журнала")
+            await _set_check({"state": "done", "failed": ["обновление упало — см. логи"]}, repo.JOURNAL_CHECK)
         await asyncio.sleep(LOGIN_POLL_SEC)
 
 
