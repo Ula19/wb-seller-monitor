@@ -1143,12 +1143,11 @@ async def put_pickup_settings(body: PickupToIn, u=Depends(user), s=Depends(db)):
 
 async def _pickup_groups(s, u: Viewer, account_ids: set[int] | None = None) -> dict[tuple[int, int], dict]:
     """(аккаунт, ПВЗ) → {acc, address, orders}: в ПВЗ (группа 5), не скрытые, активные свои аккаунты, без rid'ов, которые
-    уже отправлены или ждут отправки (pending/sent). error — снова в окне."""
+    ещё отправляются (pending). Отправленные (sent) остаются, пока товар не заберут: сам уйдёт из группы 5."""
     w, o, p = models.WbAccount, models.AccountOrder, models.PickupSend
     q = select(w).where(w.user_id == u.telegram_id, w.status == "active")
     accs = {a.id: a for a in await s.scalars(q if account_ids is None else q.where(w.id.in_(account_ids)))}
-    busy = {r for rids in await s.scalars(select(p.rids).where(p.account_id.in_(accs), p.status.in_(("pending", "sent"))))
-            for r in rids}
+    busy = {r for rids in await s.scalars(select(p.rids).where(p.account_id.in_(accs), p.status == "pending")) for r in rids}
     out: dict[tuple[int, int], dict] = {}
     rows = await s.scalars(select(o).where(o.account_id.in_(accs), o.group_id == 5, o.hidden.is_(False))
                            .order_by(o.account_id, o.ordered_at.nulls_last(), o.rid))
@@ -1164,13 +1163,19 @@ async def _pickup_groups(s, u: Viewer, account_ids: set[int] | None = None) -> d
 
 @app.get("/api/pickups/board")
 async def pickups_board(u=Depends(user), s=Depends(db)):
-    """Окно «Общий забор»: ПВЗ → аккаунты (у аккаунта в разных ПВЗ — несколько строк), товары «имя × n», шт. и сумма ₽."""
+    """Окно «Общий забор»: ПВЗ → аккаунты (у аккаунта в разных ПВЗ — несколько строк), товары «имя × n», шт. и сумма ₽;
+    sent_at — когда пару последний раз удачно отправляли (отправленное остаётся в окне до забора)."""
+    groups = await _pickup_groups(s, u)
+    p = models.PickupSend
+    last = dict(((a, o), at) for a, o, at in (await s.execute(
+        select(p.account_id, p.office_id, func.max(p.sent_at)).where(p.account_id.in_({a for a, _ in groups}), p.status == "sent")
+        .group_by(p.account_id, p.office_id))).all())
     offices: dict[int, dict] = {}
-    for (aid, oid), g in (await _pickup_groups(s, u)).items():
+    for (aid, oid), g in groups.items():
         items = pickup_items(g["orders"])
         off = offices.setdefault(oid, {"office_id": oid, "address": g["address"], "accounts": []})
         off["accounts"].append({"account_id": aid, "title": g["acc"].title, "n": sum(i["n"] for i in items),
-                                "sum": sum(i["sum"] for i in items), "items": items})
+                                "sum": sum(i["sum"] for i in items), "items": items, "sent_at": last.get((aid, oid))})
     return sorted(offices.values(), key=lambda x: x["address"])
 
 
@@ -1195,7 +1200,7 @@ async def pickups_send(body: PickupSendIn, u=Depends(user), s=Depends(db)):
                               rids=[x.rid for x in g["orders"]], items=pickup_items(g["orders"]))
             for aid, oid in dict.fromkeys((x.account_id, x.office_id) for x in body.pairs) if (g := groups.get((aid, oid)))]
     if not rows:
-        raise HTTPException(409, "нечего отправлять — товары уже отправлены или забраны, обновите окно")
+        raise HTTPException(409, "нечего отправлять — товары уже забраны или ещё отправляются, обновите окно")
     s.add_all(rows)
     await s.commit()
     return {"ids": [x.id for x in rows]}
@@ -1203,12 +1208,14 @@ async def pickups_send(body: PickupSendIn, u=Depends(user), s=Depends(db)):
 
 @app.get("/api/pickups/sends")
 async def pickups_sends(ids: list[int] = Query(..., max_length=500), u=Depends(user), s=Depends(db)):
-    """Статусы отправок для окна; need_code — кода на сегодня ещё нет (worker идёт за ним в браузере)."""
+    """Экран после «Отправить»: пары (аккаунт, адрес, товары) и статус; need_code — кода на сегодня ещё нет (worker идёт
+    за ним в браузере)."""
     p, w = models.PickupSend, models.WbAccount
     rows = await s.execute(select(p, w).outerjoin(w, w.id == p.account_id)
                            .where(p.id.in_(ids), p.user_id == u.telegram_id).order_by(p.id))
     today = repo.msk_today()
-    return [{"id": x.id, "account_id": x.account_id, "office_id": x.office_id, "address": x.address, "status": x.status,
+    return [{"id": x.id, "account_id": x.account_id, "account_title": a and a.title, "office_id": x.office_id,
+             "address": x.address, "items": x.items, "status": x.status,
              "error": x.error, "sent_at": x.sent_at, "need_code": not (a and a.pickup_code and a.pickup_code_date == today)}
             for x, a in rows.all()]
 

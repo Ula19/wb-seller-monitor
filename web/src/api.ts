@@ -149,8 +149,9 @@ export const rubk = (k: number | null | undefined) =>
 // ---------- «Общий забор» ----------
 export type PickupItem = { name: string; n: number; sum: number };  // сумма — ₽
 export type PickupBoard = { office_id: number; address: string;
-  accounts: { account_id: number; title: string; n: number; sum: number; items: PickupItem[] }[] }[];
-export type PickupSend = { id: number; account_id: number | null; office_id: number; address: string | null;
+  accounts: { account_id: number; title: string; n: number; sum: number; items: PickupItem[]; sent_at: string | null }[] }[];
+export type PickupSend = { id: number; account_id: number | null; account_title: string | null; office_id: number;
+  address: string | null; items: PickupItem[];
   status: "pending" | "sent" | "error"; error: string | null; sent_at: string | null; need_code: boolean };
 
 // ---------- «Журнал действий» ----------
