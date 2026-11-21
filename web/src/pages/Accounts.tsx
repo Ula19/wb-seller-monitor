@@ -11,6 +11,7 @@ import CertModal from "./CertModal";
 import LoginModal from "./LoginModal";
 import OrderModal from "./OrderModal";
 import PayModal from "./PayModal";
+import PickupModal from "./PickupModal";
 
 const VIEW_KEY = "accounts.view";  // «Список | Плитки» — помним в браузере
 const readView = (): "list" | "tiles" => {
@@ -111,7 +112,7 @@ function PvzTile({ all }: { all: Account[] }) {
   );
 }
 
-type Fn = "login" | "cert" | "history" | "order" | "pay";
+type Fn = "login" | "cert" | "history" | "order" | "pay" | "pickup";
 
 /** «Функции»: всё, что делается над аккаунтами, — одним меню по группам. Закрытие — клик вне или Esc. */
 function Functions({ on }: { on: (f: Fn) => void }) {
@@ -125,8 +126,9 @@ function Functions({ on }: { on: (f: Fn) => void }) {
     window.addEventListener("keydown", esc);
     return () => { document.removeEventListener("mousedown", click); window.removeEventListener("keydown", esc); };
   }, [open]);
-  const item = (f: Fn, t: string, d: string) => (
-    <button role="menuitem" className="fn-item" onClick={() => { setOpen(false); on(f); }}><b>{t}</b><span className="muted small">{d}</span></button>);
+  const item = (f: Fn, t: string, d: string, icon?: string) => (
+    <button role="menuitem" className={`fn-item${icon ? " ico" : ""}`} onClick={() => { setOpen(false); on(f); }}>
+      {icon && <i aria-hidden="true">{icon}</i>}<b>{t}</b><span className="muted small">{d}</span></button>);
   return (
     <div className="fn" ref={ref}>
       <button className="btn" aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(!open)}>Функции ▾</button>
@@ -140,6 +142,7 @@ function Functions({ on }: { on: (f: Fn) => void }) {
           <div className="fn-group">Заказы</div>
           {item("order", "Заказать товар", "Корзина на несколько аккаунтов, пункты выдачи, оплата")}
           {item("pay", "Оплата товаров", "Оплатить неоплаченные заказы с кошелька")}
+          {item("pickup", "Общий забор", "Одним кликом в Telegram — всё, что доехало до ПВЗ", "✈")}
         </div>
       )}
     </div>
@@ -249,6 +252,7 @@ export default function Accounts() {
       <CertHistory open={fn === "history"} onClose={close} all={all} />
       <OrderModal open={fn === "order"} onClose={close} all={all} />
       <PayModal open={fn === "pay"} onClose={close} all={all} />
+      <PickupModal open={fn === "pickup"} onClose={close} all={all} />
     </section>
   );
 }

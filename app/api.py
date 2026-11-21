@@ -29,6 +29,7 @@ from app.config import settings
 from app.crypto import encrypt_json
 from app.db import models, repo
 from app.db.base import Session
+from app.pickup import pickup_items
 from app.wallet import best_offer, offer_text, wallet_price
 from app.wb import account_api, media, pickups
 from app.wb.web_session import VISIT_SESSION
@@ -1108,6 +1109,102 @@ async def order_cancel(body: CancelIn, u=Depends(user), s=Depends(db)):
     o.cancel_state, o.cancel_error = "pending", None
     await s.commit()
     return {"id": o.id}
+
+
+# ---------- «Общий забор» (в Telegram шлёт worker: pickup_sends) ----------
+PICKUP_TO_MAX = 10
+
+
+@app.get("/api/settings/pickup")
+async def get_pickup_settings(u=Depends(user), s=Depends(db)):
+    """Кому слать заборы в Telegram — список ID."""
+    return {"to": json.loads(await repo.get_setting(s, repo.PICKUP_TO) or "[]")}
+
+
+class PickupToIn(BaseModel):
+    to: list[int] = Field(max_length=PICKUP_TO_MAX)
+
+
+@app.put("/api/settings/pickup")
+async def put_pickup_settings(body: PickupToIn, u=Depends(user), s=Depends(db)):
+    to = list(dict.fromkeys(body.to))
+    if any(x <= 0 for x in to):
+        raise HTTPException(422, "Telegram ID — положительные числа")
+    await repo.set_setting(s, repo.PICKUP_TO, json.dumps(to))
+    await s.commit()
+    return {"to": to}
+
+
+async def _pickup_groups(s, u: Viewer, account_ids: set[int] | None = None) -> dict[tuple[int, int], dict]:
+    """(аккаунт, ПВЗ) → {acc, address, orders}: в ПВЗ (группа 5), не скрытые, активные свои аккаунты, без rid'ов, которые
+    уже отправлены или ждут отправки (pending/sent). error — снова в окне."""
+    w, o, p = models.WbAccount, models.AccountOrder, models.PickupSend
+    q = select(w).where(w.user_id == u.telegram_id, w.status == "active")
+    accs = {a.id: a for a in await s.scalars(q if account_ids is None else q.where(w.id.in_(account_ids)))}
+    busy = {r for rids in await s.scalars(select(p.rids).where(p.account_id.in_(accs), p.status.in_(("pending", "sent"))))
+            for r in rids}
+    out: dict[tuple[int, int], dict] = {}
+    rows = await s.scalars(select(o).where(o.account_id.in_(accs), o.group_id == 5, o.hidden.is_(False))
+                           .order_by(o.account_id, o.ordered_at.nulls_last(), o.rid))
+    for x in rows:
+        if x.rid in busy:
+            continue
+        oid = x.dst_office_id or 0
+        g = out.setdefault((x.account_id, oid), {"acc": accs[x.account_id], "orders": [],
+                                                  "address": x.office_address or (f"ПВЗ №{oid}" if oid else "ПВЗ не указан")})
+        g["orders"].append(x)
+    return out
+
+
+@app.get("/api/pickups/board")
+async def pickups_board(u=Depends(user), s=Depends(db)):
+    """Окно «Общий забор»: ПВЗ → аккаунты (у аккаунта в разных ПВЗ — несколько строк), товары «имя × n», шт. и сумма ₽."""
+    offices: dict[int, dict] = {}
+    for (aid, oid), g in (await _pickup_groups(s, u)).items():
+        items = pickup_items(g["orders"])
+        off = offices.setdefault(oid, {"office_id": oid, "address": g["address"], "accounts": []})
+        off["accounts"].append({"account_id": aid, "title": g["acc"].title, "n": sum(i["n"] for i in items),
+                                "sum": sum(i["sum"] for i in items), "items": items})
+    return sorted(offices.values(), key=lambda x: x["address"])
+
+
+class PickupPair(BaseModel):
+    account_id: int
+    office_id: int
+
+
+class PickupSendIn(BaseModel):
+    pairs: list[PickupPair] = Field(min_length=1, max_length=500)
+
+
+@app.post("/api/pickups/send", status_code=201)
+async def pickups_send(body: PickupSendIn, u=Depends(user), s=Depends(db)):
+    """Пары «аккаунт + ПВЗ» в очередь (шлёт worker). rids и товары — с сервера; строки аккаунтов под FOR UPDATE:
+    двойной клик не отправит то же второй раз."""
+    w = models.WbAccount
+    ids = {x.account_id for x in body.pairs}
+    await s.execute(select(w.id).where(w.id.in_(ids), w.user_id == u.telegram_id).order_by(w.id).with_for_update())
+    groups = await _pickup_groups(s, u, ids)
+    rows = [models.PickupSend(user_id=u.telegram_id, account_id=aid, office_id=oid, address=g["address"],
+                              rids=[x.rid for x in g["orders"]], items=pickup_items(g["orders"]))
+            for aid, oid in dict.fromkeys((x.account_id, x.office_id) for x in body.pairs) if (g := groups.get((aid, oid)))]
+    if not rows:
+        raise HTTPException(409, "нечего отправлять — товары уже отправлены или забраны, обновите окно")
+    s.add_all(rows)
+    await s.commit()
+    return {"ids": [x.id for x in rows]}
+
+
+@app.get("/api/pickups/sends")
+async def pickups_sends(ids: list[int] = Query(..., max_length=500), u=Depends(user), s=Depends(db)):
+    """Статусы отправок для окна; need_code — кода на сегодня ещё нет (worker идёт за ним в браузере)."""
+    p, w = models.PickupSend, models.WbAccount
+    rows = await s.execute(select(p, w).outerjoin(w, w.id == p.account_id)
+                           .where(p.id.in_(ids), p.user_id == u.telegram_id).order_by(p.id))
+    today = repo.msk_today()
+    return [{"id": x.id, "account_id": x.account_id, "office_id": x.office_id, "address": x.address, "status": x.status,
+             "error": x.error, "sent_at": x.sent_at, "need_code": not (a and a.pickup_code and a.pickup_code_date == today)}
+            for x, a in rows.all()]
 
 
 # ---------- уведомления WB (колокольчик) ----------

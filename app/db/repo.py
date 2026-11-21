@@ -460,6 +460,7 @@ async def upsert_balance_ops(s, account_id: int, ops: list[dict]) -> None:
                   ("name", "op_type", "amount", "balance", "dt", "source_type"), keep=("source_type",))
 
 
+PICKUP_TO = "pickup_to"  # app_settings: «Общий забор» — кому слать, JSON-список Telegram ID
 NOTICES_CHECK = "notices_check"  # app_settings: «Проверить сейчас» — {state: requested|running|done, new, failed, at}
 NOTICE_COLS = ("topic_id", "title", "text", "url", "dt", "wb_read_at")
 

@@ -480,6 +480,28 @@ class OrderQuote(Base):
     done_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class PickupSend(Base):
+    """«Общий забор»: одна пара «аккаунт + ПВЗ» — одно сообщение в Telegram (код получения + товары). api пишет pending
+    (rids и снимок товаров считает сервер), worker: нет кода на сегодня — визит за кодом, потом send_safe каждому из
+    app_settings.pickup_to. sent — дошло хотя бы одному; error — текст причины. rids pending/sent в окно больше не попадают."""
+
+    __tablename__ = "pickup_sends"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.telegram_id", ondelete="CASCADE"))
+    account_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("wb_accounts.id", ondelete="SET NULL"), nullable=True, index=True)
+    office_id: Mapped[int] = mapped_column(BigInteger)
+    address: Mapped[str | None] = mapped_column(String(256), nullable=True)  # как в заказах на момент отправки
+    rids: Mapped[list] = mapped_column(JSONB)
+    items: Mapped[list] = mapped_column(JSONB)  # [{name, n, sum}] — снимок строк, сумма в ₽
+    text: Mapped[str | None] = mapped_column(Text, nullable=True)  # что ушло в Telegram
+    status: Mapped[str] = mapped_column(String(16), default="pending", server_default="pending", index=True)
+    error: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    created_at: Mapped[datetime] = _now()
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class PickupPoint(Base):
     """Справочник ПВЗ WB из all-poo-fr-v12.json (pickups.sync_job 2 раза в сутки). Заказ уходит только по id отсюда:
     адрес — подпись, а dest, координаты и подпись ПВЗ (sign, sign_v2) идут в тело заказа. Пропал из справочника →

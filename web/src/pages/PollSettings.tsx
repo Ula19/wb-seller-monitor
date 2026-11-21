@@ -71,6 +71,36 @@ function Form({ init }: { init: Poll }) {
   );
 }
 
+/** «Общий забор»: кому слать в Telegram — ID через запятую (получатель должен нажать /start у бота). */
+export const parseIds = (t: string): number[] | null => {
+  const parts = t.split(/[\s,;]+/).filter(Boolean);
+  return parts.every((x) => /^\d{1,15}$/.test(x) && +x > 0) && parts.length <= 10 ? [...new Set(parts.map(Number))] : null;
+};
+
+function PickupTo() {
+  const q = useQuery({ queryKey: ["pickup-to"], queryFn: () => api<{ to: number[] }>("/settings/pickup"), gcTime: 0 });
+  const [t, setT] = useState<string | null>(null);
+  const text = t ?? q.data?.to.join(", ") ?? "";
+  const ids = parseIds(text);
+  const save = useMutation({ mutationFn: () => api<{ to: number[] }>("/settings/pickup", { method: "PUT", body: { to: ids } }) });
+  useEffect(() => save.reset(), [t]);
+  if (!q.data) return q.isError ? <p className="err">Не загрузились настройки</p> : <p className="muted">Загрузка…</p>;
+  return (
+    <form onSubmit={(e) => { e.preventDefault(); save.mutate(); }}>
+      <label className="poll-row"><span>Кому отправлять заборы в Telegram</span>
+        <input aria-label="Telegram ID получателей" placeholder="123456789, 987654321" value={text} aria-invalid={!ids}
+          onChange={(e) => setT(e.target.value)} /></label>
+      {!ids ? <p className="err small">Только Telegram ID (числа) через запятую, не больше 10</p>
+        : <p className="muted small">Получатель должен один раз нажать /start у бота — иначе Telegram не даст ему написать.</p>}
+      {save.isError && <p className="err">{save.error instanceof ApiError ? save.error.message : "не сохранилось"}</p>}
+      <div className="wiz-foot">
+        <button className="btn" disabled={!ids || save.isPending || save.isSuccess}>
+          {save.isPending ? "Сохраняю…" : save.isSuccess ? "Сохранено ✓" : "Сохранить"}</button>
+      </div>
+    </form>
+  );
+}
+
 export default function PollSettings() {
   const q = useQuery({ queryKey: ["poll-settings"], queryFn: () => api<Poll>("/settings/poll"), gcTime: 0 });
   return (
@@ -79,6 +109,10 @@ export default function PollSettings() {
       <div className="card poll-card">
         <h2>Опрос аккаунтов</h2>
         {q.data ? <Form init={q.data} /> : q.isError ? <p className="err">Не загрузились настройки</p> : <p className="muted">Загрузка…</p>}
+      </div>
+      <div className="card poll-card">
+        <h2>Общий забор</h2>
+        <PickupTo />
       </div>
     </section>
   );
