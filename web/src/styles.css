@@ -457,3 +457,5 @@ button.tile[aria-expanded="true"] { border-color: var(--accent); }
   .buy-price { margin-left: 0; text-align: left; }
   .pvz-acc select { flex-basis: 100%; }
 }
+.fill-row { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; margin-top: 6px; }
+.fill-row input { width: 64px; text-align: right; }

@@ -87,10 +87,31 @@ const withWallet = (price: number | null, accs: Account[]) => {
   return `≈ ${lo === hi ? rubk(lo) : `${rubk(lo).replace(" ₽", "")}–${rubk(hi)}`} с Кошельком`;
 };
 
-function ProductQty({ p, accs, mine, setN, onRemove }: {
-  p: ProductCard; accs: Account[]; mine: Record<number, number>; setN: (acc: number, n: number) => void; onRemove: () => void;
+/** «Всем по N»: аккаунты по порядку, каждому не больше остатка (как ручной ввод). → (количества, скольким хватило N). */
+function fillEach(accs: Account[], stock: number, each: number): [Record<number, number>, number] {
+  let left = stock, full = 0;
+  const out: Record<number, number> = {};
+  for (const a of accs) {
+    out[a.id] = Math.min(each, left);
+    left -= out[a.id];
+    if (out[a.id] === each) full += 1;
+  }
+  return [out, full];
+}
+
+function ProductQty({ p, accs, mine, setN, setAll, onRemove }: {
+  p: ProductCard; accs: Account[]; mine: Record<number, number>; setN: (acc: number, n: number) => void;
+  setAll: (m: Record<number, number>) => void; onRemove: () => void;
 }) {
   const given = sum(accs.map((a) => mine[a.id] ?? 0));
+  const [each, setEach] = useState("2");
+  const [short, setShort] = useState("");
+  const fill = (n: number) => {
+    const [m, full] = fillEach(accs, p.stock, n);
+    setAll(m);
+    setShort(full < accs.length ? `хватило на ${full} из ${accs.length} аккаунтов` : "");
+  };
+  const n = Math.floor(Number(each));
   return (
     <div className="card sm prod">
       <div className="prod-head"><b>{p.name ?? `Товар ${p.nm}`}</b>
@@ -99,14 +120,22 @@ function ProductQty({ p, accs, mine, setN, onRemove }: {
         {" "}(точная цена — на шаге «Оплата»: зависит от пункта выдачи)</div>
       <div className="small">Осталось у продавца {pcs(p.stock)} · распределено {pcs(given)}
         {given < p.stock ? <span className="muted"> · можно ещё {pcs(p.stock - given)}</span> : <span className="up-t"> · больше нет</span>}</div>
+      <div className="fill-row">
+        <button className="btn ghost sm" onClick={() => fill(1)}>Всем по 1</button>
+        <input type="number" inputMode="numeric" min={1} aria-label="Сколько штук каждому" value={each}
+          onChange={(e) => setEach(e.target.value)} />
+        <button className="btn ghost sm" disabled={!(n >= 1)} onClick={() => fill(n)}>Всем по {n >= 1 ? n : "N"}</button>
+        <button className="link" onClick={() => { setAll({}); setShort(""); }}>Сбросить</button>
+        {short && <span className="up-t small">{short}</span>}
+      </div>
       <div className="qty-grid">
         {accs.map((a) => {
-          const n = mine[a.id] ?? 0;
-          const max = p.stock - (given - n);  // остаток минус отданное другим
+          const k = mine[a.id] ?? 0;
+          const max = p.stock - (given - k);  // остаток минус отданное другим
           return (
             <label key={a.id}><span>{a.title}</span>
               <input type="number" inputMode="numeric" min={0} max={max} placeholder="0" aria-label={`Количество: ${a.title}`}
-                value={n || ""} onChange={(e) => setN(a.id, Math.max(0, Math.min(max, Math.floor(Number(e.target.value) || 0))))} />
+                value={k || ""} onChange={(e) => { setShort(""); setN(a.id, Math.max(0, Math.min(max, Math.floor(Number(e.target.value) || 0)))); }} />
             </label>
           );
         })}
@@ -394,7 +423,7 @@ function Wizard({ all, onClose }: { all: Account[]; onClose: () => void }) {
       {step === 2 && <>
         <p className="muted">Найдите товар по артикулу или ссылке и укажите, сколько штук заказать на каждый аккаунт.</p>
         {prods.map((p) => <ProductQty key={p.nm} p={p} accs={accs} mine={qty[p.nm] ?? {}}
-          setN={(acc, n) => setQty({ ...qty, [p.nm]: { ...qty[p.nm], [acc]: n } })}
+          setN={(acc, n) => setQty({ ...qty, [p.nm]: { ...qty[p.nm], [acc]: n } })} setAll={(m) => setQty({ ...qty, [p.nm]: m })}
           onRemove={() => setProds(prods.filter((x) => x.nm !== p.nm))} />)}
         {prods.length > 0 && <div className="small muted">Добавить ещё товар:</div>}
         <FindProduct have={prods.map((p) => p.nm)} onAdd={(p) => setProds([...prods, p])} />
