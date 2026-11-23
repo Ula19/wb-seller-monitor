@@ -3,7 +3,8 @@
 api в WB не ходит, поэтому всё, что требует WB, считает worker:
 - order_quotes — запросы сайта: карточка товара по артикулу/ссылке (product) и предпросмотр (preview: цена каждой
   строки на её ПВЗ, Кошелёк, лимит скидки, остаток постоплаты). Свой цикл, раз в секунду, параллельно.
-- autobuy_orders — заказы и отмены: очередь прокси в keeper._cert_lane (сертификаты → оплаты → отмены → заказы).
+- autobuy_orders — заказы и отмены, order_cancels — отмена позиций из группы ПВЗ: очередь прокси в keeper._cert_lane
+  (сертификаты → оплаты → отмены → заказы). reject_initialized у WB — «отмену запросили», не «отменили»: итог считает api.
 Перед отправкой цена (detail с dest ПВЗ), grade и баланс берутся ЗАНОВО: grade подписан WB и привязан ко времени.
 Деньги — в копейках.
 """
@@ -32,7 +33,7 @@ NO_CARD = "WB не отдал карточку товара — попробуй
 NOT_SENT = " — заказ не отправляли"
 
 log = logging.getLogger(__name__)
-A, Q, PP = models.AutobuyOrder, models.OrderQuote, models.PickupPoint
+A, Q, PP, OC = models.AutobuyOrder, models.OrderQuote, models.PickupPoint, models.OrderCancel
 _tasks: set = set()  # чтобы задачи запросов не собрал сборщик мусора
 
 
@@ -263,12 +264,16 @@ async def _finish(oid: int, **values) -> None:
 
 
 async def _refresh_account(acc_id: int, state: dict, proxy: str | None, title: str) -> None:
-    """Заказы и баланс аккаунта — в БД сразу (как после оплаты), чтобы сайт показал новый заказ и деньги."""
+    """Заказы и баланс аккаунта — в БД сразу (как после оплаты), чтобы сайт показал новый заказ и деньги. Заказ пропал
+    из активных (отменён) — архив сразу, как в опросе: иначе итог отмены ждал бы ночной догрузки."""
     try:
         keeper._last.setdefault(acc_id, {}).update(dict.fromkeys(("orders", "balance"), datetime.now(timezone.utc).timestamp()))
         st, _ = await account_api.fetch(state, proxy, ("orders", "balance"))
-        if st:
-            await keeper._save_state(acc_id, st)
+        if st and (await keeper._save_state(acc_id, st))[1]:
+            async with Session() as s:
+                acc = await s.get(models.WbAccount, acc_id)
+            if acc:
+                await keeper._purchases(acc)
     except Exception as e:
         log.warning("autobuy: заказы/баланс %s не перечитаны: %s: %s", title, type(e).__name__, str(e)[:200])
 
@@ -367,7 +372,8 @@ async def place(oid: int) -> None:
 
 
 async def cancel(oid: int) -> None:
-    """Отмена позиций заказа (rids). WB начал отмену по всем → cancelled; иначе cancel_state error с причиной."""
+    """Отмена позиций заказа (rids). WB начал отмену по всем → cancel_state asked; иначе error с причиной. Повтор после
+    рестарта безвреден (отмена бесплатна, WB просто не начнёт её второй раз) — sending не нужен."""
     async with Session() as s:
         o = await s.get(A, oid)
         acc = o and o.account_id and await s.get(models.WbAccount, o.account_id)
@@ -390,12 +396,54 @@ async def cancel(oid: int) -> None:
     except Exception as e:
         log.warning("autobuy: отмена %s (%s): %s: %s", oid, title, type(e).__name__, str(e)[:200])
         return await fail("WB не ответил — попробуйте ещё раз")
-    if started == set(rids):
-        await _finish(oid, status="cancelled", cancel_state=None, cancel_error=None)
+    if started == set(rids):  # WB принял заявку — итог («отменён» / «WB не отменил») считает api по архиву и заказам
+        await _finish(oid, cancel_state="asked", cancel_error=None, cancel_at=datetime.now(timezone.utc))
     else:
         await fail(f"WB начал отмену {len(started)} из {len(rids)} позиций — проверьте заказы аккаунта")
     log.info("autobuy: отмена %s (%s): %d из %d", oid, title, len(started), len(rids))
     await _refresh_account(acc.id, state, proxy, title)
+
+
+async def cancel_rids(cid: int) -> None:
+    """Отмена позиций из группы ПВЗ (order_cancels): WB начал хоть что-то → asked (+ started), ничего → error."""
+    async with Session() as s:
+        c = await s.get(OC, cid)
+        acc = c and c.account_id and await s.get(models.WbAccount, c.account_id)
+        if c is None or c.status != "pending":
+            return
+        rids, title = list(c.rids), acc and acc.title
+        state, proxy_id = (decrypt_json(acc.state_enc), acc.proxy_id) if acc else (None, None)
+
+    async def done(status: str, error: str | None = None, started: list | None = None) -> None:
+        async with Session() as s:
+            await s.execute(update(OC).where(OC.id == cid).values(
+                status=status, error=error and error[:256], started=started or [], done_at=datetime.now(timezone.utc)))
+            await s.commit()
+    if not acc:
+        return await done("error", "аккаунт удалён")
+    proxy = await keeper.proxy_url(proxy_id)
+    try:
+        started = [r for r in await checkout.cancel_order(state, proxy, rids) if r in rids]
+    except (Unauthorized, NoBearer):
+        return await done("error", LOGIN)
+    except ProxyDown:
+        return await done("error", PROXY)
+    except Exception as e:
+        log.warning("autobuy: отмена ПВЗ %s (%s): %s: %s", cid, title, type(e).__name__, str(e)[:200])
+        return await done("error", "WB не ответил — попробуйте ещё раз")
+    if started:
+        await done("asked", started=started)
+    else:
+        await done("error", "WB не отменил ни одной позиции — возможно, товар уже в ПВЗ: откажитесь при получении")
+    log.info("autobuy: отмена ПВЗ %s (%s): WB начал %d из %d", cid, title, len(started), len(rids))
+    await _refresh_account(acc.id, state, proxy, title)
+
+
+async def fail_cancel_rids(cid: int, e: Exception) -> None:
+    async with Session() as s:
+        await s.execute(update(OC).where(OC.id == cid, OC.status == "pending").values(
+            status="error", error=f"ошибка: {type(e).__name__}", done_at=datetime.now(timezone.utc)))
+        await s.commit()
 
 
 async def on_restart() -> int:
@@ -414,6 +462,8 @@ async def sweep_orphans(s) -> int:
         status="error", error="аккаунт удалён", done_at=now))).rowcount
     n += (await s.execute(update(A).where(A.cancel_state == "pending", A.account_id.is_(None)).values(
         cancel_state="error", cancel_error="аккаунт удалён"))).rowcount
+    n += (await s.execute(update(OC).where(OC.status == "pending", OC.account_id.is_(None)).values(
+        status="error", error="аккаунт удалён", done_at=now))).rowcount
     return n
 
 

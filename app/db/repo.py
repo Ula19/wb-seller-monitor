@@ -394,7 +394,8 @@ async def save_account_state(s, account_id: int, st: dict) -> tuple[int, int]:
     заказов пропало из активных)."""
     was = await s.scalar(select(models.WbAccount.proxy_fails).where(models.WbAccount.id == account_id).with_for_update())
     await s.execute(update(models.WbAccount).where(models.WbAccount.id == account_id).values(
-        state_at=_utcnow(), proxy_fails=0, proxy_fail_at=None, **{k: st[k] for k in ACCOUNT_STATE_FIELDS if k in st}))
+        state_at=_utcnow(), proxy_fails=0, proxy_fail_at=None, **{k: st[k] for k in ACCOUNT_STATE_FIELDS if k in st},
+        **({"orders_at": _utcnow()} if "orders" in st else {})))  # итог отмены: «не отменил» — только по свежим заказам
     if st.get("vb_ops"):  # нет / пусто — история баллов не пришла: накопленное не трогаем
         await upsert_vb_ops(s, account_id, st["vb_ops"])
     if "orders" not in st:

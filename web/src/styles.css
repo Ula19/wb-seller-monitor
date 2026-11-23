@@ -242,6 +242,8 @@ tr.click:hover td { background: var(--bg); }
   .acc-tiles .tile.wide { grid-column: 1 / -1; }
 }
 .btn.ok { background: var(--ok); }
+.btn.bad { background: var(--bad); }
+.btn.ghost.bad-t { color: var(--bad); }
 .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin: 18px 0 14px; overflow-x: auto; }
 .tabs button {
   background: none; border: 0; border-bottom: 2px solid transparent; padding: 8px 12px; cursor: pointer; color: var(--muted);
@@ -392,6 +394,7 @@ tr.click:hover td { background: var(--bg); }
 .wiz-btns .btn { max-width: 100%; white-space: normal; }
 
 .money { font-size: 1.15em; font-weight: 700; }
+.cancel-state { display: grid; gap: 2px; }
 .pay-all { border-bottom: 1px solid var(--line); padding-bottom: 4px; }
 /* «Пункты выдачи» на /accounts */
 .tiles { position: relative; }

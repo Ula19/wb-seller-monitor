@@ -139,9 +139,14 @@ export type BuyOrder = {
   id: number; account_id: number | null; nm: number; name: string | null; qty: number; pvz_id: number; pay_now: boolean;
   price_ok: number; total: number | null; final: number | null; error: string | null; rids: string[];
   status: "pending" | "sending" | "ok" | "error" | "unknown" | "cancelled";
-  cancel_state: "pending" | "error" | null; cancel_error: string | null; created_at: string; done_at: string | null;
-  can_cancel: boolean;
+  cancel_state: "pending" | "asked" | "error" | null; cancel_error: string | null; cancel_at: string | null;
+  created_at: string; done_at: string | null; can_cancel: boolean; cancel: CancelOutcome | null;
 };
+/** Итог запрошенной отмены по факту (архив WB и свежие заказы), штук. */
+export type CancelOutcome = { cancelled: number; failed: number; asked: number };
+export type OrderCancel = { id: number; account_id: number | null; rids: string[]; items: PickupItem[];
+  status: "pending" | "asked" | "error"; started: string[]; error: string | null; created_at: string; done_at: string | null;
+  cancel: CancelOutcome | null };
 /** Копейки → «1 234 ₽» (копейки — только если есть). */
 export const rubk = (k: number | null | undefined) =>
   k == null ? "—" : `${(k / 100).toLocaleString("ru-RU", { maximumFractionDigits: 2 })} ₽`;

@@ -792,8 +792,8 @@ async def _fail_job(m, unknown: str, jid: int, e: Exception) -> None:
 
 
 def _jobs() -> tuple:
-    """Дела очереди прокси по порядку: (модель, условие, сделать, при сбое). Пополнение → оплата → отмена заказа
-    (исправление ошибки: пока ждёт, у заказа заняты лимит постоплаты и деньги) → новый заказ."""
+    """Дела очереди прокси по порядку: (модель, условие, сделать, при сбое). Пополнение → оплата → отмена заказа и позиций
+    ПВЗ (исправление ошибки: пока ждёт, у заказа заняты лимит постоплаты и деньги) → новый заказ."""
     from app.services import autobuy  # autobuy сам импортирует keeper — здесь, чтобы не было круга
     a = models.AutobuyOrder
     return (
@@ -802,6 +802,7 @@ def _jobs() -> tuple:
         (models.OrderPayment, models.OrderPayment.status == "pending", _pay,
          lambda jid, e: _fail_job(models.OrderPayment, PAY_UNKNOWN, jid, e)),
         (a, a.cancel_state == "pending", autobuy.cancel, autobuy.fail_cancel),
+        (models.OrderCancel, models.OrderCancel.status == "pending", autobuy.cancel_rids, autobuy.fail_cancel_rids),
         (a, a.status == "pending", autobuy.place, autobuy.fail_place),
     )
 

@@ -1,7 +1,7 @@
 // Общее для «Аккаунтов» (список) и страницы аккаунта: подписи, лимит, имя, картинки товаров.
 import { useEffect, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, MSK, mskDay, rub, type Account, type Order } from "./api";
+import { api, MSK, mskDay, rub, type Account, type CancelOutcome, type Order } from "./api";
 import { canTopUp, overConfirm } from "./certs";
 
 export const STATUS: Record<string, string> = { active: "активен", relogin: "нужен вход", off: "выключен" };
@@ -202,4 +202,16 @@ export function pickupText(g: Pvz, a: Account, code: string): string {
   }
   const head = [g.address, `${phone ? "7" + phone : ""} ${a.title}`.trim(), `Код : ${code}`];
   return [head.join("\n"), ...[...items.values()].map((it) => `${it.name} - ${it.n} шт\n${it.price} руб/шт`)].join("\n\n");
+}
+
+/** Итог запрошенной отмены: WB принял заявку (reject_initialized) — это ещё не «отменено»; итог — по архиву и заказам. */
+export function CancelState({ c }: { c: CancelOutcome }) {
+  return (
+    <div className="small cancel-state">
+      {c.cancelled > 0 && <span className="ok-t">✓ Отменено {c.cancelled} шт.</span>}
+      {c.asked > 0 && <span className="muted"><span className="spin" /> Отмена запрошена: {c.asked} шт. — ждём, пока WB её проведёт…</span>}
+      {c.failed > 0 && <span className="bad-t">WB не отменил {c.failed} шт. — товар уже собирают или везут; если он в ПВЗ —
+        откажитесь при получении</span>}
+    </div>
+  );
 }

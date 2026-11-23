@@ -192,6 +192,7 @@ class WbAccount(Base):
     pickup_code_date: Mapped[date | None] = mapped_column(Date, nullable=True)  # день МСК, на который код (до 00:00)
     # история заказов загружена целиком (до последней страницы) — дальше раз в час только догрузка новых
     purchases_full_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    orders_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)  # когда сохранили заказы
     visit_error: Mapped[str | None] = mapped_column(String(128), nullable=True)  # почему визит в браузере не удался
     notices_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)  # когда брали ленту колокольчика
     proxy_fail_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -440,7 +441,8 @@ class AutobuyOrder(Base):
 
     status: pending → sending (коммит прямо перед отправкой) → ok | error (не отправляли или WB отказал — текст WB
     как есть; после status 3/4/7 заказ мог создаться, rids есть) | unknown (мог создаться — не повторяется сам).
-    cancelled — WB начал отмену по всем rids. cancel_state: pending (ждёт worker) | error (cancel_error) | null.
+    cancelled — только старые заказы (до 0025). cancel_state: pending (ждёт worker) | asked (WB начал отмену по всем rids —
+    это лишь «запрошена», итог считает api: архив 64 / rid висит в заказах) | error (cancel_error) | null.
     """
 
     __tablename__ = "autobuy_orders"
@@ -463,6 +465,27 @@ class AutobuyOrder(Base):
     rids: Mapped[list] = mapped_column(JSONB, default=list, server_default="[]")
     cancel_state: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
     cancel_error: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    cancel_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)  # когда WB начал отмену
+    created_at: Mapped[datetime] = _now()
+    done_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class OrderCancel(Base):
+    """Отмена позиций из группы ПВЗ на странице аккаунта: api пишет pending (rids — только из account_orders аккаунта),
+    worker в очереди прокси шлёт отмену. asked — WB начал отмену started (итог считает api, как у autobuy_orders);
+    error — ничего не начал / сбой."""
+
+    __tablename__ = "order_cancels"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.telegram_id", ondelete="CASCADE"))
+    account_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("wb_accounts.id", ondelete="SET NULL"), nullable=True, index=True)
+    rids: Mapped[list] = mapped_column(JSONB)
+    items: Mapped[list] = mapped_column(JSONB)  # [{name, n, price, sum}] — снимок для окна, ₽
+    status: Mapped[str] = mapped_column(String(16), default="pending", server_default="pending", index=True)
+    started: Mapped[list] = mapped_column(JSONB, default=list, server_default="[]")
+    error: Mapped[str | None] = mapped_column(String(256), nullable=True)
     created_at: Mapped[datetime] = _now()
     done_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 

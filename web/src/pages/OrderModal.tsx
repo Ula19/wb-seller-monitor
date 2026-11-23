@@ -6,7 +6,7 @@ import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError, rubk, type Account, type BuyOrder, type PickupPoint, type Preview, type PreviewAccount,
   type PreviewLine, type ProductCard, type Quote } from "../api";
-import { Modal } from "../accounts";
+import { CancelState, Modal } from "../accounts";
 import { StepAccounts } from "./CertModal";
 import { CertAdd } from "./PayModal";
 
@@ -302,10 +302,10 @@ function BuyResult({ o, cancel }: { o: BuyOrder; cancel: (o: BuyOrder) => void }
       {o.name ?? `Товар ${o.nm}`} — {pcs(o.qty)}
       {(st === "pending" || st === "sending") && <span className="muted"> · <span className="spin" /> заказываю…</span>}
       {st === "ok" && <span className="ok-t"> · заказано, {o.pay_now ? "оплачено Кошельком" : "оплата при получении"}</span>}
-      {st === "cancelled" && <span className="muted"> · заказ отменён</span>}
       {(st === "error" || st === "unknown") && o.error && <div className="small">{o.error}</div>}
       {o.cancel_state === "pending" && <div className="small muted"><span className="spin" /> Отменяю…</div>}
       {o.cancel_state === "error" && <div className="small bad-t">Отмена не прошла: {o.cancel_error}</div>}
+      {o.cancel && <CancelState c={o.cancel} />}
       {o.can_cancel && <div><button className="link" onClick={() => cancel(o)}>Отменить заказ</button></div>}
     </li>
   );
@@ -315,7 +315,8 @@ function Results({ ids, all, opts, onClose }: { ids: number[]; all: Account[]; o
   const qc = useQueryClient();
   const done = (o: BuyOrder) => FINAL.includes(o.status) && o.cancel_state !== "pending";
   const q = useQuery({ queryKey: ["buy", ids.join()], queryFn: () => api<BuyOrder[]>(`/order/status?${ids.map((i) => `ids=${i}`).join("&")}`),
-    refetchInterval: (x) => (x.state.data?.length === ids.length && x.state.data.every(done) ? false : 1500) });
+    // отмену запросили — опрашиваем, пока итог не станет известен (архив / свежие заказы)
+    refetchInterval: (x) => (x.state.data?.length === ids.length && x.state.data.every((o) => done(o) && !o.cancel?.asked) ? false : 1500) });
   const list = q.data ?? [];
   const finished = list.length === ids.length && list.every(done);
   const okN = list.filter((o) => o.status === "ok").length;

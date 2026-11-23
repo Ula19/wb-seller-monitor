@@ -901,7 +901,8 @@ QUOTE_TTL = timedelta(hours=1)  # старые запросы к worker'у чи�
 PREVIEW_TTL = timedelta(minutes=10)  # заказ — только по свежему предпросмотру
 ORDER_QTY_MAX = 100
 AUTOBUY_FIELDS = ("id", "account_id", "nm", "name", "qty", "pvz_id", "pay_now", "price_ok", "total", "final", "status",
-                "error", "rids", "cancel_state", "cancel_error", "created_at", "done_at")
+                "error", "rids", "cancel_state", "cancel_error", "cancel_at", "created_at", "done_at")
+CANCEL_CHECK = timedelta(minutes=3)  # WB отменяет за ~40–50 с: заказы, перечитанные позже, — уже итог
 
 
 def _rub(kop: int | None) -> str:
@@ -1087,16 +1088,34 @@ async def order_place(body: PlaceIn, u=Depends(user), s=Depends(db)):
 
 
 def _can_cancel(o: models.AutobuyOrder) -> bool:
-    """Заказ мог создаться (ok, unknown, error после status 3/4/7 — у них есть rids) и отмена ещё не идёт."""
-    return bool(o.rids) and o.status in ("ok", "error", "unknown") and o.cancel_state != "pending"
+    """Заказ мог создаться (ok, unknown, error после status 3/4/7 — у них есть rids), отмену не просили или она не
+    прошла (error). asked — повтор бесполезен: WB заявку принял, склад уже собирает."""
+    return bool(o.rids) and o.status in ("ok", "error", "unknown") and o.cancel_state in (None, "error")
+
+
+async def _cancel_outcome(s, account_id: int | None, rids: list[str], at: datetime | None) -> dict:
+    """Итог запрошенной отмены по факту, без WB (опрос заказов и архива и так идёт): в архиве отменой — cancelled; в
+    архиве иначе (получен) или всё ещё в заказах, перечитанных позже at + CANCEL_CHECK, — failed; иначе — asked."""
+    p, o = models.AccountPurchase, models.AccountOrder
+    arch = dict((await s.execute(select(p.rid, p.status).where(p.account_id == account_id, p.rid.in_(rids)))).all())
+    live = set(await s.scalars(select(o.rid).where(o.account_id == account_id, o.rid.in_(rids))))
+    seen = await s.scalar(select(models.WbAccount.orders_at).where(models.WbAccount.id == account_id))
+    fresh = bool(seen and at and seen > at + CANCEL_CHECK)
+    out = {"cancelled": 0, "failed": 0, "asked": 0}
+    for r in rids:
+        out["cancelled" if arch.get(r) in account_api.PURCHASE_CANCELLED else
+            "failed" if r in arch or (r in live and fresh) else "asked"] += 1
+    return out
 
 
 @app.get("/api/order/status")
 async def order_status(ids: list[int] = Query(..., max_length=500), u=Depends(user), s=Depends(db)):
-    """Итог заказов для окна (опрос раз в 1–2 с) + можно ли отменить."""
+    """Итог заказов для окна (опрос раз в 1–2 с) + можно ли отменить + итог запрошенной отмены."""
     a = models.AutobuyOrder
     rows = await s.scalars(select(a).where(a.id.in_(ids), a.user_id == u.telegram_id).order_by(a.id))
-    return [{**{f: getattr(x, f) for f in AUTOBUY_FIELDS}, "can_cancel": _can_cancel(x)} for x in rows]
+    return [{**{f: getattr(x, f) for f in AUTOBUY_FIELDS}, "can_cancel": _can_cancel(x),
+             "cancel": await _cancel_outcome(s, x.account_id, x.rids, x.cancel_at) if x.cancel_state == "asked" else None}
+            for x in rows]
 
 
 class CancelIn(BaseModel):
@@ -1115,6 +1134,50 @@ async def order_cancel(body: CancelIn, u=Depends(user), s=Depends(db)):
     o.cancel_state, o.cancel_error = "pending", None
     await s.commit()
     return {"id": o.id}
+
+
+# ---------- отмена позиций из группы ПВЗ (в WB ходит worker: order_cancels) ----------
+CANCEL_FIELDS = ("id", "account_id", "rids", "items", "status", "started", "error", "created_at", "done_at")
+
+
+class OrderCancelIn(BaseModel):
+    account_id: int
+    rids: list[str] = Field(min_length=1, max_length=500)
+
+
+@app.post("/api/order-cancels", status_code=201)
+async def add_order_cancel(body: OrderCancelIn, u=Depends(user), s=Depends(db)):
+    """Отмена позиций аккаунта в очередь. rids — только из его активных заказов; строка аккаунта под FOR UPDATE —
+    двойной клик не создаст вторую отмену тех же rids."""
+    acc = await s.scalar(select(models.WbAccount).where(
+        models.WbAccount.id == body.account_id, models.WbAccount.user_id == u.telegram_id).with_for_update())
+    if acc is None:
+        raise HTTPException(404, "нет такого аккаунта")
+    if acc.status != "active":
+        raise HTTPException(422, "аккаунт не активен — нужен вход")
+    rids = list(dict.fromkeys(body.rids))
+    orders = {x.rid: x for x in await s.scalars(select(models.AccountOrder).where(
+        models.AccountOrder.account_id == acc.id, models.AccountOrder.rid.in_(rids)))}
+    if len(orders) != len(rids):
+        raise HTTPException(409, "товар пропал из заказов — обновите аккаунт")
+    c = models.OrderCancel
+    busy = await s.scalars(select(c.rids).where(c.account_id == acc.id, c.status == "pending"))
+    if set(rids) & {r for x in busy for r in x}:
+        raise HTTPException(409, "отмена уже идёт — дождитесь итога")
+    row = c(user_id=u.telegram_id, account_id=acc.id, rids=rids, items=pickup_items([orders[r] for r in rids]))
+    s.add(row)
+    await s.commit()
+    return {"id": row.id}
+
+
+@app.get("/api/order-cancels")
+async def order_cancels(ids: list[int] = Query(..., max_length=100), u=Depends(user), s=Depends(db)):
+    """Статус отмен для окна (опрос): asked — с итогом по факту (cancel), как у отмены заказа."""
+    c = models.OrderCancel
+    rows = await s.scalars(select(c).where(c.id.in_(ids), c.user_id == u.telegram_id).order_by(c.id))
+    return [{**{f: getattr(x, f) for f in CANCEL_FIELDS},
+             "cancel": await _cancel_outcome(s, x.account_id, x.started, x.done_at) if x.status == "asked" else None}
+            for x in rows]
 
 
 # ---------- «Общий забор» (в Telegram шлёт worker: pickup_sends) ----------

@@ -3,9 +3,9 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, ApiError, rub, time, type AccountFull, type BalanceOp, type Order, type Purchase, type VbOp } from "../api";
+import { api, ApiError, rub, time, type AccountFull, type BalanceOp, type Order, type OrderCancel, type Purchase, type VbOp } from "../api";
 import {
-  Blocked, byPvz, CertCode, ddmm, GROUP, Limit, lines, Period, pickupText, points, STATUS, StatusDot, Thumb, Title, useImg,
+  Blocked, byPvz, CancelState, CertCode, Modal, ddmm, GROUP, Limit, lines, Period, pickupText, points, STATUS, StatusDot, Thumb, Title, useImg,
   usePeriod, visible, when, type Pvz,
 } from "../accounts";
 import LoginModal, { type Relogin } from "./LoginModal";
@@ -52,6 +52,69 @@ function useSync(a: AccountFull) {
 }
 
 // ---------- Заказы ----------
+/** Отмена позиций группы ПВЗ (и в пути, и в ПВЗ — что взять, решает WB): строки «× N» с галочками → очередь worker'а;
+ *  итог — по факту (архив WB / свежие заказы), как у отмены из окна заказа. */
+function PvzCancel({ a, g, onClose }: { a: AccountFull; g: Pvz; onClose: () => void }) {
+  const qc = useQueryClient();
+  const rows = lines(visible(g.orders));
+  const [off, setOff] = useState<Set<string>>(new Set());  // снятые галочки (ключи строк)
+  const [id, setId] = useState<number | null>(null);
+  const [error, setError] = useState("");
+  const chosen = rows.filter((l) => !off.has(l.key)).flatMap((l) => l.orders);
+  const sum = chosen.reduce((s, o) => s + (o.price ?? 0), 0);
+  const allBox = useRef<HTMLInputElement>(null);
+  useEffect(() => { if (allBox.current) allBox.current.indeterminate = off.size > 0 && off.size < rows.length; });
+  const q = useQuery({ queryKey: ["order-cancel", id], enabled: id != null,
+    queryFn: () => api<OrderCancel[]>(`/order-cancels?ids=${id}`).then((x) => x[0]),
+    refetchInterval: (x) => { const c = x.state.data; return c && (c.status === "error" || (c.status === "asked" && !c.cancel?.asked)) ? false : 2000; } });
+  const c = q.data;
+  useEffect(() => { if (c && c.status !== "pending") qc.invalidateQueries({ queryKey: ["accounts"] }); },
+    [c?.status, c?.cancel?.cancelled, c?.cancel?.failed]);
+  const go = async () => {
+    if (!confirm(`Отменить ${chosen.length} шт. на ${rub(sum)} на аккаунте ${a.title}?`
+      + (chosen.some((o) => o.paid) ? "\n\nОплаченные — деньги вернутся на Кошелёк." : ""))) return;
+    setError("");
+    try { setId((await api<{ id: number }>("/order-cancels", { method: "POST", body: { account_id: a.id, rids: chosen.map((o) => o.rid) } })).id); }
+    catch (e) { setError(e instanceof ApiError ? e.message : "ошибка"); }
+  };
+  return (
+    <Modal label="Отменить товары" onClose={onClose}>
+      <h2>{a.title} · {g.address}</h2>
+      <p className="muted small">Можно отменить и то, что едет, и то, что уже в пункте выдачи — WB сам решит, что успеет отменить.</p>
+      <ul className="pay-items">
+        {rows.length > 1 && <li className="pay-all"><label>
+          <input ref={allBox} type="checkbox" checked={!off.size} disabled={id != null}
+            onChange={() => setOff(off.size ? new Set() : new Set(rows.map((l) => l.key)))} /> Выбрать все</label></li>}
+        {rows.map(({ key, orders, first: o }) => (
+          <li key={key}><label>
+            <input type="checkbox" checked={!off.has(key)} disabled={id != null} onChange={() => {
+              const s = new Set(off); s.has(key) ? s.delete(key) : s.add(key); setOff(s);
+            }} />
+            <span>{o.name ?? `арт. ${o.nm_id}`}{orders.length > 1 && <b> × {orders.length}</b>}{" "}
+              <span className={`pill g${o.group_id ?? 0}`}>{o.status_name ?? GROUP[o.group_id ?? 0] ?? "—"}</span>{" "}
+              <span className={o.paid === false ? "badge out" : "badge in"}>{o.paid === false ? "Не оплачен" : o.paid ? "Оплачен" : "оплата ?"}</span></span>
+            <b className="num">{rub(o.price)}{orders.length > 1 && <span className="muted small"> за шт.</span>}</b></label></li>
+        ))}
+      </ul>
+      {c?.status === "pending" || (id != null && !c) ? <div className="small"><span className="spin" /> Отменяю…</div>
+        : c?.status === "error" ? <div className="small bad-t">❌ {c.error}</div>
+        : c?.status === "asked" && <>
+          {c.started.length < c.rids.length && <div className="small up-t">WB начал отмену {c.started.length} из {c.rids.length} шт.;
+            остальные не взял — возможно, уже в ПВЗ: откажитесь при получении</div>}
+          {c.cancel && <CancelState c={c.cancel} />}
+        </>}
+      {error && <p className="err">{error}</p>}
+      <div className="wiz-foot">
+        <span className="small muted">Выбрано: {chosen.length} шт. на {rub(sum)}</span>
+        <span className="wiz-btns">
+          <button className="link" onClick={onClose}>Закрыть</button>
+          <button className="btn bad" disabled={!chosen.length || id != null} onClick={go}>Отменить {chosen.length} шт.</button>
+        </span>
+      </div>
+    </Modal>
+  );
+}
+
 function PickupButton({ g, a, sync }: { g: Pvz; a: AccountFull; sync: ReturnType<typeof useSync> }) {
   const [asked, setAsked] = useState(false);  // ждём код, который запросили отсюда
   const [copied, setCopied] = useState(false);
@@ -78,6 +141,7 @@ function OrdersTab({ a, sync }: { a: AccountFull; sync: ReturnType<typeof useSyn
   const img = useImg();
   const [shown, setShown] = useState<Set<number>>(new Set());  // ПВЗ, где показываем скрытые
   const [paying, setPaying] = useState<number | null>(null);  // ПВЗ, где открыто окно оплаты
+  const [cancelling, setCancelling] = useState<Pvz | null>(null);  // снимок группы: после отмены позиции пропадут из заказов
   // rid с точками (eAe.dc18….0.0) — в URL кодируем; «Скрыть» строки = все её позиции
   const toggle = useMutation({
     mutationFn: (os: Order[]) => Promise.all(os.map((o) => api(`/accounts/${a.id}/orders/${encodeURIComponent(o.rid)}`,
@@ -125,6 +189,7 @@ function OrdersTab({ a, sync }: { a: AccountFull; sync: ReturnType<typeof useSyn
               {hidden > 0 && <span className="muted small">Скрытых: {hidden} · <button className="link" onClick={() => {
                 const s = new Set(shown); s.has(g.id) ? s.delete(g.id) : s.add(g.id); setShown(s);
               }}>{shown.has(g.id) ? "убрать" : "показать"}</button></span>}
+              {vis.length > 0 && <button className="btn ghost bad-t" onClick={() => setCancelling(g)}>Отменить</button>}
               {due > 0 && <button className="btn" onClick={() => setPaying(g.id)}>Оплатить {rub(due)}</button>}
               {ready > 0 && <PickupButton g={g} a={a} sync={sync} />}
             </div>
@@ -134,6 +199,7 @@ function OrdersTab({ a, sync }: { a: AccountFull; sync: ReturnType<typeof useSyn
       {sync.err && <p className="err">{sync.err}</p>}
       {paying != null && byPvz(a.orders).some((g) => g.id === paying) &&
         <PvzPay a={a} g={byPvz(a.orders).find((g) => g.id === paying)!} onClose={() => setPaying(null)} />}
+      {cancelling && <PvzCancel a={a} g={cancelling} onClose={() => setCancelling(null)} />}
     </div>
   );
 }
