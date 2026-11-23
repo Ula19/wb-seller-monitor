@@ -189,17 +189,17 @@ export function lines(orders: Order[]): Line[] {
   return [...m.values()];
 }
 
-/** Текст «Готовы забрать» для буфера обмена — только то, что ждёт в ПВЗ, без скрытых; сумма — за все штуки. */
+/** Текст «Готовы забрать» для буфера обмена — только то, что ждёт в ПВЗ, без скрытых; строка — артикул × цена за шт
+ *  (тот же текст шлёт worker: app/pickup.py). */
 export function pickupText(g: Pvz, a: Account, code: string): string {
   const phone = (a.phone ?? "").replace(/\D/g, "").slice(-10);
-  const items = new Map<string, { name: string; n: number; sum: number }>();
+  const items = new Map<string, { name: string; n: number; price: number }>();
   for (const o of g.orders.filter((o) => o.group_id === 5 && !o.hidden)) {
-    const k = String(o.nm_id ?? o.rid);
-    const it = items.get(k) ?? { name: o.name ?? `арт. ${o.nm_id}`, n: 0, sum: 0 };
+    const k = `${o.nm_id ?? o.rid}|${o.price}`;
+    const it = items.get(k) ?? { name: o.name ?? `арт. ${o.nm_id}`, n: 0, price: o.price ?? 0 };
     it.n += 1;
-    it.sum += o.price ?? 0;
     items.set(k, it);
   }
   const head = [g.address, `${phone ? "7" + phone : ""} ${a.title}`.trim(), `Код : ${code}`];
-  return [head.join("\n"), ...[...items.values()].map((it) => `${it.name} - ${it.n} шт\n${it.sum} руб`)].join("\n\n");
+  return [head.join("\n"), ...[...items.values()].map((it) => `${it.name} - ${it.n} шт\n${it.price} руб/шт`)].join("\n\n");
 }

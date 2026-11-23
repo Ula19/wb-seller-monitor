@@ -462,6 +462,8 @@ button.tile[aria-expanded="true"] { border-color: var(--accent); }
 .zabor { padding: 0; max-height: 60vh; overflow: auto; }
 .zabor-pvz + .zabor-pvz { border-top: 1px solid var(--line); }
 .zabor-head { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; padding: 10px 14px; background: var(--bg); }
+.zabor-head label { display: flex; gap: 10px; align-items: center; }
+.zabor-arrow { width: 18px; text-align: center; }
 .zabor-acc { display: flex; gap: 10px; align-items: flex-start; padding: 8px 14px 8px 36px; }
 .zabor-acc + .zabor-acc { border-top: 1px solid var(--line); }
 .zabor-name { flex: 1; min-width: 0; display: grid; gap: 2px; }

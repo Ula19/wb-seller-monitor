@@ -65,6 +65,7 @@ function Board({ all, onClose, onSent }: { all: Account[]; onClose: () => void; 
   const board = useQuery({ queryKey: ["pickup-board"], queryFn: () => api<PickupBoard>("/pickups/board"), gcTime: 0 });
   const to = useQuery({ queryKey: ["pickup-to"], queryFn: () => api<{ to: number[] }>("/settings/pickup") });
   const [picked, setPicked] = useState<Set<string>>(new Set());
+  const [open, setOpen] = useState<Set<number>>(new Set());  // раскрытые ПВЗ; при открытии окна все свёрнуты
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const rows = (board.data ?? []).flatMap((o) => o.accounts.map((a) => ({ o, a, k: key(a.account_id, o.office_id) })));
@@ -90,6 +91,8 @@ function Board({ all, onClose, onSent }: { all: Account[]; onClose: () => void; 
       <div className="filters">
         <button className="link" onClick={() => set(rows.map((r) => r.k), true)}>Выбрать все</button>
         <button className="link" onClick={() => setPicked(new Set())}>Снять выбор</button>
+        <button className="link" onClick={() => setOpen(new Set((board.data ?? []).map((o) => o.office_id)))}>Развернуть все</button>
+        <button className="link" onClick={() => setOpen(new Set())}>Свернуть все</button>
       </div>
       {board.isLoading ? <p className="muted"><span className="spin" /> Загрузка…</p>
         : !rows.length ? <p className="empty">Нечего забирать: в пунктах выдачи ничего не ждёт</p>
@@ -97,15 +100,21 @@ function Board({ all, onClose, onSent }: { all: Account[]; onClose: () => void; 
           {board.data!.map((o) => {
             const ks = o.accounts.map((a) => key(a.account_id, o.office_id));
             const n = ks.filter((k) => picked.has(k)).length;
+            const on = open.has(o.office_id);
             return (
               <div key={o.office_id} className="zabor-pvz">
-                <label className="zabor-head">
-                  <input type="checkbox" aria-label={o.address} checked={n === ks.length}
-                    ref={(el) => { if (el) el.indeterminate = n > 0 && n < ks.length; }} onChange={(e) => set(ks, e.target.checked)} />
-                  <b>{o.address}</b>
+                <div className="zabor-head">
+                  <button className="link zabor-arrow" aria-expanded={on} aria-label={`Показать аккаунты ${o.address}`}
+                    onClick={() => setOpen((p) => { const x = new Set(p); on ? x.delete(o.office_id) : x.add(o.office_id); return x; })}>
+                    {on ? "▾" : "▸"}</button>
+                  <label>
+                    <input type="checkbox" aria-label={o.address} checked={n === ks.length}
+                      ref={(el) => { if (el) el.indeterminate = n > 0 && n < ks.length; }} onChange={(e) => set(ks, e.target.checked)} />
+                    <b>{o.address}</b>
+                  </label>
                   <span className="muted small">{o.accounts.length} акк. · {pcs(o.accounts.reduce((s, a) => s + a.n, 0))}</span>
-                </label>
-                {o.accounts.map((a) => {
+                </div>
+                {on && o.accounts.map((a) => {
                   const k = key(a.account_id, o.office_id);
                   return (
                     <label key={k} className="zabor-acc">
