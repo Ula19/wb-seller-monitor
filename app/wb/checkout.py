@@ -10,25 +10,31 @@ stick → POST wbxoofex api/v10/order?sticker= → опрос v3/status. Тол�
 import asyncio
 import base64
 import json
+import logging
 import re
 import time
 from datetime import datetime, timedelta, timezone
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from app.wb.account_api import (GRADE_URL, ORDERS_URL, PRE_SEND, WWW, Unauthorized, _client, bearer, parse_grade,
-                                www_storage)
+from app.wb.account_api import (GRADE_URL, ORDERS_URL, PRE_SEND, STATUSES_URL, WWW, Unauthorized, _client,
+                                apply_statuses, bearer, parse_grade, www_storage)
 from app.wb.web_session import ProxyDown
+
+log = logging.getLogger(__name__)
 
 X = "https://wbxoofex.wildberries.ru"
 STICK_URL = X + "/api/v2/stick"
 ORDER_URL = X + "/api/v10/order?sticker={}"
 STATUS_URL = X + "/api/v3/status?id={}&sticker={}"
 REJECT_URL = X + "/api/v3/rids/client/reject"
+PAID_URL = "https://user-grade.wildberries.ru/api/v1/paid-services"  # цена и подпись «платной» отмены
 PAY_LATER, PAY_NOW = 20, 10  # payment.pay_mode: «при получении» / Кошельком сразу
 PAY_TYPE = 12
 ORDER_FLAGS = 4268067  # верхний flags тела — у сайта всегда такой (3 заказа в HAR)
-REJECT_REASON = 12  # причину отмены сайт ставит сам
+# причины отмены (JS сайта, SCOUT 2026-11-24): «оформлен» — бесплатная 12 (11, если can_reject_delayed); уже
+# собирают / везут / в ПВЗ — «платная» 13 с подписанной ценой из paid-services (у наших аккаунтов 0 ₽)
+REJECT_FREE, REJECT_DELAYED, REJECT_PAID = 12, 11, 13
 GRADE_TTL_MS = 300_000  # user_grade.expire: сейчас + 5 мин
 STATUS_TRIES, STATUS_SEC = 30, 1  # v3/status: оплата Кошельком — 6 × «ждать» (~7 с), даём до ~30 с
 RESAVES = 2  # сколько раз WB может попросить пересохранить с новым стикером
@@ -271,13 +277,57 @@ async def _confirm(call, auth, uid, sticker, rids, pay_now, sleep) -> dict:
     return {"status": "ok", "error": None, "rids": [r.get("uid") for r in wb] or rids}
 
 
-async def cancel_order(state: dict, proxy: str | None, rids: list[str]) -> list[str]:
-    """Отмена позиций (бесплатно; деньги Кошелька возвращаются ≤ 30 с, лимит скидки — нет). → rid'ы, отмену
-    которых WB начал (reject_initialized)."""
-    async with _client(state, proxy) as (call, _, with_vkey):
-        d = await call("POST", REJECT_URL, headers=_order_headers(state, with_vkey),
-                       data=json.dumps({"rejects": [{"reason": REJECT_REASON, "rid": r} for r in rids]}))
-    return list((d or {}).get("reject_initialized") or [])
+async def _reasons(call, auth, rids: list[str]) -> dict[str, int]:
+    """Причина отмены каждого rid, как у сайта: свежие v2/orders + status-tracker. «Оформлен» (group 1, записи
+    статуса ещё нет) — 12/11; со сроком хранения (в ПВЗ) или дальше «оформлен» — 13. Нет в заказах — только что
+    оформлен и ещё не виден: 12, как раньше."""
+    # ponytail: v2/orders — первые 100 заказов (как в опросе); у аккаунта больше — дальние rid уйдут как «не видны» (12)
+    wb = {r.get("uid"): r for o in (await call("GET", ORDERS_URL, headers=auth) or {}).get("data") or []
+          for r in o.get("rids") or []}
+    ask = [{"rid": r} for r in rids if r in wb and not wb[r].get("expiry_dt")]
+    if ask:
+        apply_statuses(ask, await call("POST", STATUSES_URL, headers=auth, json={"ids": [o["rid"] for o in ask]}))
+    fresh = {o["rid"] for o in ask if o["group_id"] in (1, None)}
+    return {r: REJECT_PAID if r in wb and r not in fresh else
+            REJECT_DELAYED if (wb.get(r) or {}).get("can_reject_delayed") else REJECT_FREE for r in rids}
+
+
+def _paid_ug(d: dict) -> tuple[dict | None, str | None]:
+    """paid-services → (paid_cancellation_ug для тела reject | None, почему 13 не шлём). Шлём только при цене 0 и
+    подписи WB; поля — как пришли (подпись WB, своё не подставляем)."""
+    pc = d.get("paid_cancellation") or {}
+    rub = (pc.get("currencies") or {}).get("RUB")
+    if isinstance(rub, int) and rub > 0:
+        return None, f"отмена платная: {rub / 100:g} ₽ — отмените на сайте WB"
+    if rub != 0 or not (pc.get("sign") and d.get("uuid") and d.get("expires_at")):
+        return None, "WB не дал цену и подпись платной отмены — отмените на сайте WB"
+    return {"currencies": pc["currencies"], "sign": pc["sign"], "expires_at": d["expires_at"], "uuid": d["uuid"]}, None
+
+
+async def cancel_order(state: dict, proxy: str | None, rids: list[str]) -> tuple[list[str], str | None]:
+    """Отмена позиций: «оформленные» — бесплатной (12/11), остальные — «платной» 13 (только при цене 0 ₽; деньги
+    Кошелька возвращаются ≤ 30 с, лимит скидки — нет). Два вида — два запроса. → (rid'ы, отмену которых WB начал
+    (reject_initialized — заявку приняли, итог по факту), пояснение для окна: ответ WB или почему 13 не слали)."""
+    started, notes = [], []
+    async with _client(state, proxy) as (call, auth, with_vkey):
+        reasons = await _reasons(call, auth, rids)
+        paid = [r for r in rids if reasons[r] == REJECT_PAID]
+        parts = [([r for r in rids if reasons[r] != REJECT_PAID], {})]
+        if paid:
+            ug, why = _paid_ug(await call("GET", PAID_URL, headers=auth) or {})
+            parts.append((paid, {"paid_cancellation_ug": ug}) if ug else ([], {}))
+            notes += [why] if why else []
+        for part, extra in parts:
+            if not part:
+                continue
+            d = await call("POST", REJECT_URL, headers=_order_headers(state, with_vkey), data=json.dumps(
+                {"rejects": [{"reason": reasons[r], "rid": r} for r in part], **extra})) or {}
+            started += d.get("reject_initialized") or []
+            if d.get("error") or d.get("reject_details") or d.get("reject_not_initialized"):
+                log.info("отмена (%s): не начато %s, details %s, error %s", "платная" if extra else "бесплатная",
+                         d.get("reject_not_initialized"), str(d.get("reject_details"))[:300], d.get("error"))
+            notes += [str(x)[:150] for x in (d.get("error"), d.get("reject_details")) if x]
+    return started, "; ".join(notes)[:200] or None
 
 
 if __name__ == "__main__":  # self-check: тело как у сайта (HAR Яны 14.11, Кошельком сразу), подпись, ответы WB
@@ -421,7 +471,8 @@ if __name__ == "__main__":  # self-check: тело как у сайта (HAR Я�
 
             async def request(self, method, url, **kw):
                 key = next(k for k, u in (("stick", STICK_URL), ("order", X + "/api/v10/order"),
-                                          ("status", X + "/api/v3/status"), ("orders", ORDERS_URL), ("reject", REJECT_URL))
+                                          ("status", X + "/api/v3/status"), ("orders", ORDERS_URL), ("reject", REJECT_URL),
+                                          ("statuses", STATUSES_URL), ("paid", PAID_URL))
                            if url.startswith(u))
                 sent.append((key, url, kw))
                 q = script.get(key) or []
@@ -534,12 +585,43 @@ if __name__ == "__main__":  # self-check: тело как у сайта (HAR Я�
                 raise AssertionError("ValueError")
             except ValueError:
                 assert [k for k, *_ in sent] == ["stick"]
-            # отмена
-            S, sent = session(reject=[{"reject_initialized": rids[:1]}])
+            # отмена: «оформлен» (group 1 / нет записи / нет в заказах) — 12 (can_reject_delayed — 11), дальше — 13
+            r = [f"r{i}" for i in range(6)]
+            ORD = {"data": [{"rids": [{"uid": r[0]}, {"uid": r[1], "can_reject_delayed": True}, {"uid": r[2]},
+                                      {"uid": r[3]}, {"uid": r[4], "expiry_dt": 1795000000}]}]}
+            ST = [[{"rid": r[0], "group_id": "1", "date": 1}], [{"rid": r[1], "group_id": "1", "date": 1}],
+                  [{"rid": r[2], "group_id": "1", "date": 1}, {"rid": r[2], "group_id": "2", "date": 2}]]  # r3 — записи нет
+            PAID = {"uuid": "fb1a", "user_id": "47345296", "expires_at": 1794331115,
+                    "paid_cancellation": {"currencies": {"RUB": 0, "KZT": 0}, "sign": "56a1"}}
+            UG = {"currencies": {"RUB": 0, "KZT": 0}, "sign": "56a1", "expires_at": 1794331115, "uuid": "fb1a"}
+
+            async def cancel(**script):
+                S, sent = session(orders=[ORD], statuses=[ST], **script)
+                with patch.object(account_api, "AsyncSession", S):
+                    res = await cancel_order(st, None, r)
+                return res, sent, [json.loads(k["data"]) for key, _, k in sent if key == "reject"]
+            res, sent, bodies = await cancel(paid=[PAID], reject=[{"reject_initialized": r[:2]},
+                                                                   {"reject_initialized": r[2:3], "error": "x"}])
+            assert res == (r[:3], "x"), res
+            assert bodies == [{"rejects": [{"reason": 12, "rid": r[0]}, {"reason": 11, "rid": r[1]},
+                                           {"reason": 12, "rid": r[3]}, {"reason": 12, "rid": r[5]}]},
+                              {"rejects": [{"reason": 13, "rid": r[2]}, {"reason": 13, "rid": r[4]}],
+                               "paid_cancellation_ug": UG}], bodies
+            assert [x[2]["json"] for x in sent if x[0] == "statuses"] == [{"ids": r[:4]}]  # в ПВЗ (срок) — без трекера
+            assert sent[-1][2]["headers"]["deviceid"] == "site_dev" and "Bearer" in sent[-1][2]["headers"]["Authorization"]
+            # «платная» не бесплатна или без подписи — 13 не шлём, бесплатные шлём, причина — в пояснении
+            for p, why in (({**PAID, "paid_cancellation": {"currencies": {"RUB": 15000}, "sign": "s"}}, "отмена платная: 150 ₽"),
+                           ({**PAID, "paid_cancellation": {"currencies": {"RUB": 0}}}, "WB не дал цену"),
+                           ({**PAID, "paid_cancellation": {"currencies": {"KZT": 0}, "sign": "s"}}, "WB не дал цену"),
+                           ({**PAID, "uuid": None}, "WB не дал цену"), ({}, "WB не дал цену")):
+                res, sent, bodies = await cancel(paid=[p], reject=[{"reject_initialized": [r[0]], "reject_details": {"a": 1}}])
+                assert res[0] == [r[0]] and res[1].startswith(why) and res[1].endswith("{'a': 1}"), (p, res)
+                assert len(bodies) == 1 and {x["reason"] for x in bodies[0]["rejects"]} == {11, 12}, bodies
+            # только «оформленные» — paid-services не спрашиваем
+            S, sent = session(orders=[ORD], statuses=[ST], reject=[{"reject_initialized": [r[0]]}])
             with patch.object(account_api, "AsyncSession", S):
-                assert await cancel_order(st, None, rids) == rids[:1]
-            assert json.loads(sent[0][2]["data"]) == {"rejects": [{"reason": 12, "rid": r} for r in rids]}
-            assert sent[0][2]["headers"]["deviceid"] == "site_dev"
+                assert await cancel_order(st, None, [r[0]]) == ([r[0]], None)
+            assert [k for k, *_ in sent] == ["orders", "statuses", "reject"]
 
     asyncio.run(main())
     print("ok")

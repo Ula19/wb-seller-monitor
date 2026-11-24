@@ -373,7 +373,8 @@ async def place(oid: int) -> None:
 
 async def cancel(oid: int) -> None:
     """Отмена позиций заказа (rids). WB начал отмену по всем → cancel_state asked; иначе error с причиной. Повтор после
-    рестарта безвреден (отмена бесплатна, WB просто не начнёт её второй раз) — sending не нужен."""
+    рестарта безвреден (отмена бесплатна — «платную» шлём только при цене 0 ₽; WB не начнёт её второй раз) —
+    sending не нужен."""
     async with Session() as s:
         o = await s.get(A, oid)
         acc = o and o.account_id and await s.get(models.WbAccount, o.account_id)
@@ -388,7 +389,8 @@ async def cancel(oid: int) -> None:
         return await fail("нечего отменять — у заказа нет позиций")
     proxy = await keeper.proxy_url(proxy_id)
     try:
-        started = set(await checkout.cancel_order(state, proxy, rids)) & set(rids)
+        got, note = await checkout.cancel_order(state, proxy, rids)
+        started = set(got) & set(rids)
     except (Unauthorized, NoBearer):
         return await fail(LOGIN)
     except ProxyDown:
@@ -399,8 +401,9 @@ async def cancel(oid: int) -> None:
     if started == set(rids):  # WB принял заявку — итог («отменён» / «WB не отменил») считает api по архиву и заказам
         await _finish(oid, cancel_state="asked", cancel_error=None, cancel_at=datetime.now(timezone.utc))
     else:
-        await fail(f"WB начал отмену {len(started)} из {len(rids)} позиций — проверьте заказы аккаунта")
-    log.info("autobuy: отмена %s (%s): %d из %d", oid, title, len(started), len(rids))
+        await fail(f"WB начал отмену {len(started)} из {len(rids)} позиций" + (f": {note}" if note else
+                                                                                " — проверьте заказы аккаунта"))
+    log.info("autobuy: отмена %s (%s): %d из %d%s", oid, title, len(started), len(rids), note and f" ({note})" or "")
     await _refresh_account(acc.id, state, proxy, title)
 
 
@@ -423,7 +426,8 @@ async def cancel_rids(cid: int) -> None:
         return await done("error", "аккаунт удалён")
     proxy = await keeper.proxy_url(proxy_id)
     try:
-        started = [r for r in await checkout.cancel_order(state, proxy, rids) if r in rids]
+        got, note = await checkout.cancel_order(state, proxy, rids)
+        started = [r for r in got if r in rids]
     except (Unauthorized, NoBearer):
         return await done("error", LOGIN)
     except ProxyDown:
@@ -434,8 +438,9 @@ async def cancel_rids(cid: int) -> None:
     if started:
         await done("asked", started=started)
     else:
-        await done("error", "WB не отменил ни одной позиции — возможно, товар уже в ПВЗ: откажитесь при получении")
-    log.info("autobuy: отмена ПВЗ %s (%s): WB начал %d из %d", cid, title, len(started), len(rids))
+        await done("error", f"WB не отменил ни одной позиции{f': {note}' if note else ''}")
+    log.info("autobuy: отмена ПВЗ %s (%s): WB начал %d из %d%s", cid, title, len(started), len(rids),
+             note and f" ({note})" or "")
     await _refresh_account(acc.id, state, proxy, title)
 
 
