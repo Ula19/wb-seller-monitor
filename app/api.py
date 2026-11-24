@@ -902,7 +902,7 @@ PREVIEW_TTL = timedelta(minutes=10)  # заказ — только по свеж
 ORDER_QTY_MAX = 100
 AUTOBUY_FIELDS = ("id", "account_id", "nm", "name", "qty", "pvz_id", "pay_now", "price_ok", "total", "final", "status",
                 "error", "rids", "cancel_state", "cancel_error", "cancel_at", "created_at", "done_at")
-CANCEL_CHECK = timedelta(minutes=3)  # WB отменяет за ~40–50 с: заказы, перечитанные позже, — уже итог
+CANCEL_CHECK = timedelta(minutes=20)  # бесплатную WB проводит за ~40–50 с, платную (в пути / в ПВЗ) — дольше 10 мин (24.11)
 
 
 def _rub(kop: int | None) -> str:

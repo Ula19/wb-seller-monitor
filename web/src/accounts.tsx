@@ -209,9 +209,8 @@ export function CancelState({ c }: { c: CancelOutcome }) {
   return (
     <div className="small cancel-state">
       {c.cancelled > 0 && <span className="ok-t">✓ Отменено {c.cancelled} шт.</span>}
-      {c.asked > 0 && <span className="muted"><span className="spin" /> Отмена запрошена: {c.asked} шт. — ждём, пока WB её проведёт…</span>}
-      {c.failed > 0 && <span className="bad-t">WB не отменил {c.failed} шт. — товар уже собирают или везут; если он в ПВЗ —
-        откажитесь при получении</span>}
+      {c.asked > 0 && <span className="muted"><span className="spin" /> Отмена запрошена: {c.asked} шт. — WB проводит её до ~20 минут, окно можно закрыть</span>}
+      {c.failed > 0 && <span className="bad-t">WB не отменил {c.failed} шт. — проверьте на сайте WB</span>}
     </div>
   );
 }

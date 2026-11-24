@@ -323,9 +323,10 @@ async def cancel_order(state: dict, proxy: str | None, rids: list[str]) -> tuple
             d = await call("POST", REJECT_URL, headers=_order_headers(state, with_vkey), data=json.dumps(
                 {"rejects": [{"reason": reasons[r], "rid": r} for r in part], **extra})) or {}
             started += d.get("reject_initialized") or []
-            if d.get("error") or d.get("reject_details") or d.get("reject_not_initialized"):
-                log.info("отмена (%s): не начато %s, details %s, error %s", "платная" if extra else "бесплатная",
-                         d.get("reject_not_initialized"), str(d.get("reject_details"))[:300], d.get("error"))
+            # в лог всегда: какая причина ушла и что WB ответил
+            log.info("отмена reason %s: начато %d из %d; не начато %s, details %s, error %s",
+                     "/".join(sorted({str(reasons[r]) for r in part})), len(d.get("reject_initialized") or []), len(part),
+                     d.get("reject_not_initialized"), str(d.get("reject_details"))[:300], d.get("error"))
             notes += [str(x)[:150] for x in (d.get("error"), d.get("reject_details")) if x]
     return started, "; ".join(notes)[:200] or None
 

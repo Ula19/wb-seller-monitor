@@ -57,6 +57,7 @@ function useSync(a: AccountFull) {
 function PvzCancel({ a, g, onClose }: { a: AccountFull; g: Pvz; onClose: () => void }) {
   const qc = useQueryClient();
   const rows = lines(visible(g.orders));
+  const img = useImg();  // те же картинки, что на странице — из кэша браузера
   const [off, setOff] = useState<Set<string>>(new Set());  // снятые галочки (ключи строк)
   const [id, setId] = useState<number | null>(null);
   const [error, setError] = useState("");
@@ -90,6 +91,7 @@ function PvzCancel({ a, g, onClose }: { a: AccountFull; g: Pvz; onClose: () => v
             <input type="checkbox" checked={!off.has(key)} disabled={id != null} onChange={() => {
               const s = new Set(off); s.has(key) ? s.delete(key) : s.add(key); setOff(s);
             }} />
+            <Thumb src={img(o.nm_id)} />
             <span>{o.name ?? `арт. ${o.nm_id}`}{orders.length > 1 && <b> × {orders.length}</b>}{" "}
               <span className={`pill g${o.group_id ?? 0}`}>{o.status_name ?? GROUP[o.group_id ?? 0] ?? "—"}</span>{" "}
               <span className={o.paid === false ? "badge out" : "badge in"}>{o.paid === false ? "Не оплачен" : o.paid ? "Оплачен" : "оплата ?"}</span></span>
@@ -100,7 +102,7 @@ function PvzCancel({ a, g, onClose }: { a: AccountFull; g: Pvz; onClose: () => v
         : c?.status === "error" ? <div className="small bad-t">❌ {c.error}</div>
         : c?.status === "asked" && <>
           {c.started.length < c.rids.length && <div className="small up-t">WB начал отмену {c.started.length} из {c.rids.length} шт.;
-            остальные не взял — возможно, уже в ПВЗ: откажитесь при получении</div>}
+            остальные не взял — проверьте на сайте WB</div>}
           {c.cancel && <CancelState c={c.cancel} />}
         </>}
       {error && <p className="err">{error}</p>}

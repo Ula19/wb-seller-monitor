@@ -389,6 +389,7 @@ tr.click:hover td { background: var(--bg); }
 .pay-items { list-style: none; padding: 0; margin: 8px 0; display: grid; gap: 4px; }
 .pay-items label { display: flex; gap: 6px; align-items: baseline; }
 .pay-items .num { margin-left: auto; }
+.pay-items .thumb { width: 32px; height: 42px; align-self: center; }
 .cert-hist td { vertical-align: top; }
 .wiz-btns { flex-wrap: wrap; justify-content: flex-end; }
 .wiz-btns .btn { max-width: 100%; white-space: normal; }
