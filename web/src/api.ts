@@ -55,7 +55,7 @@ export type Target = {
   stock: number; below: boolean; below_at: string | null; created_at: string;
 };
 export type Order = {
-  rid: string; nm_id: number | null; name: string | null; brand: string | null; price: number | null;
+  rid: string; nm_id: number | null; name: string | null; brand: string | null; color: string | null; price: number | null;
   dst_office_id: number | null; status_name: string | null; group_id: number | null;
   status_at: string | null; ordered_at: string | null; expiry_at: string | null; delivery_at: string | null;
   paid: boolean | null; office_address: string | null; office_hours: string | null; hidden: boolean;
@@ -157,7 +157,7 @@ export const rubk = (k: number | null | undefined) =>
   k == null ? "—" : `${(k / 100).toLocaleString("ru-RU", { maximumFractionDigits: 2 })} ₽`;
 
 // ---------- «Общий забор» ----------
-export type PickupItem = { name: string; n: number; price?: number; sum: number };  // ₽: price — за шт, sum — за все
+export type PickupItem = { name: string; color?: string | null; n: number; price?: number; sum: number };  // ₽: price — за шт, sum — за все
 export type PickupBoard = { office_id: number; address: string;
   accounts: { account_id: number; title: string; n: number; sum: number; items: PickupItem[]; sent_at: string | null;
     code: string | null; code_at: string | null; syncing: boolean }[] }[];  // code — на сегодня МСК; syncing — визит за ним в очереди

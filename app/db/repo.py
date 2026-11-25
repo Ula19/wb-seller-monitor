@@ -406,7 +406,7 @@ async def save_account_state(s, account_id: int, st: dict) -> tuple[int, int]:
         models.AccountOrder.rid.not_in([o["rid"] for o in orders]) if orders else true())
         .returning(models.AccountOrder.rid))).all()
     if orders:
-        cols = ("nm_id", "name", "brand", "price", "dst_office_id", "status_name", "group_id",
+        cols = ("nm_id", "name", "brand", "color", "price", "dst_office_id", "status_name", "group_id",
                 "ordered_at", "expiry_at", "delivery_at", "paid")
         keep = ("office_address", "office_hours",  # сбой справочника ПВЗ (None) не стирает сохранённый адрес
                 "status_at")  # у позиций в ПВЗ статус без status-tracker — время статуса прежнее

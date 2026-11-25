@@ -5,11 +5,11 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api, ApiError, MSK, rub, type Account, type PickupBoard, type PickupItem, type PickupSend } from "../api";
-import { Modal } from "../accounts";
+import { itemName, Modal } from "../accounts";
 
 const key = (acc: number, office: number) => `${acc}:${office}`;
 const pcs = (n: number) => `${n.toLocaleString("ru-RU")} шт.`;
-const items = (xs: PickupItem[]) => xs.map((i) => `${i.name} × ${i.n}`).join(" · ");
+const items = (xs: PickupItem[]) => xs.map((i) => `${itemName(i)} × ${i.n}`).join(" · ");
 const code = (c: string) => c.replace(/^(\d{3})(\d{3})$/, "$1 $2");  // 112396 → 112 396
 const hhmm = (iso: string) => new Date(iso).toLocaleTimeString("ru-RU", { timeZone: MSK, hour: "2-digit", minute: "2-digit" });
 const sentAt = (iso: string) => new Date(iso).toLocaleString("ru-RU", { timeZone: MSK, day: "2-digit", month: "2-digit",

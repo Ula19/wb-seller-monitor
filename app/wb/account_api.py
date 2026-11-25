@@ -224,7 +224,7 @@ def parse_orders(d: dict) -> list[dict]:
             if not r.get("uid") or r.get("pay_type") == 0:  # pay_type 0 — служебный «Пакет», не товар
                 continue
             out.append({"rid": r["uid"], "nm_id": r.get("nm_id"), "name": r.get("name"),
-                        "brand": r.get("brand"), "price": _order_price(r),
+                        "brand": r.get("brand"), "color": (r.get("color") or "")[:64] or None, "price": _order_price(r),
                         "dst_office_id": r.get("dst_office_id") or order.get("dst_office_id"),
                         "ordered_at": _ts(order.get("order_dt")), "expiry_at": _ts(r.get("expiry_dt")),
                         "delivery_at": _ts(r.get("delivery_time")),  # плановая доставка (верхняя граница срока)
@@ -562,9 +562,10 @@ if __name__ == "__main__":  # self-check на формах ответов из H
                                                                     "anonymous_discount": 3}]}}) == 6
     assert parse_grade({"state": 0}) is None
     o = parse_orders({"data": [{"order_dt": 1792950454, "dst_office_id": 172986, "rids": [
-        {"uid": "eAe.a.0.0", "nm_id": 1, "price": 100000, "expiry_dt": 1794603599},
-        {"uid": "eAe.b.0.0", "nm_id": 2, "price": 5050, "dst_office_id": 5}]}]})
-    assert [(x["rid"], x["price"], x["dst_office_id"]) for x in o] == [("eAe.a.0.0", 1000, 172986), ("eAe.b.0.0", 50, 5)]
+        {"uid": "eAe.a.0.0", "nm_id": 1, "price": 100000, "expiry_dt": 1794603599, "color": "прозрачный"},
+        {"uid": "eAe.b.0.0", "nm_id": 2, "price": 5050, "dst_office_id": 5, "color": ""}]}]})
+    assert [(x["rid"], x["price"], x["dst_office_id"], x["color"]) for x in o] == [
+        ("eAe.a.0.0", 1000, 172986, "прозрачный"), ("eAe.b.0.0", 50, 5, None)]  # цвет — в текст забора; пустой — None
     apply_statuses(o, [[{"rid": "eAe.a.0.0", "status_name": "Вы оформили заказ", "group_id": "1", "date": 1 * 10**18},
                         {"rid": "eAe.a.0.0", "status_name": "Едет в пункт выдачи", "group_id": "3", "date": 2 * 10**18}]])
     assert (o[0]["status_name"], o[0]["group_id"]) == ("Едет в пункт выдачи", 3) and o[1]["status_name"] is None

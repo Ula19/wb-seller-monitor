@@ -189,19 +189,22 @@ export function lines(orders: Order[]): Line[] {
   return [...m.values()];
 }
 
-/** Текст «Готовы забрать» для буфера обмена — только то, что ждёт в ПВЗ, без скрытых; строка — артикул × цена за шт
+/** «Имя, цвет»; цвета нет — только имя (как item_name в app/pickup.py). */
+export const itemName = (it: { name: string; color?: string | null }) => (it.color ? `${it.name}, ${it.color}` : it.name);
+
+/** Текст «Готовы забрать» для буфера обмена — только то, что ждёт в ПВЗ, без скрытых; строка — артикул × цвет × цена за шт
  *  (тот же текст шлёт worker: app/pickup.py). */
 export function pickupText(g: Pvz, a: Account, code: string): string {
   const phone = (a.phone ?? "").replace(/\D/g, "").slice(-10);
-  const items = new Map<string, { name: string; n: number; price: number }>();
+  const items = new Map<string, { name: string; color: string | null; n: number; price: number }>();
   for (const o of g.orders.filter((o) => o.group_id === 5 && !o.hidden)) {
-    const k = `${o.nm_id ?? o.rid}|${o.price}`;
-    const it = items.get(k) ?? { name: o.name ?? `арт. ${o.nm_id}`, n: 0, price: o.price ?? 0 };
+    const k = `${o.nm_id ?? o.rid}|${o.color ?? ""}|${o.price}`;
+    const it = items.get(k) ?? { name: o.name ?? `арт. ${o.nm_id}`, color: o.color, n: 0, price: o.price ?? 0 };
     it.n += 1;
     items.set(k, it);
   }
   const head = [g.address, `${phone ? "7" + phone : ""} ${a.title}`.trim(), `Код : ${code}`];
-  return [head.join("\n"), ...[...items.values()].map((it) => `${it.name} - ${it.n} шт\n${it.price} руб/шт`)].join("\n\n");
+  return [head.join("\n"), ...[...items.values()].map((it) => `${itemName(it)} - ${it.n} шт\n${it.price} руб/шт`)].join("\n\n");
 }
 
 /** Итог запрошенной отмены: WB принял заявку (reject_initialized) — это ещё не «отменено»; итог — по архиву и заказам. */

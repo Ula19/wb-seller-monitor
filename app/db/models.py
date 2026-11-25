@@ -285,6 +285,7 @@ class AccountOrder(Base):
     nm_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     name: Mapped[str | None] = mapped_column(String(512), nullable=True)
     brand: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    color: Mapped[str | None] = mapped_column(String(64), nullable=True)  # «черный» — в тексте забора
     price: Mapped[int | None] = mapped_column(Integer, nullable=True)  # ₽
     dst_office_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)  # ПВЗ
     status_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
