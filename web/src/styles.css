@@ -72,6 +72,10 @@ input:focus, select:focus { outline: 2px solid var(--accent-soft); border-color:
 .maint.dev { background: var(--bad); color: #fff; }
 .maint.dev a { color: #fff; text-decoration: underline; }
 .maint-groups { border: 0; padding: 0; margin: 8px 0; display: grid; gap: 6px; }
+.maint-groups .poll-check { flex-wrap: nowrap; align-items: flex-start; }  /* длинная подпись — рядом с галочкой */
+.maint-groups .poll-check input { flex: none; margin-top: 3px; }
+.dev-ico { display: none; font-size: 18px; text-decoration: none; }
+@media (max-width: 768px) { .dev-ico { display: inline; } }
 .mob { display: none; }
 
 .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; }
@@ -196,6 +200,7 @@ tr.hit td { background: var(--ok-soft); }
   .side nav { display: flex; width: 100%; }
   .nav { flex: 1; flex-direction: column; gap: 2px; font-size: 11px; padding: 8px 4px; border-radius: 0; }
   .ico { font-size: 16px; }
+  .nav.dev-nav { display: none; }  /* восьмой пункт внизу не влезает — на телефоне ⚒ в шапке */
   .main { padding: 16px 16px 84px; }
   .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .acc-grid { grid-template-columns: minmax(0, 1fr); }

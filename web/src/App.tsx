@@ -10,6 +10,7 @@ import Events from "./pages/Events";
 import Targets from "./pages/Targets";
 import Proxies from "./pages/Proxies";
 import PollSettings from "./pages/PollSettings";
+import DevSettings from "./pages/DevSettings";
 import Bell from "./Bell";
 
 const NAV = [
@@ -21,6 +22,7 @@ const NAV = [
   { to: "/events", label: "События", icon: "≡" },
   { to: "/settings", label: "Настройки", icon: "⚙" },
 ];
+const DEV_NAV = { to: "/dev", label: "Для разработчика", icon: "⚒" };  // только DEV_IDS
 
 function WorkerStatus() {
   const { data } = useQuery({ queryKey: ["status"], queryFn: () => api<Status>("/status"), refetchInterval: 30_000 });
@@ -47,8 +49,9 @@ function MaintBanner({ dev }: { dev: boolean }) {
   const low = (t = "") => t.charAt(0).toLowerCase() + t.slice(1);  // «Обновление из WB» → «обновление из WB»
   const closed = m.blocked.map((g) => low(m.groups[g]?.split(":")[0])).join(", ") || "ничего";
   return dev
-    ? <div className="maint dev" role="status">🚧 Режим работ ВКЛЮЧЁН · закрыто: {closed}{m.poll_paused ? " · опрос WB на паузе" : ""}
-        {" "}· выполняется {m.sending}, ждут {m.pending} · <NavLink to="/settings">выключить</NavLink></div>
+    ? <div className="maint dev" role="status">🚧 Технические работы включены — закрыто: {closed}
+        {m.poll_paused ? " · фоновый опрос WB на паузе" : ""} · бот: выполняется {m.sending}, ждут в очереди {m.pending}
+        {" "}· <NavLink to="/dev">выключить</NavLink></div>
     : <div className="maint" role="status">🚧 {m.message}{m.blocked.length ? ` · сейчас недоступно: ${closed}` : ""}</div>;
 }
 
@@ -67,8 +70,8 @@ export default function App() {
       <aside className="side">
         <div className="brand">WB Монитор <Bell /></div>
         <nav>
-          {NAV.map((n) => (
-            <NavLink key={n.to} to={n.to} className="nav">
+          {(me.data.is_dev ? [...NAV, DEV_NAV] : NAV).map((n) => (
+            <NavLink key={n.to} to={n.to} className={n === DEV_NAV ? "nav dev-nav" : "nav"}>
               <span className="ico">{n.icon}</span>
               <span>{n.label}</span>
             </NavLink>
@@ -83,6 +86,7 @@ export default function App() {
         <header className="mob">
           <b>WB Монитор</b>
           <Bell />
+          {me.data.is_dev && <NavLink to="/dev" className="dev-ico" aria-label="Для разработчика" title="Для разработчика">⚒</NavLink>}
           <WorkerDot />
           <button className="link" onClick={logout}>Выйти</button>
         </header>
@@ -96,6 +100,7 @@ export default function App() {
           <Route path="/proxies" element={<Proxies />} />
           <Route path="/events" element={<Events />} />
           <Route path="/settings" element={<PollSettings />} />
+          <Route path="/dev" element={me.data.is_dev ? <DevSettings /> : <Navigate to="/settings" replace />} />
           <Route path="*" element={<Navigate to="/items" replace />} />
         </Routes>
       </main>

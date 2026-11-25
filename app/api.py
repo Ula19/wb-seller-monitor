@@ -1433,8 +1433,9 @@ async def journal(date_from: date | None = Query(None, alias="from"), date_to: d
                 names = (repo.MAINTENANCE_GROUPS[g].split(":")[0] for g in x["blocked"])
                 what = ", ".join(t[:1].lower() + t[1:] for t in names) or "ничего"  # «обновление из WB»
                 ev.append({"type": "maint", "at": at, "account_id": None,
-                           "text": (f"Режим работ включён · закрыто: {what}" + (" · опрос WB на паузе" if x["poll_paused"] else "")
-                                    if x["on"] else "Режим работ выключен") + f" · ID {x['by']}"})
+                           "text": (f"Технические работы включены · закрыто: {what}"
+                                    + (" · фоновый опрос WB на паузе" if x["poll_paused"] else "")
+                                    if x["on"] else "Технические работы выключены") + f" · ID {x['by']}"})
     ev.sort(key=lambda e: e["at"], reverse=True)
     counts = {t: sum(e["type"] == t for e in ev) for t in ("ordered", "cancelled", "paid", "cert", "pickup")}
     raw = await repo.get_setting(s, repo.JOURNAL_CHECK)
