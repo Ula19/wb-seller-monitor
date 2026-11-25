@@ -6,7 +6,7 @@ import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError, rubk, type Account, type BuyOrder, type PickupPoint, type Preview, type PreviewAccount,
   type PreviewLine, type ProductCard, type Quote } from "../api";
-import { CancelState, Modal } from "../accounts";
+import { CancelState, Held, MaintNote, Modal, useHold } from "../accounts";
 import { StepAccounts } from "./CertModal";
 import { CertAdd } from "./PayModal";
 
@@ -294,16 +294,18 @@ function BuyAccount({ p, no, pvz, setPay, refresh }: {
 }
 
 // ---------- итог ----------
-function BuyResult({ o, cancel }: { o: BuyOrder; cancel: (o: BuyOrder) => void }) {
+function BuyResult({ o, cancel, hold }: { o: BuyOrder; cancel: (o: BuyOrder) => void; hold: string | null }) {
   const st = o.status;
   return (
     <li className={st === "error" ? "bad-t" : st === "unknown" ? "up-t" : ""}>
       <span className="st">{st === "ok" ? "✅" : st === "error" ? "❌" : st === "unknown" ? "⚠️" : st === "cancelled" ? "↩" : "⏳"}</span>
       {o.name ?? `Товар ${o.nm}`} — {pcs(o.qty)}
-      {(st === "pending" || st === "sending") && <span className="muted"> · <span className="spin" /> заказываю…</span>}
+      {st === "pending" && hold != null ? <> · <Held until={hold} /></>
+        : (st === "pending" || st === "sending") && <span className="muted"> · <span className="spin" /> заказываю…</span>}
       {st === "ok" && <span className="ok-t"> · заказано, {o.pay_now ? "оплачено Кошельком" : "оплата при получении"}</span>}
       {(st === "error" || st === "unknown") && o.error && <div className="small">{o.error}</div>}
-      {o.cancel_state === "pending" && <div className="small muted"><span className="spin" /> Отменяю…</div>}
+      {o.cancel_state === "pending" && (hold != null ? <div className="small"><Held until={hold} /></div>
+        : <div className="small muted"><span className="spin" /> Отменяю…</div>)}
       {o.cancel_state === "error" && <div className="small bad-t">Отмена не прошла: {o.cancel_error}</div>}
       {o.cancel && <CancelState c={o.cancel} />}
       {o.can_cancel && <div><button className="link" onClick={() => cancel(o)}>Отменить заказ</button></div>}
@@ -329,9 +331,12 @@ function Results({ ids, all, opts, onClose }: { ids: number[]; all: Account[]; o
     try { await api("/order/cancel", { method: "POST", body: { id: o.id } }); await q.refetch(); } catch (e) { setMsg(err(e)); }
   };
   const accIds = [...new Set(list.map((o) => o.account_id))];
+  const hold = useHold("money");
+  const waiting = hold != null && list.some((o) => o.status === "pending" || o.cancel_state === "pending");
   return (
     <>
-      <h2>{!finished ? <><span className="spin" /> Заказываю… {list.filter(done).length} из {ids.length}</>
+      <h2>{!finished && waiting ? <>⏸ Ждёт окончания технических работ · готово {list.filter(done).length} из {ids.length}</>
+        : !finished ? <><span className="spin" /> Заказываю… {list.filter(done).length} из {ids.length}</>
         : <>Заказано {okN} из {ids.length}{okN === ids.length && <span className="ok-t"> ✓</span>}</>}</h2>
       <div className="cert-sum">
         {accIds.map((id) => {
@@ -342,7 +347,7 @@ function Results({ ids, all, opts, onClose }: { ids: number[]; all: Account[]; o
             <div key={String(id)} className="card sm">
               <div><b>{a?.title ?? "аккаунт удалён"}</b></div>
               {pvz && <div className="small muted">ПВЗ: {pvz.id} · {pvz.address}</div>}
-              <ul className="cert-lines">{mine.map((o) => <BuyResult key={o.id} o={o} cancel={cancel} />)}</ul>
+              <ul className="cert-lines">{mine.map((o) => <BuyResult key={o.id} o={o} cancel={cancel} hold={hold} />)}</ul>
             </div>
           );
         })}
@@ -441,6 +446,7 @@ function Wizard({ all, onClose }: { all: Account[]; onClose: () => void }) {
             setPay={(k, v) => { setPay({ ...pay, [k]: v }); setServer({}); }} refresh={preview} />)}
         </div>}
         {placeErr && <p className="err">{placeErr.text} {placeErr.refresh && <button className="link" onClick={preview}>Обновить цены</button>}</p>}
+        <MaintNote group="money" />
       </>}
       <div className="wiz-foot">
         <span className="small muted">

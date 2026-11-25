@@ -5,7 +5,7 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api, ApiError, MSK, rub, type Account, type PickupBoard, type PickupItem, type PickupSend } from "../api";
-import { itemName, Modal } from "../accounts";
+import { Held, itemName, MaintNote, Modal, useHold } from "../accounts";
 
 const key = (acc: number, office: number) => `${acc}:${office}`;
 const pcs = (n: number) => `${n.toLocaleString("ru-RU")} шт.`;
@@ -15,10 +15,10 @@ const hhmm = (iso: string) => new Date(iso).toLocaleTimeString("ru-RU", { timeZo
 const sentAt = (iso: string) => new Date(iso).toLocaleString("ru-RU", { timeZone: MSK, day: "2-digit", month: "2-digit",
   hour: "2-digit", minute: "2-digit" }).replace(",", "");
 
-function Status({ x }: { x: PickupSend }) {
+function Status({ x, hold }: { x: PickupSend; hold: string | null }) {
   return <div className={`small ${x.status === "sent" ? "ok-t" : x.status === "error" ? "bad-t" : "muted"}`}>
     {x.status === "sent" ? "✅ отправлено" : x.status === "error" ? `❌ ${x.error ?? "ошибка"}`
-      : <><span className="spin" /> {x.need_code ? "получаю код…" : "отправляю…"}</>}</div>;
+      : hold != null ? <Held until={hold} /> : <><span className="spin" /> {x.need_code ? "получаю код…" : "отправляю…"}</>}</div>;
 }
 
 export default function PickupModal({ open, onClose, all }: { open: boolean; onClose: () => void; all: Account[] }) {
@@ -39,9 +39,11 @@ function Sent({ ids, all, onClose }: { ids: number[]; all: Account[]; onClose: (
   const done = list.filter((x) => x.status !== "pending").length;
   const offices = [...new Map(list.map((x) => [x.office_id, x.address ?? `ПВЗ №${x.office_id}`])).entries()];
   const no = (id: number | null) => all.findIndex((a) => a.id === id) + 1;
+  const hold = useHold("pickup");
   return (
     <>
-      <h2>{!q.data || done < ids.length ? <><span className="spin" /> Отправляю… {done} из {ids.length}</>
+      <h2>{q.data && done < ids.length && hold != null ? <>⏸ Ждёт окончания технических работ · отправлено {done} из {ids.length}</>
+        : !q.data || done < ids.length ? <><span className="spin" /> Отправляю… {done} из {ids.length}</>
         : <>Отправлено {list.filter((x) => x.status === "sent").length} из {ids.length}</>}</h2>
       <div className="card zabor">
         {offices.map(([oid, address]) => (
@@ -50,7 +52,7 @@ function Sent({ ids, all, onClose }: { ids: number[]; all: Account[]; onClose: (
             {list.filter((x) => x.office_id === oid).map((x) => (
               <div key={x.id} className="zabor-acc">
                 <span className="zabor-name"><span><span className="muted">{no(x.account_id) || ""}</span> <b>{x.account_title ?? "аккаунт удалён"}</b></span>
-                  <span className="muted small zabor-items">{items(x.items)}</span><Status x={x} /></span>
+                  <span className="muted small zabor-items">{items(x.items)}</span><Status x={x} hold={hold} /></span>
                 <span className="zabor-kv"><span>Товаров<b>{pcs(x.items.reduce((s, i) => s + i.n, 0))}</b></span>
                   <span>Сумма<b>{rub(x.items.reduce((s, i) => s + i.sum, 0))}</b></span></span>
               </div>
@@ -147,6 +149,7 @@ function Board({ all, onClose, onSent }: { all: Account[]; onClose: () => void; 
           })}
         </div>}
       {err && <p className="err">{err}</p>}
+      <MaintNote group="pickup" />
       <div className="wiz-foot">
         <span className="small muted">Выбрано: {chosen.length} из {rows.length} · {pcs(chosen.reduce((s, r) => s + r.a.n, 0))} на {rub(chosen.reduce((s, r) => s + r.a.sum, 0))}</span>
         <span className="wiz-btns">

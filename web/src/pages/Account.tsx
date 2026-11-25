@@ -6,8 +6,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError, rub, time, type AccountFull, type BalanceOp, type Order, type OrderCancel, type Purchase, type VbOp } from "../api";
 import {
   Blocked, byPvz, CancelState, CertCode, Modal, ddmm, GROUP, Limit, lines, Period, pickupText, points, STATUS, StatusDot, Thumb, Title, useImg,
-  usePeriod, visible, when, type Pvz,
-} from "../accounts";
+  usePeriod, visible, when, type Pvz, Held, MaintNote, useHold } from "../accounts";
 import LoginModal, { type Relogin } from "./LoginModal";
 import { PvzPay, toPay } from "./PayModal";
 
@@ -69,6 +68,7 @@ function PvzCancel({ a, g, onClose }: { a: AccountFull; g: Pvz; onClose: () => v
     queryFn: () => api<OrderCancel[]>(`/order-cancels?ids=${id}`).then((x) => x[0]),
     refetchInterval: (x) => { const c = x.state.data; return c && (c.status === "error" || (c.status === "asked" && !c.cancel?.asked)) ? false : 2000; } });
   const c = q.data;
+  const hold = useHold("money");
   useEffect(() => { if (c && c.status !== "pending") qc.invalidateQueries({ queryKey: ["accounts"] }); },
     [c?.status, c?.cancel?.cancelled, c?.cancel?.failed]);
   const go = async () => {
@@ -98,7 +98,8 @@ function PvzCancel({ a, g, onClose }: { a: AccountFull; g: Pvz; onClose: () => v
             <b className="num">{rub(o.price)}{orders.length > 1 && <span className="muted small"> за шт.</span>}</b></label></li>
         ))}
       </ul>
-      {c?.status === "pending" || (id != null && !c) ? <div className="small"><span className="spin" /> Отменяю…</div>
+      {c?.status === "pending" && hold != null ? <div className="small"><Held until={hold} /></div>
+        : c?.status === "pending" || (id != null && !c) ? <div className="small"><span className="spin" /> Отменяю…</div>
         : c?.status === "error" ? <div className="small bad-t">❌ {c.error}</div>
         : c?.status === "asked" && <>
           {c.started.length < c.rids.length && <div className="small up-t">WB начал отмену {c.started.length} из {c.rids.length} шт.;
@@ -106,6 +107,7 @@ function PvzCancel({ a, g, onClose }: { a: AccountFull; g: Pvz; onClose: () => v
           {c.cancel && <CancelState c={c.cancel} />}
         </>}
       {error && <p className="err">{error}</p>}
+      <MaintNote group="money" />
       <div className="wiz-foot">
         <span className="small muted">Выбрано: {chosen.length} шт. на {rub(sum)}</span>
         <span className="wiz-btns">

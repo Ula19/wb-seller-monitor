@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError, rub, type Account, type Cert } from "../api";
-import { Blocked, confirmTopUp, ddmm, Limit, LimitNote, points, unpaid } from "../accounts";
+import { Blocked, confirmTopUp, ddmm, Held, Limit, LimitNote, MaintNote, points, unpaid, useHold } from "../accounts";
 import { distribute, NOMINAL_MAX, NOMINAL_MIN, NOMINALS, normCode, parseList, parseNominal, type BadLine } from "../certs";
 
 // certId/orig — строка из неудачных прошлого круга («← Назад»): код не меняли — retry той же записи, поменяли — новый код
@@ -160,6 +160,7 @@ type Item = { code: string; nominal: number; account: number };
 
 function Summary({ accs, items, certs }: { accs: Account[]; items: Item[]; certs: Cert[] | null }) {
   const byCode = new Map((certs ?? []).map((c) => [c.code, c]));
+  const hold = useHold("money");
   return (
     <div className="cert-sum">
       {accs.map((a) => {
@@ -186,6 +187,7 @@ function Summary({ accs, items, certs }: { accs: Account[]; items: Item[]; certs
                   <li key={i.code} className={st === "error" ? "bad-t" : st === "unknown" ? "up-t" : ""}>
                     {certs && <span className="st">{st === "ok" ? "✅" : st === "error" ? "❌" : st === "unknown" ? "⚠️" : "⏳"}</span>}
                     <code>{i.code}</code> — {rub(i.nominal)}
+                    {certs && st === "pending" && hold != null && <> · <Held until={hold} /></>}
                     {c?.status === "ok" && c.nominal != null && c.nominal !== i.nominal &&
                       <span className="up-t"> · указали {rub(i.nominal)}, зачислено {rub(c.nominal)}</span>}
                     {(st === "error" || st === "unknown") && c?.error_text && <div className="small">{c.error_text}</div>}
@@ -295,13 +297,16 @@ function Wizard({ all, onClose }: { all: Account[]; onClose: () => void }) {
     setRows(failed.map((c) => newRow({ code: c.code, nominal: String(c.nominal_entered), account: c.account_id, certId: c.id, orig: c.code })));
     setPicked(accIds); setServer({}); setStep(1); setRun(false); setAgain(true); setError("");
   };
+  const hold = useHold("money");
 
   if (run) {
     const shown = list.filter((c) => c.account_id != null).map((c) => ({ code: c.code, nominal: c.nominal_entered, account: c.account_id! }));
     const okSum = rub(sum(ok.map((c) => c.nominal ?? 0)));
+    const doneN = list.filter((c) => FINAL.includes(c.status)).length;
     return (
       <>
-        <h2>{!finished ? <><span className="spin" /> Активирую… {list.filter((c) => FINAL.includes(c.status)).length} из {ids.length}</>
+        <h2>{!finished && hold != null && list.some((c) => c.status === "pending") ? <>⏸ Ждёт окончания технических работ · готово {doneN} из {ids.length}</>
+          : !finished ? <><span className="spin" /> Активирую… {doneN} из {ids.length}</>
           : failed.length ? <>Добавлено {ok.length} из {ids.length} · <span className="bad-t">не прошло {failed.length}</span></>
           : <>Добавлено {ok.length} серт. на {okSum} <span className="ok-t">✓</span></>}</h2>
         {finished && failed.length > 0 && <p className="muted small">Зачислено {okSum}. Неудачные можно повторить на тех же аккаунтах
@@ -330,6 +335,7 @@ function Wizard({ all, onClose }: { all: Account[]; onClose: () => void }) {
       {step === 3 && <>
         <p className="muted">Проверьте распределение. После подтверждения сертификаты будут активированы на выбранных аккаунтах.</p>
         <Summary accs={accs} items={items} certs={null} />
+        <MaintNote group="money" />
       </>}
       {error && <p className="err">{error}</p>}
       <div className="wiz-foot">

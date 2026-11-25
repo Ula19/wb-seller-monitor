@@ -1,13 +1,29 @@
 // Общее для «Аккаунтов» (список) и страницы аккаунта: подписи, лимит, имя, картинки товаров.
 import { useEffect, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, MSK, mskDay, rub, type Account, type CancelOutcome, type Order } from "./api";
+import { api, MSK, mskDay, rub, type Account, type CancelOutcome, type Maintenance, type Order } from "./api";
 import { canTopUp, overConfirm } from "./certs";
 
 export const STATUS: Record<string, string> = { active: "активен", relogin: "нужен вход", off: "выключен" };
 export const GROUP: Record<number, string> = { 1: "оформлен", 2: "сборка", 3: "в пути", 5: "в ПВЗ" };
 
 export const visible = (orders: Order[]) => orders.filter((o) => !o.hidden);
+
+/** Режим техработ закрыл группу (money/pickup…) — бот её дела не берёт, ждущее в очереди стоит до выключения.
+ *  → null — открыто; иначе « (до 18:30 МСК)» или "". Те же данные, что у баннера (опрос раз в 30 с). */
+export function useHold(group: string): string | null {
+  const { data: m } = useQuery({ queryKey: ["maintenance"], queryFn: () => api<Maintenance>("/maintenance"), refetchInterval: 30_000 });
+  return m?.on && m.blocked.includes(group) ? (m.until ? ` (до ${m.until} МСК)` : "") : null;
+}
+
+/** Ждущее дело очереди при техработах — вместо крутилки. */
+export const Held = ({ until }: { until: string }) => <span className="up-t">⏸ ждёт окончания технических работ{until}</span>;
+
+/** Над кнопкой: группа закрыта — дело встанет в очередь (разработчику) или сервер не примет (остальным). */
+export function MaintNote({ group }: { group: string }) {
+  const until = useHold(group);
+  return until == null ? null : <p className="small up-t">⏸ Сейчас технические работы — бот выполнит это после их окончания{until}</p>;
+}
 // «в пути» — всё, что ещё не в ПВЗ: оформлен, сборка, в пути и без группы (статус от WB ещё не пришёл)
 export const transit = (a: Account) => visible(a.orders).filter((o) => o.group_id !== 5).length;
 export const inPvz = (a: Account) => visible(a.orders).filter((o) => o.group_id === 5).length;

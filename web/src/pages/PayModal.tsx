@@ -4,7 +4,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError, rub, time, type Account, type Cert, type Order, type Payment } from "../api";
-import { Blocked, confirmTopUp, LimitNote, Modal, unpaid, visible, type Pvz } from "../accounts";
+import { Blocked, confirmTopUp, Held, LimitNote, MaintNote, Modal, unpaid, useHold, visible, type Pvz } from "../accounts";
 import { NOMINALS, normCode, parseNominal, payOverLimit } from "../certs";
 
 const FINAL = ["ok", "error", "unknown"];
@@ -37,6 +37,8 @@ function usePayments() {
 
 /** Итог оплаты: «✓ Оплачено N шт., списано X ₽»; списали больше «К оплате» — красным. */
 export function PayStatus({ p }: { p: Payment }) {
+  const hold = useHold("money");
+  if (p.status === "pending" && hold != null) return <div className="small"><Held until={hold} /></div>;
   if (!FINAL.includes(p.status)) return <div className="small"><span className="spin" /> Оплачиваю… {rub(p.amount)}</div>;
   if (p.status !== "ok") return <div className={`small ${p.status === "error" ? "bad-t" : "up-t"}`}>
     {p.status === "error" ? "❌" : "⚠️"} {p.error_text ?? "ошибка"}</div>;
@@ -52,6 +54,7 @@ export function PayStatus({ p }: { p: Payment }) {
 /** Сертификат прямо в строке: код + номинал → та же очередь активации, что в мастере; текст лимита — тот же.
  *  need — денег не хватает; хватило после активации — поля прячутся, итог активации остаётся. */
 export function CertAdd({ a, need, onDone }: { a: Account; need: boolean; onDone?: () => void }) {
+  const hold = useHold("money");
   const qc = useQueryClient();
   const [code, setCode] = useState("");
   const [nominal, setNominal] = useState("");
@@ -96,7 +99,7 @@ export function CertAdd({ a, need, onDone }: { a: Account; need: boolean; onDone
       {c && <div className={`small ${c.status === "ok" ? "ok-t" : c.status === "error" ? "bad-t" : c.status === "unknown" ? "up-t" : ""}`}>
         {c.status === "ok" ? `✅ ${c.code.slice(-4)}: зачислено ${rub(c.nominal)}, на кошельке ${rub(c.funds)}`
           : FINAL.includes(c.status) ? `${c.status === "error" ? "❌" : "⚠️"} ${c.error_text ?? "ошибка"}`
-          : <><span className="spin" /> Активирую сертификат…</>}</div>}
+          : c.status === "pending" && hold != null ? <Held until={hold} /> : <><span className="spin" /> Активирую сертификат…</>}</div>}
     </div>
   );
 }
@@ -212,6 +215,7 @@ function PayWizard({ all, onClose }: { all: Account[]; onClose: () => void }) {
         {!accs.length && <p className="empty">Никого не осталось — вернитесь и выберите аккаунты</p>}
       </>}
       {error && <p className="err">{error}</p>}
+      <MaintNote group="money" />
       <div className="wiz-foot">
         <span className="small muted">{step === 1 ? (picked.length ? `Выбрано аккаунтов: ${picked.length}` : "Выберите аккаунты, которые нужно оплатить")
           : `В группе: ${accs.length} · без денег: ${noMoney} · можно оплатить: ${ready.length}`}</span>
@@ -281,6 +285,7 @@ export function PvzPay({ a, g, onClose }: { a: Account; g: Pvz; onClose: () => v
       {!p && <CertAdd a={a} need={lack} />}
       {p && <PayStatus p={p} />}
       {error && <p className="err">{error}</p>}
+      <MaintNote group="money" />
       <div className="wiz-foot">
         <button className="link" onClick={onClose}>Закрыть</button>
         <button className="btn" disabled={!chosen.length || lack || !payable(a) || pays.busy(a.id) || p?.status === "ok"} onClick={go}>
