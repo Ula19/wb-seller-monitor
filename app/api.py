@@ -1287,8 +1287,10 @@ async def _pickup_groups(s, u: Viewer, account_ids: set[int] | None = None) -> d
 @app.get("/api/pickups/board")
 async def pickups_board(u=Depends(user), s=Depends(db)):
     """Окно «Общий забор»: ПВЗ → аккаунты (у аккаунта в разных ПВЗ — несколько строк), товары «имя × n», шт. и сумма ₽;
-    sent_at — когда пару последний раз удачно отправляли (отправленное остаётся в окне до забора)."""
+    sent_at — когда пару последний раз удачно отправляли (отправленное остаётся в окне до забора); code — код получения
+    на сегодня (МСК), code_at — когда снят, syncing — визит за кодом ещё в очереди («Обновить коды»)."""
     groups = await _pickup_groups(s, u)
+    today = repo.msk_today()
     p = models.PickupSend
     last = dict(((a, o), at) for a, o, at in (await s.execute(
         select(p.account_id, p.office_id, func.max(p.sent_at)).where(p.account_id.in_({a for a, _ in groups}), p.status == "sent")
@@ -1297,9 +1299,25 @@ async def pickups_board(u=Depends(user), s=Depends(db)):
     for (aid, oid), g in groups.items():
         items = pickup_items(g["orders"])
         off = offices.setdefault(oid, {"office_id": oid, "address": g["address"], "accounts": []})
-        off["accounts"].append({"account_id": aid, "title": g["acc"].title, "n": sum(i["n"] for i in items),
-                                "sum": sum(i["sum"] for i in items), "items": items, "sent_at": last.get((aid, oid))})
+        a = g["acc"]
+        code = a.pickup_code if a.pickup_code and a.pickup_code_date == today else None
+        off["accounts"].append({"account_id": aid, "title": a.title, "n": sum(i["n"] for i in items),
+                                "sum": sum(i["sum"] for i in items), "items": items, "sent_at": last.get((aid, oid)),
+                                "code": code, "code_at": a.pickup_code_at if code else None, "syncing": a.browser_sync})
     return sorted(offices.values(), key=lambda x: x["address"])
+
+
+@app.post("/api/pickups/codes", dependencies=PICKUP)
+async def pickups_codes(u=Depends(user), s=Depends(db)):
+    """«Обновить коды»: всем аккаунтам окна — визит в браузере за кодом (флаг browser_sync, как «Готовы забрать»; worker
+    обходит по одному). Отправка забора по такому аккаунту коду из БД не верит — сходит сама."""
+    ids = {aid for aid, _ in await _pickup_groups(s, u)}
+    if not ids:
+        raise HTTPException(409, "в окне нет аккаунтов — обновлять нечего")
+    w = models.WbAccount
+    await s.execute(update(w).where(w.id.in_(ids)).values(browser_sync=True))
+    await s.commit()
+    return {"accounts": len(ids)}
 
 
 class PickupPair(BaseModel):

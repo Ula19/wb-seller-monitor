@@ -159,7 +159,8 @@ export const rubk = (k: number | null | undefined) =>
 // ---------- «Общий забор» ----------
 export type PickupItem = { name: string; n: number; price?: number; sum: number };  // ₽: price — за шт, sum — за все
 export type PickupBoard = { office_id: number; address: string;
-  accounts: { account_id: number; title: string; n: number; sum: number; items: PickupItem[]; sent_at: string | null }[] }[];
+  accounts: { account_id: number; title: string; n: number; sum: number; items: PickupItem[]; sent_at: string | null;
+    code: string | null; code_at: string | null; syncing: boolean }[] }[];  // code — на сегодня МСК; syncing — визит за ним в очереди
 export type PickupSend = { id: number; account_id: number | null; account_title: string | null; office_id: number;
   address: string | null; items: PickupItem[];
   status: "pending" | "sent" | "error"; error: string | null; sent_at: string | null; need_code: boolean };

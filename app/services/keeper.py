@@ -128,6 +128,7 @@ async def _refresh(acc: models.WbAccount, *, visit: bool = False, want_code: boo
                     row.visit_error = seen.get("error")
                 if seen.get("pickup_code"):
                     row.pickup_code, row.pickup_code_date = seen["pickup_code"], repo.msk_today()
+                    row.pickup_code_at = datetime.now(timezone.utc)
                 if ops:
                     await repo.upsert_balance_ops(s, acc.id, ops)
                 await s.commit()

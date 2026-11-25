@@ -10,6 +10,8 @@ import { Modal } from "../accounts";
 const key = (acc: number, office: number) => `${acc}:${office}`;
 const pcs = (n: number) => `${n.toLocaleString("ru-RU")} шт.`;
 const items = (xs: PickupItem[]) => xs.map((i) => `${i.name} × ${i.n}`).join(" · ");
+const code = (c: string) => c.replace(/^(\d{3})(\d{3})$/, "$1 $2");  // 112396 → 112 396
+const hhmm = (iso: string) => new Date(iso).toLocaleTimeString("ru-RU", { timeZone: MSK, hour: "2-digit", minute: "2-digit" });
 const sentAt = (iso: string) => new Date(iso).toLocaleString("ru-RU", { timeZone: MSK, day: "2-digit", month: "2-digit",
   hour: "2-digit", minute: "2-digit" }).replace(",", "");
 
@@ -62,7 +64,8 @@ function Sent({ ids, all, onClose }: { ids: number[]; all: Account[]; onClose: (
 }
 
 function Board({ all, onClose, onSent }: { all: Account[]; onClose: () => void; onSent: (ids: number[]) => void }) {
-  const board = useQuery({ queryKey: ["pickup-board"], queryFn: () => api<PickupBoard>("/pickups/board"), gcTime: 0 });
+  const board = useQuery({ queryKey: ["pickup-board"], queryFn: () => api<PickupBoard>("/pickups/board"), gcTime: 0,
+    refetchInterval: (x) => (x.state.data?.some((o) => o.accounts.some((a) => a.syncing)) ? 3000 : false) });  // коды — по одному
   const to = useQuery({ queryKey: ["pickup-to"], queryFn: () => api<{ to: number[] }>("/settings/pickup") });
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [open, setOpen] = useState<Set<number>>(new Set());  // раскрытые ПВЗ; при открытии окна все свёрнуты
@@ -81,6 +84,12 @@ function Board({ all, onClose, onSent }: { all: Account[]; onClose: () => void; 
     } catch (e) { setErr(e instanceof ApiError ? e.message : "ошибка"); } finally { setBusy(false); }
   };
   const noTo = to.data && !to.data.to.length;
+  const syncing = new Set(rows.filter((r) => r.a.syncing).map((r) => r.a.account_id)).size;
+  const refreshCodes = async () => {
+    setErr("");
+    try { await api("/pickups/codes", { method: "POST" }); await board.refetch(); }
+    catch (e) { setErr(e instanceof ApiError ? e.message : "ошибка"); }
+  };
   return (
     <>
       <h2>Общий забор</h2>
@@ -93,6 +102,10 @@ function Board({ all, onClose, onSent }: { all: Account[]; onClose: () => void; 
         <button className="link" onClick={() => setPicked(new Set())}>Снять выбор</button>
         <button className="link" onClick={() => setOpen(new Set((board.data ?? []).map((o) => o.office_id)))}>Развернуть все</button>
         <button className="link" onClick={() => setOpen(new Set())}>Свернуть все</button>
+        <span className="journal-upd small muted">
+          {syncing > 0 && <><span className="spin" /> обновляю коды, осталось {syncing} акк.{" "}</>}
+          <button className="btn ghost sm" disabled={syncing > 0 || !rows.length} onClick={refreshCodes}>↻ Обновить коды</button>
+        </span>
       </div>
       {board.isLoading ? <p className="muted"><span className="spin" /> Загрузка…</p>
         : !rows.length ? <p className="empty">Нечего забирать: в пунктах выдачи ничего не ждёт</p>
@@ -122,6 +135,8 @@ function Board({ all, onClose, onSent }: { all: Account[]; onClose: () => void; 
                         onChange={(e) => set([k], e.target.checked)} />
                       <span className="zabor-name"><span><span className="muted">{no(a.account_id) || ""}</span> <b>{a.title}</b></span>
                         <span className="muted small zabor-items">{items(a.items)}</span>
+                        {a.syncing ? <span className="muted small"><span className="spin" /> обновляю код…</span>
+                          : a.code && <span className="small">код <b>{code(a.code)}</b>{a.code_at && <span className="muted"> · {hhmm(a.code_at)}</span>}</span>}
                         {a.sent_at && <span className="muted small">отправлено {sentAt(a.sent_at)}</span>}</span>
                       <span className="zabor-kv"><span>Товаров<b>{pcs(a.n)}</b></span><span>Сумма<b>{rub(a.sum)}</b></span></span>
                     </label>

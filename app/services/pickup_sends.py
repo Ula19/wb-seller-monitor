@@ -43,11 +43,18 @@ def _today_code(acc: models.WbAccount) -> str | None:
 
 
 async def _code(bot, acc: models.WbAccount) -> tuple[models.WbAccount | None, str | None, str | None]:
-    """→ (свежий аккаунт, код, причина если кода нет). Нет кода на сегодня — визит за ним (как «Готовы забрать»)."""
-    if code := _today_code(acc):
+    """→ (свежий аккаунт, код, причина если кода нет). Нет кода на сегодня — визит за ним (как «Готовы забрать»).
+    Просили «Обновить коды» (browser_sync), а очередь визитов до аккаунта ещё не дошла — коду из БД не верим: идём сами
+    и снимаем флаг, чтобы очередь не ходила второй раз."""
+    # ponytail: очередь визитов уже внутри этого аккаунта — дождёмся замка и сходим ещё раз (+~30 с, редко)
+    if (code := _today_code(acc)) and not acc.browser_sync:
         return acc, code, None
     try:
-        if await keeper._refresh(acc, visit=True, want_code=True) is None:
+        refreshed = await keeper._refresh(acc, visit=True, want_code=True)
+        async with Session() as s:  # визит был — повторять не нужно, удачный или нет
+            await s.execute(update(models.WbAccount).where(models.WbAccount.id == acc.id).values(browser_sync=False))
+            await s.commit()
+        if refreshed is None:
             await keeper._relogin(bot, acc)
             return acc, None, "сессия сайта истекла — войдите в аккаунт заново"
     except ProxyDown as e:
