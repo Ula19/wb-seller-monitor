@@ -189,7 +189,7 @@ class WbAccount(Base):
     # визит в браузере аккаунта (код получения + история баланса): плановый в 00:05/12:05 МСК или по кнопке с сайта
     browser_sync: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     pickup_code: Mapped[str | None] = mapped_column(String(16), nullable=True)  # код получения в ПВЗ
-    pickup_code_date: Mapped[date | None] = mapped_column(Date, nullable=True)  # день МСК, на который код (до 00:00)
+    pickup_code_date: Mapped[date | None] = mapped_column(Date, nullable=True)  # день (UTC, как у WB), на который код
     pickup_code_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)  # когда сняли код
     # история заказов загружена целиком (до последней страницы) — дальше раз в час только догрузка новых
     purchases_full_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

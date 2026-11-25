@@ -428,7 +428,7 @@ async def account(account_id: int, u=Depends(user), s=Depends(db)):
     acc = await _my_account(s, u, account_id)
     count = lambda m, *w: s.scalar(select(func.count()).select_from(m).where(m.account_id == acc.id, *w))
     return {**(await _account_views(s, [acc]))[0], "browser_sync": acc.browser_sync,
-            "pickup_code": acc.pickup_code if acc.pickup_code_date == repo.msk_today() else None,
+            "pickup_code": acc.pickup_code if acc.pickup_code_date == repo.code_today() else None,
             "counts": {"purchases": await count(models.AccountPurchase, _got(models.AccountPurchase)),
                        "balance": await count(models.AccountBalanceOp),
                        "vb": await count(models.AccountVbOp)}}
@@ -1288,9 +1288,9 @@ async def _pickup_groups(s, u: Viewer, account_ids: set[int] | None = None) -> d
 async def pickups_board(u=Depends(user), s=Depends(db)):
     """Окно «Общий забор»: ПВЗ → аккаунты (у аккаунта в разных ПВЗ — несколько строк), товары «имя × n», шт. и сумма ₽;
     sent_at — когда пару последний раз удачно отправляли (отправленное остаётся в окне до забора); code — код получения
-    на сегодня (МСК), code_at — когда снят, syncing — визит за кодом ещё в очереди («Обновить коды»)."""
+    на сегодня (UTC, как у WB), code_at — когда снят, syncing — опрос за кодом ещё в очереди («Обновить коды»)."""
     groups = await _pickup_groups(s, u)
-    today = repo.msk_today()
+    today = repo.code_today()
     p = models.PickupSend
     last = dict(((a, o), at) for a, o, at in (await s.execute(
         select(p.account_id, p.office_id, func.max(p.sent_at)).where(p.account_id.in_({a for a, _ in groups}), p.status == "sent")
@@ -1303,19 +1303,19 @@ async def pickups_board(u=Depends(user), s=Depends(db)):
         code = a.pickup_code if a.pickup_code and a.pickup_code_date == today else None
         off["accounts"].append({"account_id": aid, "title": a.title, "n": sum(i["n"] for i in items),
                                 "sum": sum(i["sum"] for i in items), "items": items, "sent_at": last.get((aid, oid)),
-                                "code": code, "code_at": a.pickup_code_at if code else None, "syncing": a.browser_sync})
+                                "code": code, "code_at": a.pickup_code_at if code else None, "syncing": a.polling})
     return sorted(offices.values(), key=lambda x: x["address"])
 
 
 @app.post("/api/pickups/codes", dependencies=PICKUP)
 async def pickups_codes(u=Depends(user), s=Depends(db)):
-    """«Обновить коды»: всем аккаунтам окна — визит в браузере за кодом (флаг browser_sync, как «Готовы забрать»; worker
-    обходит по одному). Отправка забора по такому аккаунту коду из БД не верит — сходит сама."""
+    """«Обновить коды»: всем аккаунтам окна — внеочередной HTTP-опрос (флаг polling, как ↻ «Обновить»): код берётся
+    всегда, секунды на аккаунт."""
     ids = {aid for aid, _ in await _pickup_groups(s, u)}
     if not ids:
         raise HTTPException(409, "в окне нет аккаунтов — обновлять нечего")
     w = models.WbAccount
-    await s.execute(update(w).where(w.id.in_(ids)).values(browser_sync=True))
+    await s.execute(update(w).where(w.id.in_(ids)).values(polling=True))
     await s.commit()
     return {"accounts": len(ids)}
 
@@ -1354,7 +1354,7 @@ async def pickups_sends(ids: list[int] = Query(..., max_length=500), u=Depends(u
     p, w = models.PickupSend, models.WbAccount
     rows = await s.execute(select(p, w).outerjoin(w, w.id == p.account_id)
                            .where(p.id.in_(ids), p.user_id == u.telegram_id).order_by(p.id))
-    today = repo.msk_today()
+    today = repo.code_today()
     return [{"id": x.id, "account_id": x.account_id, "account_title": a and a.title, "office_id": x.office_id,
              "address": x.address, "items": x.items, "status": x.status,
              "error": x.error, "sent_at": x.sent_at, "need_code": not (a and a.pickup_code and a.pickup_code_date == today)}

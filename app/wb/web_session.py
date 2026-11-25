@@ -33,15 +33,13 @@ PHONE_SEL = "#phone-number input, input#phone-number, [data-test-id=phone_input]
 # в Docker под root chromium без песочницы не стартует; dev-shm мал — выносим в /tmp
 LAUNCH_ARGS = ["--no-sandbox", "--disable-dev-shm-usage"]
 SELLER_URL = "https://www.wildberries.ru/seller/{}"
-DELIVERY_URL = "https://www.wildberries.ru/lk/myorders/delivery"  # тут сайт показывает «Код получения NNN NNN»
-CODE_WAIT_SEC = 20  # SPA дорисовывает блок с кодом — ждём до стольких секунд
+DELIVERY_URL = "https://www.wildberries.ru/lk/myorders/delivery"  # ЛК: открылся — сессия сайта жива
 SELECT_WAIT_SEC = 10  # экран «В какой аккаунт хотите войти?» дорисовывается не сразу
 SELECT_TITLE = "В какой аккаунт хотите войти?"
 PHONE_ON_PAGE = re.compile(r"\+7 \d{3} \d{3}-\d{2}-\d{2}")  # «+7 988 156-78-17» на экране выбора
 # почему визит не удался — keeper пишет в wb_accounts.visit_error, сайт показывает
 VISIT_SESSION = "сессия сайта WB истекла — войдите заново"
 VISIT_PAGE = "WB не открыл страницу — проверьте прокси"
-VISIT_NO_CODE = "на странице WB кода нет — товаров в ПВЗ нет?"
 # служебные заголовки запроса браузера, которые curl ставит сам (cookie — свои)
 SKIP_HEADERS = {"host", "content-length", "connection", "cookie"}
 # вход завершён, когда сайт доделал обмен кода WB ID на свою сессию: callback → (переход на returnUrl) →
@@ -460,27 +458,11 @@ async def _open_lk(ctx, page, phone: str | None) -> str | None:
     return VISIT_PAGE
 
 
-async def _visit(page, want_code: bool) -> dict:
-    """ЛК уже открыт (_open_lk): код получения со страницы доставок и история баланса (mywallet) — то, что WB
-    считает/отдаёт только в браузере. Части независимы: сбой одной не мешает другой и не ломает рефреш."""
-    from app.wb.account_api import WALLET_JS, parse_pickup_code
-    out = {"pickup_code": None, "balance": None, "error": None}
-    if want_code:
-        text = ""
-        try:
-            for _ in range(CODE_WAIT_SEC):
-                await asyncio.sleep(1)
-                text = await page.evaluate("document.body ? document.body.innerText : ''")
-                if code := parse_pickup_code(text):
-                    out["pickup_code"] = code
-                    break
-        except Exception as e:
-            log.warning("визит: код получения не прочитан: %s: %s", type(e).__name__, str(e)[:200])
-        if not out["pickup_code"]:
-            i = (text or "").find("Доставк")  # начало блока заказов, иначе начало страницы
-            log.info("визит: кода получения нет, страница %s: %s", page.url,
-                     " ".join((text or "")[max(i, 0):max(i, 0) + 400].split())[:200])
-            out["error"] = VISIT_NO_CODE
+async def _visit(page) -> dict:
+    """ЛК уже открыт (_open_lk): история баланса (mywallet) — её WB отдаёт только в браузере. Сбой не ломает рефреш.
+    Код получения — HTTP (account_api.pickup_code), не отсюда."""
+    from app.wb.account_api import WALLET_JS
+    out = {"balance": None, "error": None}
     try:
         res = await asyncio.wait_for(page.evaluate(WALLET_JS), 20) or {}
         if res.get("ok"):
@@ -493,11 +475,11 @@ async def _visit(page, want_code: bool) -> dict:
 
 
 async def refresh(storage_state: dict | str, proxy: str | None = None, *,
-                  visit: bool = False, want_code: bool = False, phone: str | None = None) -> dict | None:
+                  visit: bool = False, phone: str | None = None) -> dict | None:
     """Поддержание сессии: заходим на сайт с куками, возвращаем обновлённую банку.
 
     None — если сессия протухла (разлогинило). ProxyDown — прокси не отвечает (сессия не тронута).
-    Зовётся по таймеру и при 401/403. visit — заодно визит (_visit): история баланса и, если want_code, код получения.
+    Зовётся по таймеру и при 401/403. visit — заодно визит (_visit): история баланса.
     """
     from patchright.async_api import async_playwright
 
@@ -521,13 +503,13 @@ async def refresh(storage_state: dict | str, proxy: str | None = None, *,
             # жива ли сессия САЙТА — по тому, открылся ли ЛК на www (главная открывается и анонимно).
             # Не открылся — НЕ relogin: HTTP-опрос по Bearer при этом жив; причина уходит на сайт
             error = await _open_lk(ctx, page, phone)
-            extra = {"pickup_code": None, "balance": None, "error": error}
+            extra = {"balance": None, "error": error}
             if error:
                 log.warning("веб-рефреш: куки есть, но ЛК не открылся — %s (бизнес-цены могут идти анонимно)", error)
             else:
                 log.info("веб-рефреш: сессия жива, ЛК открылся")
                 if visit:
-                    extra = await _visit(page, want_code)
+                    extra = await _visit(page)
             state = await ctx.storage_state()  # после визита: куки могли обновиться
             state[PROFILE_KEY] = profile
             state[VISIT_KEY] = extra
@@ -923,23 +905,23 @@ if __name__ == "__main__":  # self-check чистых функций (без б�
     with patch.object(log, "warning"), patch.object(log, "info"):
         asyncio.run(demo2())
 
-    # визит: ЛК (с выбором аккаунта WB ID), код получения, история баланса; причины неудачи
+    # визит: ЛК (с выбором аккаунта WB ID), история баланса; причины неудачи. Код получения — HTTP, не здесь
     DONE_ON_LK = [(1, "site:" + DELIVERY_URL), (3, "afterauth")]  # как у Ани: сайт сам уходит в ЛК, afterauth — там
 
-    async def lk(pg, want_code=True, phone="+7 988 156-78-17"):
+    async def lk(pg, phone="+7 988 156-78-17"):
         err = await _open_lk(Ctx(pg), pg, phone)
-        return err, (await _visit(pg, want_code) if err is None else None)
+        return err, (await _visit(pg) if err is None else None)
 
     async def demo3():
         with patch.object(asyncio, "sleep", tick):
-            # обычный случай: ЛК на www, код дорисовался не сразу, баланс пришёл
-            pg = FakePage(texts=["Загрузка…", "Доставки\nКод получения\n112\u00a0396\n12 ноября"])
-            assert await lk(pg) == (None, {"pickup_code": "112396", "balance": {"value": 1}, "error": None})
+            # обычный случай: ЛК на www, баланс пришёл
+            pg = FakePage(texts=["Доставки\nКод получения\n112\u00a0396\n12 ноября"])
+            assert await lk(pg) == (None, {"balance": {"value": 1}, "error": None})
             # выбор аккаунта при ЖИВЫХ старых куках www: кликаем НАШ номер; до afterauth — ни одного goto,
-            # сайт сам ушёл в ЛК → повторный goto не нужен; код прочитан
+            # сайт сам ушёл в ЛК → повторный goto не нужен
             pg = FakePage(redirect=SELECT, cookies=[SSO, WWW_OK], phones=["+7 900 111-22-33", "+7 988 156-78-17"],
-                          after_click=DONE_ON_LK, texts=["Код получения 070 924"])
-            assert await lk(pg) == (None, {"pickup_code": "070924", "balance": {"value": 1}, "error": None})
+                          after_click=DONE_ON_LK)
+            assert await lk(pg) == (None, {"balance": {"value": 1}, "error": None})
             (clicked_at, who), = pg.clicks
             assert who == "+7 988 156-78-17" and [u for _, u in pg.gotos] == [DELIVERY_URL], pg.gotos
             assert not any(clicked_at <= at < clicked_at + 3 for at, _ in pg.gotos)
@@ -959,20 +941,16 @@ if __name__ == "__main__":  # self-check чистых функций (без б�
             # страница не открылась (прокси) и увела не туда
             assert await lk(FakePage(goto_fails=True)) == (VISIT_PAGE, None)
             assert await lk(FakePage(redirect="https://www.wildberries.ru.evil/x")) == (VISIT_PAGE, None)
-            # ЛК открылся, кода нет → «товаров в ПВЗ нет?»; без want_code причины нет
-            err, out = await lk(FakePage(texts=["Доставки\nУ вас нет заказов"]))
-            assert err is None and out == {"pickup_code": None, "balance": {"value": 1}, "error": VISIT_NO_CODE}
-            assert (await lk(FakePage(), want_code=False))[1]["error"] is None
+            # ЛК открылся, кода на странице нет — визиту всё равно: ошибки нет (раньше ложное «товаров в ПВЗ нет?»)
+            assert await lk(FakePage(texts=["Доставки\nУ вас нет заказов"])) == (None, {"balance": {"value": 1}, "error": None})
             # баланс 405 — в лог статус и тело, сам баланс None
-            err, out = await lk(FakePage(texts=["Код получения 112 396"],
-                                         wallet={"ok": False, "status": 405, "text": "<html>405 Not Allowed</html>"}))
-            assert out["balance"] is None and out["pickup_code"] == "112396"
+            err, out = await lk(FakePage(wallet={"ok": False, "status": 405, "text": "<html>405 Not Allowed</html>"}))
+            assert err is None and out["balance"] is None
     with patch.object(log, "warning") as warn, patch.object(log, "info") as info:
         asyncio.run(demo3())
     logged = " ".join(str(c) for c in warn.call_args_list + info.call_args_list)
     assert "405" in logged and "405 Not Allowed" in logged  # почему не пришёл баланс
     assert "…78-17" in logged and "первый номер в списке" in logged  # что выбрали
-    assert "У вас нет заказов" in logged  # кусок страницы, где не нашёлся код
 
     # выпуск антибота: постоянный профиль, куки чистим до страницы, после сбоя — профиль с нуля
     import sys

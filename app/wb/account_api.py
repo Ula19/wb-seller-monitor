@@ -135,13 +135,22 @@ WALLET_JS = """async () => {
 }"""  # → {ok, data} или {ok: false, status, text} — чтобы в логе было видно, почему не вышло
 # код получения в ПВЗ: в API WB его нет — сайт считает в браузере (ежедневный, до 00:00 МСК); читаем текстом
 # 6 цифр, между тройками бывает пробел/неразрывный; (?!\d) — не прихватить число со следующей строки («12 ноября»)
-PICKUP_CODE_RE = re.compile(r"Код получения\s*(\d{3})[ \u00a0]?(\d{3})(?!\d)")
+# код получения в ПВЗ — как у сайта (deliveryCode-service, SCOUT 2026-11-25): коды на 7 дней вперёд, только Bearer
+CODE_URL = "https://delivery-code.wildberries.ru/delivery-code/api/v1/otp/get"
+CODE_HEADERS = {"WB-AppType": "site", "WB-AppVersion": "700"}
 
 
-def parse_pickup_code(text: str) -> str | None:
-    """«Код получения 112 396» → «112396»."""
-    m = PICKUP_CODE_RE.search(text or "")
-    return m.group(1) + m.group(2) if m else None
+def utc_today():
+    """«Сегодня» для кода получения — по UTC, как у сайта: WB меняет код в 00:00 UTC (03:00 МСК)."""
+    return datetime.now(timezone.utc).date()
+
+
+def parse_pickup_code(d, today) -> str | None:
+    """otp/get → код на сегодня (UTC): extCode (6 цифр, его показывает сайт), иначе code; записи нет — None."""
+    for r in d if isinstance(d, list) else []:
+        if str(r.get("date") or "")[:10] == today.isoformat() and (code := r.get("extCode") or r.get("code")):
+            return str(code)
+    return None
 
 
 def _iso(s) -> datetime | None:
@@ -296,10 +305,12 @@ API_KINDS = ("orders", "balance", "vb", "grade")  # типы данных опр
 PVZ_STATUS = "Приходите за товаром"  # status 210, group 5
 
 
-async def fetch(state: dict, proxy: str | None = None, kinds=API_KINDS, vb_total: int | None = None) -> tuple[dict, dict]:
+async def fetch(state: dict, proxy: str | None = None, kinds=API_KINDS, vb_total: int | None = None,
+                want_code: bool = False) -> tuple[dict, dict]:
     """Только запрошенные типы: orders (заказы + статусы), balance (баланс, лимит), vb (ВБ-баллы; история — только если
     итог не равен vb_total), grade (% Кошелька). → (пришедшее, {тип: исключение}): каждый тип отдельно, сбой одного
-    не отменяет остальные. 401 у orders/balance/grade — Unauthorized наверх (рефреш); у баллов — просто сбой, как было."""
+    не отменяет остальные. 401 у orders/balance/grade — Unauthorized наверх (рефреш); у баллов — просто сбой, как было.
+    want_code и есть товар в ПВЗ — ещё код получения на сегодня (pickup_code…); не вышло — errs["code"]."""
     out, errs = {}, {}
     async with _client(state, proxy) as (call, auth, with_vkey):
         async def orders():
@@ -313,6 +324,15 @@ async def fetch(state: dict, proxy: str | None = None, kinds=API_KINDS, vb_total
             if ask:
                 apply_statuses(ask, await call("POST", STATUSES_URL, headers=auth, json={"ids": [o["rid"] for o in ask]}))
             out["orders"] = rows
+            if want_code and any(o["expiry_at"] for o in rows):
+                try:  # сбой кода заказы не портит
+                    code = await pickup_code(call, auth)
+                    if code is None:
+                        raise LookupError("кода на сегодня в ответе WB нет")
+                    out.update(pickup_code=code, pickup_code_date=utc_today(), pickup_code_at=datetime.now(timezone.utc))
+                except Exception as e:
+                    errs["code"] = e
+                    log.warning("код получения не получен: %s: %s", type(e).__name__, str(e)[:200])
 
         async def balance():
             out.update(parse_balance(await call("GET", BALANCE_URL, headers=with_vkey)))
@@ -339,6 +359,16 @@ async def fetch(state: dict, proxy: str | None = None, kinds=API_KINDS, vb_total
                 errs[k] = e
                 log.warning("%s не получено: %s: %s", k, type(e).__name__, str(e)[:200])
     return out, errs
+
+
+async def pickup_code(call, auth) -> str | None:
+    return parse_pickup_code(await call("GET", CODE_URL, headers={**auth, **CODE_HEADERS}), utc_today())
+
+
+async def fetch_pickup_code(state: dict, proxy: str | None = None) -> str | None:
+    """Код получения на сегодня одним запросом (отправка забора). Unauthorized/NoBearer/ProxyDown — наверх."""
+    async with _client(state, proxy) as (call, auth, _):
+        return await pickup_code(call, auth)
 
 
 async def fetch_purchases(state: dict, proxy: str | None = None,
@@ -634,14 +664,17 @@ if __name__ == "__main__":  # self-check на формах ответов из H
 
             async def request(self, method, url, **kw):
                 seen.append((url, kw.get("headers", {}).get("Cookie"), kw.get("json")))
+                if url == CODE_URL:
+                    assert {k: kw["headers"][k] for k in CODE_HEADERS} == CODE_HEADERS and "Bearer" in kw["headers"]["Authorization"]
                 return bodies[url]
         return S, seen
 
     async def demo():
-        async def run(kinds=API_KINDS, vb_total=None, **over):
+        async def run(kinds=API_KINDS, vb_total=None, want_code=False, **over):
             S, seen = session(**over)
             with patch(f"{__name__}.AsyncSession", S), patch(f"{__name__}.web_proxy", lambda: None):
-                out, errs = await fetch({**st, "cookies": [{"name": "wbx-validation-key", "value": "vk"}]}, None, kinds, vb_total)
+                out, errs = await fetch({**st, "cookies": [{"name": "wbx-validation-key", "value": "vk"}]}, None, kinds, vb_total,
+                                        want_code)
             return out, errs, [u for u, *_ in seen], seen
         out, errs, urls, seen = await run()
         assert (out["funds"], out["vb_points"], out["orders"], out["vb_ops"], errs) == (197888, 9094, [], [], {}), out
@@ -664,6 +697,20 @@ if __name__ == "__main__":  # self-check на формах ответов из H
             ("pvz", 5, PVZ_STATUS), ("go", 3, "Едет в пункт выдачи")], out
         out, errs, urls, _ = await run(("orders",), **{ORDERS_URL: R(200, {"data": [ORD["data"][0] | {"rids": ORD["data"][0]["rids"][:1]}]})})
         assert urls == [ORDERS_URL] and out["orders"][0]["group_id"] == 5  # все в ПВЗ — статусы не нужны
+        # код получения: только с want_code и товаром в ПВЗ; запись на сегодня (UTC); нет записи / сбой — errs["code"], заказы целы
+        today = utc_today().isoformat()
+        otp = R(200, [{"date": f"{today}T12:00:00+00:00", "code": "56495", "extCode": "729281"}])
+        out, errs, urls, _ = await run(("orders",), want_code=True, **{ORDERS_URL: R(200, ORD), CODE_URL: otp})
+        assert (out["pickup_code"], out["pickup_code_date"], urls[-1], errs) == ("729281", utc_today(), CODE_URL, {}), out
+        assert out["pickup_code_at"] and len(out["orders"]) == 2
+        out, errs, urls, _ = await run(("orders",), **{ORDERS_URL: R(200, ORD), CODE_URL: otp})  # без want_code — не спрашиваем
+        assert CODE_URL not in urls and "pickup_code" not in out
+        no_pvz = {"data": [ORD["data"][0] | {"rids": ORD["data"][0]["rids"][1:]}]}  # только «в пути» — кода не нужно
+        out, errs, urls, _ = await run(("orders",), want_code=True, **{ORDERS_URL: R(200, no_pvz), CODE_URL: otp})
+        assert CODE_URL not in urls and not errs
+        for bad in (R(200, [{"date": "2020-01-01T12:00:00+00:00", "extCode": "1"}]), R(500, {})):
+            out, errs, urls, _ = await run(("orders",), want_code=True, **{ORDERS_URL: R(200, ORD), CODE_URL: bad})
+            assert set(errs) == {"code"} and "pickup_code" not in out and len(out["orders"]) == 2, (out, errs)
         out, errs, urls, _ = await run(("balance", "orders"), **{BALANCE_URL: R(500, {}), ORDERS_URL: R(200, ORD)})
         assert set(errs) == {"balance"} and len(out["orders"]) == 2 and "funds" not in out  # сбой баланса не мешает заказам
         for k, url in (("balance", BALANCE_URL), ("orders", ORDERS_URL), ("grade", GRADE_URL)):
@@ -715,9 +762,14 @@ if __name__ == "__main__":  # self-check на формах ответов из H
     assert bal[0]["dt"] == datetime(2026, 11, 9, 13, 42, 14, 716000, tzinfo=timezone.utc) and bal[0]["balance"] == 2390
     assert parse_balance_history(None) == []
     # код получения: строго 6 цифр, неразрывный пробел, без числа со следующей строки
-    assert parse_pickup_code("Код получения\n112\u00a0396\n12 ноября") == "112396"
-    assert parse_pickup_code("Код получения 112396") == "112396" and parse_pickup_code("Код получения 1123") is None
-    assert parse_pickup_code("") is None and parse_pickup_code(None) is None
+    # код получения: otp/get — коды на 7 дней, «сегодня» по UTC (02:00 МСК 26.11 = 23:00 UTC 25.11 → ещё код 25-го)
+    from datetime import date
+    OTP = [{"date": "2026-11-25T12:00:00+00:00", "code": "56495", "extCode": "729281", "qr": "31700185_56495_729281_1"},
+           {"date": "2026-11-26T12:00:00+00:00", "code": "11111", "extCode": "222333"},
+           {"date": "2026-11-27T12:00:00+00:00", "code": "44444"}]  # без extCode — 5-значный code
+    assert parse_pickup_code(OTP, date(2026, 11, 25)) == "729281" and parse_pickup_code(OTP, date(2026, 11, 26)) == "222333"
+    assert parse_pickup_code(OTP, date(2026, 11, 27)) == "44444" and parse_pickup_code(OTP, date(2026, 12, 9)) is None
+    assert parse_pickup_code(None, date(2026, 11, 25)) is None and parse_pickup_code({"error": 1}, date(2026, 11, 25)) is None
 
     async def pages():  # листаем по 100, пока страница полная; догрузка — до страницы без новых rid
         page = lambda k: {"data": {"purchases": {"data": {"Items": [item(f"r{k}_{i}") for i in range(PURCHASES_PAGE)]}}}}

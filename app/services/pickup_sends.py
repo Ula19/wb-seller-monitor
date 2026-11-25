@@ -1,8 +1,7 @@
 """«Общий забор», worker (SCOUT 2026-11-21, часть 2): pickup_sends pending → код получения → Telegram.
 
-Свой цикл, не очередь прокси: визит в браузере ~30 с задержал бы сертификаты и оплаты. Строки — по аккаунтам: нет кода
-на сегодня (МСК) — один визит за кодом (keeper._refresh — под замком аккаунта, два браузера на одном профиле не
-откроются), потом одно сообщение на пару «аккаунт + ПВЗ» каждому из pickup_to через send_safe.
+Свой цикл, не очередь прокси. Строки — по аккаунтам: нет кода на сегодня (UTC, как у WB) — один HTTP-запрос otp/get
+(секунда, без браузера), потом одно сообщение на пару «аккаунт + ПВЗ» каждому из pickup_to через send_safe.
 """
 import asyncio
 import json
@@ -12,10 +11,12 @@ from datetime import datetime, timezone
 from sqlalchemy import select, update
 
 from app.bot.utils import send_safe
+from app.crypto import decrypt_json
 from app.db import models, repo
 from app.db.base import Session
 from app.pickup import pickup_text
 from app.services import keeper
+from app.wb import account_api
 from app.wb.web_session import ProxyDown
 
 POLL_SEC = 2
@@ -39,37 +40,42 @@ async def _finish(ids: list[int], **values) -> None:
 
 
 def _today_code(acc: models.WbAccount) -> str | None:
-    return acc.pickup_code if acc.pickup_code and acc.pickup_code_date == repo.msk_today() else None
+    return acc.pickup_code if acc.pickup_code and acc.pickup_code_date == repo.code_today() else None
 
 
 async def _code(bot, acc: models.WbAccount) -> tuple[models.WbAccount | None, str | None, str | None]:
-    """→ (свежий аккаунт, код, причина если кода нет). Нет кода на сегодня — визит за ним (как «Готовы забрать»).
-    Просили «Обновить коды» (browser_sync), а очередь визитов до аккаунта ещё не дошла — коду из БД не верим: идём сами
-    и снимаем флаг, чтобы очередь не ходила второй раз."""
-    # ponytail: очередь визитов уже внутри этого аккаунта — дождёмся замка и сходим ещё раз (+~30 с, редко)
-    if (code := _today_code(acc)) and not acc.browser_sync:
+    """→ (аккаунт, код, причина если кода нет). Нет кода на сегодня (UTC) — один HTTP-запрос otp/get (секунда, без
+    браузера); 401 — рефреш сессии и повтор, как в опросе."""
+    if code := _today_code(acc):
         return acc, code, None
+    proxy = await keeper.proxy_url(acc.proxy_id)
     try:
-        refreshed = await keeper._refresh(acc, visit=True, want_code=True)
-        async with Session() as s:  # визит был — повторять не нужно, удачный или нет
-            await s.execute(update(models.WbAccount).where(models.WbAccount.id == acc.id).values(browser_sync=False))
-            await s.commit()
-        if refreshed is None:
-            await keeper._relogin(bot, acc)
-            return acc, None, "сессия сайта истекла — войдите в аккаунт заново"
+        try:
+            code = await account_api.fetch_pickup_code(decrypt_json(acc.state_enc), proxy)
+        except (account_api.Unauthorized, account_api.NoBearer):
+            state = await keeper._refresh(acc)
+            if state is None:
+                await keeper._relogin(bot, acc)
+                return acc, None, "сессия сайта истекла — войдите в аккаунт заново"
+            code = await account_api.fetch_pickup_code(state, proxy)
     except ProxyDown as e:
         await keeper._proxy_alert(bot, acc, e)
         return acc, None, "прокси не отвечает — проверьте его в разделе «Прокси»"
     except keeper.AccountGone:
         return None, None, "аккаунт удалён"
+    except account_api.Unauthorized:
+        await keeper._relogin(bot, acc)
+        return acc, None, "сессия сайта истекла — войдите в аккаунт заново"
     except Exception as e:
-        log.warning("забор: визит %s: %s: %s", acc.title, type(e).__name__, str(e)[:200])
-        return acc, None, f"визит за кодом не удался: {type(e).__name__}"
+        log.warning("забор: код %s: %s: %s", acc.title, type(e).__name__, str(e)[:200])
+        return acc, None, f"код получения не получен: {type(e).__name__}"
+    if not code:
+        return acc, None, "WB не дал код получения на сегодня"
     async with Session() as s:
-        acc = await s.get(models.WbAccount, acc.id)
-    if acc is None:
-        return None, None, "аккаунт удалён"
-    return acc, _today_code(acc), None if _today_code(acc) else (acc.visit_error or "WB не показал код получения")
+        await s.execute(update(models.WbAccount).where(models.WbAccount.id == acc.id).values(
+            pickup_code=code, pickup_code_date=account_api.utc_today(), pickup_code_at=datetime.now(timezone.utc)))
+        await s.commit()
+    return acc, code, None
 
 
 async def _account(bot, acc_id: int | None, rows: list, to: list[int]) -> None:

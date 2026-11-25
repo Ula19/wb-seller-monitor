@@ -37,7 +37,7 @@ function useRefresh(a: AccountFull | undefined) {
   return { poll, note };
 }
 
-/** Визит в браузере аккаунта (~30 с): код получения + история баланса. Пока идёт — browser_sync. */
+/** Визит в браузере аккаунта (~30 с): история баланса. Пока идёт — browser_sync. Код получения — HTTP-опросом. */
 function useSync(a: AccountFull) {
   const qc = useQueryClient();
   const [err, setErr] = useState("");
@@ -119,9 +119,17 @@ function PvzCancel({ a, g, onClose }: { a: AccountFull; g: Pvz; onClose: () => v
   );
 }
 
-function PickupButton({ g, a, sync }: { g: Pvz; a: AccountFull; sync: ReturnType<typeof useSync> }) {
+function PickupButton({ g, a }: { g: Pvz; a: AccountFull }) {
+  const qc = useQueryClient();
   const [asked, setAsked] = useState(false);  // ждём код, который запросили отсюда
   const [copied, setCopied] = useState(false);
+  const [err, setErr] = useState("");
+  const get = useMutation({  // кода на сегодня нет — внеочередной HTTP-опрос: код берётся всегда, за секунды (otp/get)
+    mutationFn: () => api(`/accounts/${a.id}/poll`, { method: "POST" }),
+    onMutate: () => setErr(""),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["accounts", a.id] }),
+    onError: (e: unknown) => setErr(e instanceof ApiError ? e.message : "ошибка"),
+  });
   const copy = async () => {
     try {
       await navigator.clipboard.writeText(pickupText(g, a, a.pickup_code!));
@@ -131,16 +139,16 @@ function PickupButton({ g, a, sync }: { g: Pvz; a: AccountFull; sync: ReturnType
   };
   if (a.pickup_code) return (  // буфер пишется надёжно только по клику — поэтому без автокопирования после ожидания
     <button className="btn ok" onClick={copy}>{copied ? "Скопировано ✓" : asked ? "Скопировать" : "Готовы забрать"}</button>);
-  if (sync.busy) return <span className="muted small"><span className="spin" /> Получаю код… (~30 с)</span>;
+  if (a.polling || get.isPending) return <span className="muted small"><span className="spin" /> Получаю код…</span>;
   return (
     <>
-      {asked && <span className="up-t small">{a.visit_error ?? "код не получен — попробуйте ещё раз"} </span>}
-      <button className="btn ok" onClick={() => { setAsked(true); sync.start(); }}>Готовы забрать</button>
+      {asked && <span className="up-t small">{err || "код не получен — попробуйте ещё раз"} </span>}
+      <button className="btn ok" onClick={() => { setAsked(true); get.mutate(); }}>Готовы забрать</button>
     </>
   );
 }
 
-function OrdersTab({ a, sync }: { a: AccountFull; sync: ReturnType<typeof useSync> }) {
+function OrdersTab({ a }: { a: AccountFull }) {
   const qc = useQueryClient();
   const img = useImg();
   const [shown, setShown] = useState<Set<number>>(new Set());  // ПВЗ, где показываем скрытые
@@ -195,12 +203,11 @@ function OrdersTab({ a, sync }: { a: AccountFull; sync: ReturnType<typeof useSyn
               }}>{shown.has(g.id) ? "убрать" : "показать"}</button></span>}
               {vis.length > 0 && <button className="btn ghost bad-t" onClick={() => setCancelling(g)}>Отменить</button>}
               {due > 0 && <button className="btn" onClick={() => setPaying(g.id)}>Оплатить {rub(due)}</button>}
-              {ready > 0 && <PickupButton g={g} a={a} sync={sync} />}
+              {ready > 0 && <PickupButton g={g} a={a} />}
             </div>
           </div>
         );
       })}
-      {sync.err && <p className="err">{sync.err}</p>}
       {paying != null && byPvz(a.orders).some((g) => g.id === paying) &&
         <PvzPay a={a} g={byPvz(a.orders).find((g) => g.id === paying)!} onClose={() => setPaying(null)} />}
       {cancelling && <PvzCancel a={a} g={cancelling} onClose={() => setCancelling(null)} />}
@@ -387,8 +394,8 @@ export default function Account() {
         {a.proxy ? `прокси ${a.proxy.label} · ${a.proxy.exit_ip ?? a.proxy.server}` : <span className="up-t">без своего прокси — IP мониторинга</span>}
         {note && <span className="up-t"> · {note}</span>}
       </div>
-      {a.site_lost && a.status === "active" && <div className="small bad-t">{a.visit_error}: код получения и история
-        баланса не обновляются (лимит и заказы — обновляются)</div>}
+      {a.site_lost && a.status === "active" && <div className="small bad-t">{a.visit_error}: история
+        баланса не обновляется (лимит, заказы и код получения — обновляются)</div>}
       {a.wallet_blocked && <div className="small bad-t">WB наложил ограничение на Кошелёк — оплата им недоступна</div>}
       {a.proxy_down && <div className="small up-t">прокси не ответил {a.proxy_fails} раз подряд, последний {time(a.proxy_fail_at)}</div>}
       <div className="tiles acc-tiles">
@@ -410,7 +417,7 @@ export default function Account() {
 }
 
 function TabBody({ a, tab }: { a: AccountFull; tab: string }) {
-  const sync = useSync(a);  // один на страницу: «Готовы забрать» и «Обновить» баланса — один и тот же визит
+  const sync = useSync(a);  // «Обновить» баланса — визит в браузере
   return tab === "history" ? <HistoryTab a={a} /> : tab === "balance" ? <BalanceTab a={a} sync={sync} />
-    : tab === "vb" ? <VbTab a={a} /> : <OrdersTab a={a} sync={sync} />;
+    : tab === "vb" ? <VbTab a={a} /> : <OrdersTab a={a} />;
 }

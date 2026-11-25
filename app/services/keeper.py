@@ -103,17 +103,17 @@ async def _attach_offices(rows: list[dict], key: str) -> None:
         r["office_address"], r["office_hours"] = offices.get(r[key], (None, None))
 
 
-async def _refresh(acc: models.WbAccount, *, visit: bool = False, want_code: bool = False) -> dict | None:
+async def _refresh(acc: models.WbAccount, *, visit: bool = False) -> dict | None:
     """Браузерный рефреш сессии; живая → сохраняем. None — протухла. ProxyDown — прокси не отвечает.
-    visit — заодно история баланса и (want_code) код получения. Сессию берём из БД уже под замком аккаунта:
-    предыдущий рефреш мог её обновить."""
+    visit — заодно ЛК и история баланса (код получения — HTTP-опросом, не здесь). Сессию берём из БД уже под замком
+    аккаунта: предыдущий рефреш мог её обновить."""
     async with _acc_locks.setdefault(acc.id, asyncio.Lock()):
         async with Session() as s:
             row = await s.get(models.WbAccount, acc.id)
             if row is None:
                 raise AccountGone(acc.id)
             state, proxy_id, phone = decrypt_json(row.state_enc), row.proxy_id, row.phone
-        new = await web_session.refresh(state, await proxy_url(proxy_id), visit=visit, want_code=want_code, phone=phone)
+        new = await web_session.refresh(state, await proxy_url(proxy_id), visit=visit, phone=phone)
         if new is None:
             return None
         profile = new.pop(account_api.PROFILE_KEY, None)
@@ -126,15 +126,11 @@ async def _refresh(acc: models.WbAccount, *, visit: bool = False, want_code: boo
                 repo.apply_profile(row, profile)  # имя, полный телефон, процент выкупа — без перелогина
                 if seen:  # ЛК открывался — итог (None = всё хорошо) на сайт
                     row.visit_error = seen.get("error")
-                if seen.get("pickup_code"):
-                    row.pickup_code, row.pickup_code_date = seen["pickup_code"], repo.msk_today()
-                    row.pickup_code_at = datetime.now(timezone.utc)
                 if ops:
                     await repo.upsert_balance_ops(s, acc.id, ops)
                 await s.commit()
         if visit or seen.get("error"):
-            log.info("keeper: визит аккаунта %s: код получения %s, операций баланса %s%s", acc.title,
-                     "есть" if seen.get("pickup_code") else "нет", len(ops) if ops is not None else "—",
+            log.info("keeper: визит аккаунта %s: операций баланса %s%s", acc.title, len(ops) if ops is not None else "—",
                      f" — {seen['error']}" if seen.get("error") else "")
         return new
 
@@ -171,17 +167,15 @@ async def maintenance_reminder(bot) -> None:
 
 
 async def refresh_job(bot) -> None:
-    """Освежает сессии активных аккаунтов по очереди (00:05 и 12:05 МСК) и заодно визит: история баланса и код
-    получения — его ждём, только если есть заказы в ПВЗ. Протухла → «нужен вход» владельцу."""
+    """Освежает сессии активных аккаунтов по очереди (00:05 и 12:05 МСК) и заодно визит: ЛК и история баланса.
+    Протухла → «нужен вход» владельцу."""
     if await poll_paused():
         return log.info("keeper: визиты пропущены — фоновый опрос WB на паузе (режим работ)")
     async with Session() as s:
         accounts = await repo.active_accounts(s)
     for acc in accounts:
         try:
-            async with Session() as s:
-                want_code = await repo.has_pickup_orders(s, acc.id)
-            state = await _refresh(acc, visit=True, want_code=want_code)
+            state = await _refresh(acc, visit=True)
         except ProxyDown as e:
             await _proxy_alert(bot, acc, e)
             continue
@@ -193,6 +187,7 @@ async def refresh_job(bot) -> None:
 
 
 KINDS = (*account_api.API_KINDS, "notices")  # типы данных опроса; порядок — порядок запросов
+CODE_RETRY_SEC = 3600  # код получения не пришёл — следующая попытка опросом не раньше (кнопки — сразу)
 DUE_SLACK = 20  # сек: минутный тик не должен проскочить, например, 3-минутный интервал из-за длительности опроса
 # acc_id → {тип: время последней ПОПЫТКИ (и при сбое: мёртвый прокси не дёргаем каждую минуту), "vb_total": итог баллов}.
 # ponytail: в памяти — рестарт worker'а = всё сразу у всех; в БД — если рестарты станут частыми
@@ -250,10 +245,14 @@ async def poll_account(bot, acc: models.WbAccount, kinds=KINDS) -> None:
     state = decrypt_json(acc.state_enc)
     proxy = await proxy_url(acc.proxy_id)
     st, errs = {}, {}
+    # код получения: нет на сегодня (UTC) — с заказами, после неудачи — не чаще раза в час; ↻ с сайта (все типы) — всегда
+    manual = set(kinds) == set(KINDS)
+    # (берётся только вместе с заказами — в account_api.fetch, тип orders)
+    want_code = manual or (acc.pickup_code_date != repo.code_today() and now - last.get("code_fail", 0) >= CODE_RETRY_SEC)
     try:
         try:
             if api_kinds:
-                st, errs = await account_api.fetch(state, proxy, api_kinds, last.get("vb_total"))
+                st, errs = await account_api.fetch(state, proxy, api_kinds, last.get("vb_total"), want_code)
         except (account_api.Unauthorized, account_api.NoBearer) as e:
             log.info("keeper: аккаунт %s: %s, освежаю сессию и повторяю",
                      acc.id, f"401 ({e})" if isinstance(e, account_api.Unauthorized) else "нет Bearer")
@@ -261,7 +260,7 @@ async def poll_account(bot, acc: models.WbAccount, kinds=KINDS) -> None:
             if state is None:
                 await _relogin(bot, acc)
                 return
-            st, errs = await account_api.fetch(state, proxy, api_kinds, last.get("vb_total"))
+            st, errs = await account_api.fetch(state, proxy, api_kinds, last.get("vb_total"), want_code)
     except ProxyDown as e:  # рефреш через браузер не прошёл
         await _proxy_alert(bot, acc, e)
         return
@@ -279,6 +278,10 @@ async def poll_account(bot, acc: models.WbAccount, kinds=KINDS) -> None:
         if down:
             await _proxy_alert(bot, acc, down)
         return
+    if "code" in errs:
+        last["code_fail"] = now
+    elif "pickup_code" in st:
+        last.pop("code_fail", None)
     if "vb_points" in st and ("vb_ops" in st or st["vb_points"] == last.get("vb_total")):
         last["vb_total"] = st["vb_points"]  # история взята (или не нужна) — следующий раз только при смене итога
     gone = 0
@@ -484,8 +487,7 @@ async def account_polls_loop(bot) -> None:
 
 
 async def process_browser_sync(bot) -> bool:
-    """Визит в браузере по кнопке с сайта («Готовы забрать», «Обновить» баланса) — всегда с кодом получения:
-    товар мог прийти днём, после планового визита. False — некого."""
+    """Визит в браузере по кнопке с сайта («Обновить» баланса): ЛК и история баланса. False — некого."""
     async with Session() as s:
         acc = await s.scalar(select(models.WbAccount).where(models.WbAccount.browser_sync)
                              .order_by(models.WbAccount.id).limit(1))
@@ -493,13 +495,13 @@ async def process_browser_sync(bot) -> bool:
             return False
     try:
         try:
-            if await _refresh(acc, visit=True, want_code=True) is None:
+            if await _refresh(acc, visit=True) is None:
                 await _relogin(bot, acc)
         except ProxyDown as e:
             await _proxy_alert(bot, acc, e)
         except AccountGone:
             pass
-    finally:  # иначе на сайте «Получаю код…» висит, а цикл крутит один и тот же аккаунт
+    finally:  # иначе на сайте «обновляю…» висит, а цикл крутит один и тот же аккаунт
         async with Session() as s:
             await s.execute(update(models.WbAccount).where(models.WbAccount.id == acc.id).values(browser_sync=False))
             await s.commit()

@@ -14,9 +14,9 @@ from app.wb.parser import NormProduct
 MSK = timezone(timedelta(hours=3))  # у Москвы нет перехода на летнее время; tzdata в контейнере может не быть
 
 
-def msk_today():
-    """Сегодня по МСК: код получения действует до 00:00 МСК."""
-    return datetime.now(MSK).date()
+def code_today():
+    """«Сегодня» для кода получения — по UTC, как у сайта WB: код меняется в 00:00 UTC (03:00 МСК). Ночью ПВЗ закрыты."""
+    return datetime.now(timezone.utc).date()
 
 
 def _utcnow() -> datetime:
@@ -379,7 +379,7 @@ async def upsert_account_prices(s, account_id: int, prices: dict[int, int]) -> N
 
 
 ACCOUNT_STATE_FIELDS = ("wallet_pct", "limit_left", "monthly_limit", "max_order", "max_rid", "funds", "vb_points",
-                        "wallet_blocked", "wallet_arrested")
+                        "wallet_blocked", "wallet_arrested", "pickup_code", "pickup_code_date", "pickup_code_at")
 
 
 async def proxy_fail(s, account_id: int) -> int | None:
@@ -489,12 +489,6 @@ async def save_notices(s, account_id: int, items: list[dict]) -> int:
     await s.execute(stmt.on_conflict_do_update(index_elements=[m.account_id, m.uuid],
                                                set_={c: stmt.excluded[c] for c in NOTICE_COLS}))
     return sum(1 for i in items if i["uuid"] not in known and not i.get("wb_read_at"))
-
-
-async def has_pickup_orders(s, account_id: int) -> bool:
-    """Есть ли заказы, которые ждут в ПВЗ (group 5) — плановому визиту есть смысл ждать код получения."""
-    return bool(await s.scalar(select(func.count()).select_from(models.AccountOrder).where(
-        models.AccountOrder.account_id == account_id, models.AccountOrder.group_id == 5)))
 
 
 # ---------- заявки на вход в аккаунт WB (сайт → worker) ----------
