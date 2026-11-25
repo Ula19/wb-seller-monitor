@@ -139,7 +139,7 @@ class WebClient:
             self._mint_failed_at = None
             self._antibot, self._headers = got["cookie"], got["headers"]
             self._minted_at = time.monotonic()
-            log.info("антибот: выпущен за %.0fс", self._minted_at - started)
+            log.info("антибот: выпущен за %.0fс (%s)", self._minted_at - started, got.get("profile", "?"))
             return True
 
     async def _mint_with_retry(self) -> dict | None:

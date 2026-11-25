@@ -13,8 +13,10 @@ import json
 import logging
 import random
 import re
+import shutil
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from urllib.parse import urlparse
 
 from app.config import settings
@@ -535,38 +537,62 @@ async def refresh(storage_state: dict | str, proxy: str | None = None, *,
 
 
 MINT_WAIT_SEC = 45  # сколько ждём запрос каталога в браузере
+# постоянный профиль выпуска: скрипты WB из кэша диска — ~4,3 МБ на выпуск → ~0,1 МБ (SCOUT 2026-11-25, проба restart 5/5).
+# В /tmp контейнера: рестарт переживает, пересборку — нет (первый выпуск снова 4 МБ, не беда)
+MINT_PROFILE = "/tmp/mint_profile"
+CHROME_LOCKS = ("SingletonLock", "SingletonSocket", "SingletonCookie")
+_mint_dirty = False  # прошлый выпуск сорвался — следующий начинаем с чистого профиля
 CLOSE_TIMEOUT_SEC = 15  # закрытие браузера/драйвера не дольше этого
 
 
-async def _bounded(coro, what: str) -> None:
-    """Ждём не дольше CLOSE_TIMEOUT_SEC; зависло/упало — пишем в лог и идём дальше."""
+async def _bounded(coro, what: str) -> bool:
+    """Ждём не дольше CLOSE_TIMEOUT_SEC; зависло/упало — пишем в лог и идём дальше (False)."""
     try:
         await asyncio.wait_for(coro, CLOSE_TIMEOUT_SEC)
+        return True
     except Exception as e:
         log.warning("антибот: %s не удалось: %s", what, type(e).__name__)
+        return False
+
+
+def _mint_profile() -> str:
+    """Готовит каталог профиля → "кэш" | "чистый профиль". После сбоя — стираем целиком (вдруг кэш сломан; новая версия
+    JS WB подтянется сама — у файлов хэш в имени). Замки Chromium от убитого по таймауту браузера убираем: профиль только
+    наш, выпуск один за раз (_mint_lock в web_client, выпускает только процесс bot)."""
+    if _mint_dirty:
+        shutil.rmtree(MINT_PROFILE, ignore_errors=True)
+    for name in CHROME_LOCKS:
+        Path(MINT_PROFILE, name).unlink(missing_ok=True)
+    return "кэш" if Path(MINT_PROFILE).is_dir() else "чистый профиль"
 
 
 async def mint_antibot(supplier_id: int) -> dict | None:
     """Свежая антибот-кука: анонимный браузер открывает страницу продавца и ловит
     настоящий запрос каталога — его куки (x_wbaas_token…) и заголовки браузера.
 
-    Аккаунт НЕ участвует (контекст без кук). Возвращает {"cookie", "headers"} или None.
+    Аккаунт НЕ участвует (куки чистим перед каждым выпуском, кэш диска — оставляем).
+    Возвращает {"cookie", "headers", "profile"} или None.
     """
+    global _mint_dirty
     from patchright.async_api import async_playwright
 
     got: list = []
+    closed = False
 
     async def on_resp(r):
         if "u-catalog/sellers" in r.url and "/catalog" in r.url and r.status == 200:
             got.append(await r.request.all_headers())
 
     stage = "запуск браузера"
+    profile = _mint_profile()
     pw = await async_playwright().start()
     try:
-        browser = await pw.chromium.launch(headless=False, proxy=_pw_proxy(web_proxy()), args=LAUNCH_ARGS)
+        ctx = await pw.chromium.launch_persistent_context(MINT_PROFILE, headless=False, proxy=_pw_proxy(web_proxy()),
+                                                          args=LAUNCH_ARGS, locale="ru-RU")
         try:
             stage = "открытие страницы"
-            page = await (await browser.new_context(locale="ru-RU")).new_page()
+            await ctx.clear_cookies()  # аноним, как раньше: куки прошлого выпуска не тащим
+            page = ctx.pages[0] if ctx.pages else await ctx.new_page()
             page.on("response", on_resp)
             # не ждём загрузку страницы (через прокси бывает >30с) — ждём сам запрос каталога
             await page.goto(SELLER_URL.format(supplier_id), wait_until="commit", timeout=MINT_WAIT_SEC * 1000)
@@ -592,12 +618,14 @@ async def mint_antibot(supplier_id: int) -> dict | None:
         finally:
             # закрытие идёт через процесс браузера, зависшая страница его не держит; но и
             # его ограничиваем — finally выполняется и при отмене по таймауту
-            await _bounded(browser.close(), "закрытие браузера")
+            closed = await _bounded(ctx.close(), "закрытие браузера")
     except asyncio.CancelledError:
         log.warning("антибот: выпуск прерван по таймауту на шаге «%s» (продавец %s)", stage, supplier_id)
         raise
     finally:
         await _bounded(pw.stop(), "остановка playwright")
+        # не вышло, прервали или браузер не закрылся (может ещё держать профиль) — следующий выпуск с чистого
+        _mint_dirty = not (closed and got and "x_wbaas_token" in got[0].get("cookie", ""))
     if not got:
         return None
     hh = got[0]
@@ -606,7 +634,7 @@ async def mint_antibot(supplier_id: int) -> dict | None:
         log.warning("антибот: в запросе браузера нет x_wbaas_token")
         return None
     headers = {k: v for k, v in hh.items() if not k.startswith(":") and k.lower() not in SKIP_HEADERS}
-    return {"cookie": cookie, "headers": headers}
+    return {"cookie": cookie, "headers": headers, "profile": profile}
 
 
 if __name__ == "__main__":  # self-check чистых функций (без браузера)
@@ -945,4 +973,93 @@ if __name__ == "__main__":  # self-check чистых функций (без б�
     assert "405" in logged and "405 Not Allowed" in logged  # почему не пришёл баланс
     assert "…78-17" in logged and "первый номер в списке" in logged  # что выбрали
     assert "У вас нет заказов" in logged  # кусок страницы, где не нашёлся код
+
+    # выпуск антибота: постоянный профиль, куки чистим до страницы, после сбоя — профиль с нуля
+    import sys
+    import tempfile
+    MINT_PROFILE = tempfile.mkdtemp() + "/mint_profile"  # mint_antibot/_mint_profile берут его из глобалей модуля
+    CAT = "https://www.wildberries.ru/__internal/u-catalog/sellers/v4/catalog?supplier=1"
+    mint = SimpleNamespace(cookie="x_wbaas_token=t; a=1", hang=False, events=[])
+
+    async def ret(v):
+        return v
+
+    class MintPage:
+        url = "https://www.wildberries.ru/seller/1"
+
+        def __init__(self):
+            self.handlers = []
+
+        @property
+        def mouse(self):
+            return SimpleNamespace(wheel=lambda *a: ret(None))
+
+        def on(self, event, fn):
+            self.handlers.append(fn)
+
+        async def goto(self, url, **kw):
+            mint.events.append("goto")
+            req = SimpleNamespace(all_headers=lambda: ret({"cookie": mint.cookie, ":path": "/x", "ua": "c"}))
+            if mint.cookie is not None:
+                for h in self.handlers:
+                    await h(SimpleNamespace(url=CAT, status=200, request=req))
+
+        async def title(self):
+            return "Проверка"
+
+    class MintCtx:
+        def __init__(self):
+            self.pages = [MintPage()]
+
+        async def clear_cookies(self):
+            mint.events.append("clear")
+
+        async def close(self):
+            if mint.hang:
+                await asyncio.Event().wait()
+            mint.events.append("close")
+
+    class Chromium:
+        async def launch_persistent_context(self, path, **kw):
+            mint.events.append(("launch", Path(path).is_dir(), sorted(x.name for x in Path(path).glob("*"))))
+            Path(path).mkdir(parents=True, exist_ok=True)
+            (Path(path) / "cache").write_text("js")
+            Path(path, "SingletonLock").symlink_to("host-123")  # как у живого Chromium: битая ссылка
+            return MintCtx()
+
+    class PW:
+        chromium = Chromium()
+
+        async def stop(self):
+            pass
+
+    sys.modules["patchright"] = SimpleNamespace()
+    sys.modules["patchright.async_api"] = SimpleNamespace(async_playwright=lambda: SimpleNamespace(start=lambda: ret(PW())))
+
+    async def nap(_):
+        pass
+
+    async def mint_demo():
+        global CLOSE_TIMEOUT_SEC
+        with patch.object(asyncio, "sleep", nap), patch(f"{__name__}.web_proxy", lambda: None):
+            r = await mint_antibot(1)  # первый — профиля ещё нет
+            assert r == {"cookie": mint.cookie, "headers": {"ua": "c"}, "profile": "чистый профиль"}, r
+            assert mint.events == [("launch", False, []), "clear", "goto", "close"], mint.events
+            mint.events.clear()
+            r = await mint_antibot(1)  # второй — тот же профиль с кэшем, замок прошлого браузера убран
+            assert r["profile"] == "кэш" and mint.events[0] == ("launch", True, ["cache"]), mint.events
+            assert mint.events[1:] == ["clear", "goto", "close"]  # куки — до страницы
+            for bad in (None, "a=1"):  # каталог не пойман / в нём нет x_wbaas_token → следующий с чистого
+                mint.cookie, _ = bad, mint.events.clear()
+                assert await mint_antibot(1) is None and mint.events[0] == ("launch", True, ["cache"]), mint.events
+                mint.cookie, _ = "x_wbaas_token=t", mint.events.clear()
+                r = await mint_antibot(1)
+                assert r["profile"] == "чистый профиль" and mint.events[0] == ("launch", False, []), (bad, mint.events)
+            # браузер не закрылся (может держать профиль) — кука есть, но следующий выпуск с чистого
+            mint.hang, CLOSE_TIMEOUT_SEC = True, 0.01
+            assert (await mint_antibot(1))["profile"] == "кэш"
+            mint.hang, CLOSE_TIMEOUT_SEC = False, 15
+            assert (await mint_antibot(1))["profile"] == "чистый профиль"
+    with patch.object(log, "warning"):
+        asyncio.run(mint_demo())
     print("ok")
