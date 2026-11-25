@@ -39,6 +39,7 @@ COOKIE = "wbm_session"
 SESSION_TTL = 30 * 86400
 AUTH_MAX_AGE = 86400  # подпись виджета старше суток не принимаем
 MIN_PASSWORD = 20  # запасной вход торчит в интернет: короткий пароль = вход выключен
+PASSWORD_UID = 0  # вход по паролю — служебный ID: обычный пользователь, разработчиком (DEV_IDS) не бывает
 WEB_DIST = Path(__file__).resolve().parent.parent / "web" / "dist"
 
 app = FastAPI(title="WB Монитор", docs_url=None, redoc_url=None, openapi_url=None)
@@ -102,7 +103,8 @@ async def user(request: Request) -> Viewer:
     Список читается на каждом запросе — убрали ID из .env и перезапустили api, доступ закрыт."""
     # ponytail: одно пространство, команды — при продаже доступа
     uid = read_session(request.cookies.get(COOKIE))
-    if uid is None or uid not in settings.superadmins:
+    by_password = uid == PASSWORD_UID and len(settings.site_password) >= MIN_PASSWORD
+    if uid is None or not (uid in settings.superadmins or by_password):
         raise HTTPException(401, "нужен вход")
     return Viewer(id=uid, telegram_id=settings.owner_id)
 
@@ -139,7 +141,7 @@ async def auth_password(body: PasswordAuth, resp: Response):
     if not hmac.compare_digest(body.password.encode(), pw.encode()):
         await asyncio.sleep(1)  # против перебора
         raise HTTPException(401, "неверный пароль")
-    return _login(resp, settings.owner_id)
+    return _login(resp, PASSWORD_UID)
 
 
 @app.get("/api/config")
@@ -158,7 +160,65 @@ async def logout(resp: Response):
 @app.get("/api/me")
 async def me(u=Depends(user)):
     return {"id": u.id, "owner_id": u.telegram_id, "username": None,
-            "role": "owner" if u.id == u.telegram_id else "admin"}
+            "role": "owner" if u.id == u.telegram_id else "admin", "is_dev": u.id in settings.devs}
+
+
+# ---------- режим технических работ (SCOUT 2026-11-25) ----------
+def guard(group: str):
+    """Изменяющий эндпоинт группы: режим работ закрыл группу, а вошёл не разработчик → 503 с текстом баннера.
+    Запрет — на сервере: старая открытая вкладка его не обойдёт."""
+    async def check(u=Depends(user), s=Depends(db)):
+        m = await repo.maintenance(s)
+        if repo.closed(m, group) and u.id not in settings.devs:
+            raise HTTPException(503, repo.maintenance_text(m))
+    return [Depends(check)]
+
+
+MONEY, PICKUP, SYNC, ACCOUNTS, SETTINGS = (guard(g) for g in repo.MAINTENANCE_GROUPS)
+
+
+@app.get("/api/maintenance")
+async def maintenance_get(u=Depends(user), s=Depends(db)):
+    """Для баннера всем; разработчику ещё — сколько дел очереди выполняется (sending) и ждёт: перед деплоем ждать 0."""
+    m = await repo.maintenance(s)
+    sending = pending = 0
+    for model in (models.Certificate, models.OrderPayment, models.AutobuyOrder):
+        sending += await s.scalar(select(func.count()).select_from(model).where(model.status == "sending"))
+        pending += await s.scalar(select(func.count()).select_from(model).where(model.status == "pending"))
+    a = models.AutobuyOrder  # отмены и заборы «выполняется» не отмечают — считаем их ждущими
+    pending += await s.scalar(select(func.count()).select_from(a).where(a.cancel_state == "pending"))
+    for model in (models.OrderCancel, models.PickupSend):
+        pending += await s.scalar(select(func.count()).select_from(model).where(model.status == "pending"))
+    return {**m, "message": repo.maintenance_text(m), "groups": repo.MAINTENANCE_GROUPS, "sending": sending,
+            "pending": pending}
+
+
+class MaintenanceIn(BaseModel):
+    on: bool
+    text: str = Field("", max_length=200)
+    until: str = Field("", pattern=r"^([01]\d|2[0-3]):[0-5]\d$|^$")  # "HH:MM" МСК или пусто
+    blocked: list[str] = Field(default_factory=list, max_length=len(repo.MAINTENANCE_GROUPS))
+    poll_paused: bool = False
+
+
+@app.put("/api/maintenance")
+async def maintenance_put(body: MaintenanceIn, u=Depends(user), s=Depends(db)):
+    """Только разработчики. Включение/выключение — в журнал действий (кто, когда, что закрыто)."""
+    if u.id not in settings.devs:
+        raise HTTPException(403, "режим работ включают только разработчики (DEV_IDS)")
+    if set(body.blocked) - set(repo.MAINTENANCE_GROUPS):
+        raise HTTPException(422, "нет такой группы")
+    old = await repo.maintenance(s)
+    now = datetime.now(timezone.utc).isoformat()
+    m = {**body.model_dump(), "text": body.text.strip(), "blocked": [g for g in repo.MAINTENANCE_GROUPS if g in body.blocked],
+         "by": u.id if body.on != old["on"] else old["by"], "at": now if body.on != old["on"] else old["at"]}
+    await repo.set_setting(s, repo.MAINTENANCE, json.dumps(m, ensure_ascii=False))
+    if body.on != old["on"]:
+        raw = await repo.get_setting(s, repo.MAINTENANCE_LOG)
+        log_ = [*(json.loads(raw) if raw else []), {k: m[k] for k in ("on", "blocked", "poll_paused", "by", "at")}]
+        await repo.set_setting(s, repo.MAINTENANCE_LOG, json.dumps(log_[-repo.MAINTENANCE_LOG_MAX:]))
+    await s.commit()
+    return await maintenance_get(u, s)
 
 
 # ---------- продавцы ----------
@@ -444,7 +504,7 @@ async def vb_ops(account_id: int, u=Depends(user), s=Depends(db)):
             for o in await s.scalars(select(m).where(m.account_id == acc.id).order_by(m.dt.desc().nulls_last()))]
 
 
-@app.post("/api/accounts/{account_id:int}/sync")
+@app.post("/api/accounts/{account_id:int}/sync", dependencies=SYNC)
 async def browser_sync(account_id: int, u=Depends(user), s=Depends(db)):
     """Визит в браузере аккаунта (код получения + история баланса, ~30 с): worker откроет сайт WB под ним."""
     acc = await _my_account(s, u, account_id)
@@ -455,7 +515,7 @@ async def browser_sync(account_id: int, u=Depends(user), s=Depends(db)):
     return {"ok": True}
 
 
-@app.post("/api/accounts/poll-all")
+@app.post("/api/accounts/poll-all", dependencies=SYNC)
 async def poll_all(u=Depends(user), s=Depends(db)):
     """«Обновить все»: ↻ для всех активных, кроме только что обновлённых."""
     fresh = datetime.now(timezone.utc) - timedelta(seconds=POLL_FRESH_SEC)
@@ -480,7 +540,7 @@ async def get_poll_settings(u=Depends(user), s=Depends(db)):
     return await repo.poll_settings(s)
 
 
-@app.put("/api/settings/poll")
+@app.put("/api/settings/poll", dependencies=SETTINGS)
 async def put_poll_settings(body: dict, u=Depends(user), s=Depends(db)):
     """Сохранить частоту опроса; worker читает её каждый тик — без рестарта."""
     cfg = {}
@@ -504,7 +564,7 @@ async def put_poll_settings(body: dict, u=Depends(user), s=Depends(db)):
     return cfg
 
 
-@app.post("/api/accounts/{account_id:int}/poll")
+@app.post("/api/accounts/{account_id:int}/poll", dependencies=SYNC)
 async def poll_account(account_id: int, u=Depends(user), s=Depends(db)):
     """↻ «Обновить»: worker опросит аккаунт вне расписания (polling — как checking у прокси)."""
     acc = await _my_account(s, u, account_id)
@@ -523,7 +583,7 @@ class AccountIn(BaseModel):
     label: str | None = Field(None, max_length=64)
 
 
-@app.patch("/api/accounts/{account_id}")
+@app.patch("/api/accounts/{account_id}", dependencies=ACCOUNTS)
 async def rename_account(account_id: int, body: AccountIn, u=Depends(user), s=Depends(db)):
     """Своё имя аккаунта (главнее имени из WB). Пусто — вернуть имя из WB."""
     acc = await s.get(models.WbAccount, account_id)
@@ -550,7 +610,7 @@ async def hide_order(account_id: int, rid: str, body: OrderIn, u=Depends(user), 
     return {"ok": True}
 
 
-@app.delete("/api/accounts/{account_id:int}")  # :int — иначе перехватит DELETE /api/accounts/login
+@app.delete("/api/accounts/{account_id:int}", dependencies=ACCOUNTS)  # :int — иначе перехватит DELETE /api/accounts/login
 async def delete_account(account_id: int, u=Depends(user), s=Depends(db)):
     acc = await s.get(models.WbAccount, account_id)
     if acc is None or acc.user_id != u.telegram_id:
@@ -581,7 +641,7 @@ class ResendIn(BaseModel):
     via: Literal["push", "sms"]
 
 
-@app.post("/api/accounts/login", status_code=201)
+@app.post("/api/accounts/login", status_code=201, dependencies=ACCOUNTS)
 async def start_login(body: LoginIn, u=Depends(user), s=Depends(db)):
     phone = re.sub(r"\D", "", body.phone)
     phone = phone[1:] if len(phone) == 11 and phone[0] in "78" else phone
@@ -611,7 +671,7 @@ async def login_status(u=Depends(user), s=Depends(db)):
     return _request_view(await repo.last_login_request(s, u.telegram_id))
 
 
-@app.delete("/api/accounts/login")
+@app.delete("/api/accounts/login", dependencies=ACCOUNTS)
 async def cancel_login(u=Depends(user), s=Depends(db)):
     """Отмена входа в любом активном состоянии; worker закроет браузер на ближайшей проверке."""
     if not await repo.cancel_login_request(s, u.telegram_id):
@@ -620,7 +680,7 @@ async def cancel_login(u=Depends(user), s=Depends(db)):
     return {"ok": True}
 
 
-@app.post("/api/accounts/login/resend")
+@app.post("/api/accounts/login/resend", dependencies=ACCOUNTS)
 async def login_resend(body: ResendIn, u=Depends(user), s=Depends(db)):
     """Прислать код заново (пуш или СМС): worker нажмёт «Получить новый код» на странице WB ID."""
     r = await repo.last_login_request(s, u.telegram_id)
@@ -633,7 +693,7 @@ async def login_resend(body: ResendIn, u=Depends(user), s=Depends(db)):
     return {"ok": True}
 
 
-@app.post("/api/accounts/login/code")
+@app.post("/api/accounts/login/code", dependencies=ACCOUNTS)
 async def login_code(body: CodeIn, u=Depends(user), s=Depends(db)):
     code = body.code.strip()
     if not re.fullmatch(r"\d{4,8}", code):
@@ -666,7 +726,7 @@ async def proxies(u=Depends(user), s=Depends(db)):
     return [{**{f: getattr(p, f) for f in PROXY_FIELDS}, "used_by": used.get(p.id, [])} for p in rows]
 
 
-@app.post("/api/proxies", status_code=201)
+@app.post("/api/proxies", status_code=201, dependencies=ACCOUNTS)
 async def add_proxy(body: ProxyIn, u=Depends(user), s=Depends(db)):
     try:
         url, server = parse_proxy(body.url)
@@ -680,7 +740,7 @@ async def add_proxy(body: ProxyIn, u=Depends(user), s=Depends(db)):
     return {f: getattr(p, f) for f in PROXY_FIELDS} | {"used_by": []}
 
 
-@app.post("/api/proxies/{proxy_id}/check")
+@app.post("/api/proxies/{proxy_id}/check", dependencies=ACCOUNTS)
 async def check_proxy(proxy_id: int, u=Depends(user), s=Depends(db)):
     p = await s.get(models.Proxy, proxy_id)
     if p is None:
@@ -690,7 +750,7 @@ async def check_proxy(proxy_id: int, u=Depends(user), s=Depends(db)):
     return {"ok": True}
 
 
-@app.delete("/api/proxies/{proxy_id}")
+@app.delete("/api/proxies/{proxy_id}", dependencies=ACCOUNTS)
 async def delete_proxy(proxy_id: int, u=Depends(user), s=Depends(db)):
     p = await s.get(models.Proxy, proxy_id)
     if p is None:
@@ -742,7 +802,7 @@ async def known_certificates(body: CodesIn, u=Depends(user), s=Depends(db)):
     return await _known_certs(s, codes) if codes else {}
 
 
-@app.post("/api/certificates", status_code=201)
+@app.post("/api/certificates", status_code=201, dependencies=MONEY)
 async def add_certificates(body: CertsIn, u=Depends(user), s=Depends(db)):
     """Сертификаты в очередь активации (pending; активирует worker). Плохие строки → 422 со списком причин,
     ничего не создаётся."""
@@ -790,7 +850,7 @@ class RetryIn(BaseModel):
     items: list[RetryItem] = Field(min_length=1, max_length=500)
 
 
-@app.post("/api/certificates/retry")
+@app.post("/api/certificates/retry", dependencies=MONEY)
 async def retry_certificates(body: RetryIn, u=Depends(user), s=Depends(db)):
     """Неудачные (error | unknown) — снова в очередь, на тот же или другой аккаунт. Та же запись: история кода одна.
     Повтор unknown безопасен — WB дважды не зачислит (ответит ошибкой). Плохие строки → 422, ничего не меняется."""
@@ -858,7 +918,7 @@ class PayIn(BaseModel):
     confirm_amount: int  # сумма, которую человек подтвердил; не совпала с нашей — 409, ничего не платим
 
 
-@app.post("/api/payments", status_code=201)
+@app.post("/api/payments", status_code=201, dependencies=MONEY)
 async def add_payment(body: PayIn, u=Depends(user), s=Depends(db)):
     """Оплата неоплаченных позиций аккаунта в очередь (платит worker). Сумма — по нашим ценам из account_orders.
     Строка аккаунта под FOR UPDATE: двойной клик / два окна не создадут вторую оплату тех же rids."""
@@ -922,7 +982,7 @@ class ProductIn(BaseModel):
     q: str = Field(min_length=1, max_length=500)
 
 
-@app.post("/api/order/product", status_code=201)
+@app.post("/api/order/product", status_code=201, dependencies=MONEY)
 async def order_product(body: ProductIn, u=Depends(user), s=Depends(db)):
     """Карточка товара по артикулу или ссылке — запрос worker'у; итог — GET /api/order/quote/{id}."""
     return await _new_quote(s, u, "product", {"q": body.q.strip()})
@@ -944,7 +1004,7 @@ def _dupes(lines) -> bool:
     return len(keys) != len(set(keys))
 
 
-@app.post("/api/order/preview", status_code=201)
+@app.post("/api/order/preview", status_code=201, dependencies=MONEY)
 async def order_preview(body: PreviewIn, u=Depends(user), s=Depends(db)):
     """Цены на ПВЗ, деньги и лимиты аккаунтов — запрос worker'у (одна строка = один заказ: артикул на аккаунт)."""
     mine = {a.id for a in await repo.user_accounts(s, u.telegram_id)}
@@ -1050,7 +1110,7 @@ def _place_errors(items, preview: dict, accs: dict, open_pvz: set) -> list[dict]
     return bad
 
 
-@app.post("/api/order/place", status_code=201)
+@app.post("/api/order/place", status_code=201, dependencies=MONEY)
 async def order_place(body: PlaceIn, u=Depends(user), s=Depends(db)):
     """Заказы в очередь (шлёт worker, заново проверив цену и деньги). Цены — из предпросмотра на сервере; сумма не
     совпала с confirm_total → 409. Строки аккаунтов под FOR UPDATE: двойной клик не создаст второй заказ."""
@@ -1122,7 +1182,7 @@ class CancelIn(BaseModel):
     id: int
 
 
-@app.post("/api/order/cancel")
+@app.post("/api/order/cancel", dependencies=MONEY)
 async def order_cancel(body: CancelIn, u=Depends(user), s=Depends(db)):
     """Отмена заказа по его rids — в очередь (отменяет worker, раньше новых заказов)."""
     a = models.AutobuyOrder
@@ -1145,7 +1205,7 @@ class OrderCancelIn(BaseModel):
     rids: list[str] = Field(min_length=1, max_length=500)
 
 
-@app.post("/api/order-cancels", status_code=201)
+@app.post("/api/order-cancels", status_code=201, dependencies=MONEY)
 async def add_order_cancel(body: OrderCancelIn, u=Depends(user), s=Depends(db)):
     """Отмена позиций аккаунта в очередь. rids — только из его активных заказов; строка аккаунта под FOR UPDATE —
     двойной клик не создаст вторую отмену тех же rids."""
@@ -1194,7 +1254,7 @@ class PickupToIn(BaseModel):
     to: list[int] = Field(max_length=PICKUP_TO_MAX)
 
 
-@app.put("/api/settings/pickup")
+@app.put("/api/settings/pickup", dependencies=SETTINGS)
 async def put_pickup_settings(body: PickupToIn, u=Depends(user), s=Depends(db)):
     to = list(dict.fromkeys(body.to))
     if any(x <= 0 for x in to):
@@ -1251,7 +1311,7 @@ class PickupSendIn(BaseModel):
     pairs: list[PickupPair] = Field(min_length=1, max_length=500)
 
 
-@app.post("/api/pickups/send", status_code=201)
+@app.post("/api/pickups/send", status_code=201, dependencies=PICKUP)
 async def pickups_send(body: PickupSendIn, u=Depends(user), s=Depends(db)):
     """Пары «аккаунт + ПВЗ» в очередь (шлёт worker). rids и товары — с сервера; строки аккаунтов под FOR UPDATE:
     двойной клик не отправит то же второй раз."""
@@ -1347,14 +1407,24 @@ async def journal(date_from: date | None = Query(None, alias="from"), date_to: d
     ev += [{"type": "pickup", "at": x.sent_at, "account_id": x.account_id,
             "text": f"Забор: {sum(i['n'] for i in x.items)} шт. · {x.address or f'ПВЗ №{x.office_id}'}"}
            for x in await s.scalars(select(ps).where(ps.account_id.in_(ids), ps.status == "sent", *within(ps.sent_at)))]
+    if account_id is None:  # режим работ — не про аккаунт: только в общем списке
+        raw = await repo.get_setting(s, repo.MAINTENANCE_LOG)
+        for x in json.loads(raw) if raw else []:
+            at = datetime.fromisoformat(x["at"])
+            if (lo is None or at >= lo) and (hi is None or at < hi):
+                names = (repo.MAINTENANCE_GROUPS[g].split(":")[0] for g in x["blocked"])
+                what = ", ".join(t[:1].lower() + t[1:] for t in names) or "ничего"  # «обновление из WB»
+                ev.append({"type": "maint", "at": at, "account_id": None,
+                           "text": (f"Режим работ включён · закрыто: {what}" + (" · опрос WB на паузе" if x["poll_paused"] else "")
+                                    if x["on"] else "Режим работ выключен") + f" · ID {x['by']}"})
     ev.sort(key=lambda e: e["at"], reverse=True)
     counts = {t: sum(e["type"] == t for e in ev) for t in ("ordered", "cancelled", "paid", "cert", "pickup")}
     raw = await repo.get_setting(s, repo.JOURNAL_CHECK)
-    return {"events": [{**e, "account_title": accs[e["account_id"]].title} for e in ev[:JOURNAL_MAX]],
+    return {"events": [{**e, "account_title": accs[e["account_id"]].title if e["account_id"] else "—"} for e in ev[:JOURNAL_MAX]],
             "counts": {"all": len(ev), **counts}, "check": json.loads(raw) if raw else None}
 
 
-@app.post("/api/journal/refresh")
+@app.post("/api/journal/refresh", dependencies=SYNC)
 async def journal_refresh(u=Depends(user), s=Depends(db)):
     """«Обновить»: флаг для worker'а — заказы всех аккаунтов (API в WB не ходит). Уже идёт — 409."""
     raw = await repo.get_setting(s, repo.JOURNAL_CHECK)
@@ -1409,7 +1479,7 @@ async def notices_read(body: ReadIn, u=Depends(user), s=Depends(db)):
     return {"count": res.rowcount}
 
 
-@app.post("/api/notices/check")
+@app.post("/api/notices/check", dependencies=SYNC)
 async def notices_check(u=Depends(user), s=Depends(db)):
     """«↻ Проверить сейчас»: флаг для worker'а (API в WB не ходит). Уже идёт — 409."""
     st = await _check_state(s)

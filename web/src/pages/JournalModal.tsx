@@ -7,8 +7,9 @@ import { Modal, Period, usePeriod } from "../accounts";
 
 const TABS: [JournalType | "all", string][] = [["all", "Все"], ["ordered", "Заказали"], ["cancelled", "Отменили"],
   ["paid", "Оплатили"], ["cert", "Сертификаты"], ["pickup", "Заборы"]];
-const LABEL: Record<JournalType, [string, string]> = {  // [ярлык, цвет pill]
+const LABEL: Record<JournalType | "maint", [string, string]> = {  // [ярлык, цвет pill]
   ordered: ["Заказали", "g3"], cancelled: ["Отменили", "bad"], paid: ["Оплатили", "ok"], cert: ["Сертификат", "ok"], pickup: ["Забор", ""],
+  maint: ["Работы", "warn"],  // режим технических работ: только во «Все»
 };
 const ddmm = (iso: string) => new Date(iso).toLocaleDateString("ru-RU", { timeZone: MSK, day: "2-digit", month: "2-digit" });
 const hhmm = (iso: string) => new Date(iso).toLocaleTimeString("ru-RU", { timeZone: MSK, hour: "2-digit", minute: "2-digit" });

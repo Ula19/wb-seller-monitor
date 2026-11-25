@@ -68,6 +68,10 @@ input:focus, select:focus { outline: 2px solid var(--accent-soft); border-color:
 .dot.ok { background: var(--ok); }
 .dot.bad { background: var(--bad); }
 .main { padding: 24px; min-width: 0; }
+.maint { margin: 0 0 16px; padding: 10px 14px; border-radius: 10px; background: var(--up-soft); color: var(--up); font-weight: 600; }
+.maint.dev { background: var(--bad); color: #fff; }
+.maint.dev a { color: #fff; text-decoration: underline; }
+.maint-groups { border: 0; padding: 0; margin: 8px 0; display: grid; gap: 6px; }
 .mob { display: none; }
 
 .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; }

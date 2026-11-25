@@ -138,9 +138,42 @@ async def _refresh(acc: models.WbAccount, *, visit: bool = False, want_code: boo
         return new
 
 
+# ---------- режим технических работ (app_settings, включает разработчик на сайте) ----------
+MAINT_REMIND_H = 6  # режим включён дольше — напоминаем разработчикам (и дальше каждые столько же часов)
+
+
+async def maintenance() -> dict:
+    """Читаем перед каждым делом: включили на сайте — действует сразу, без рестарта."""
+    async with Session() as s:
+        return await repo.maintenance(s)
+
+
+async def poll_paused() -> bool:
+    """Фоновый опрос WB на паузе (отдельный тумблер режима работ): плановые опросы, визиты и история — выходят сразу."""
+    m = await maintenance()
+    return m["on"] and m["poll_paused"]
+
+
+def remind_hours(m: dict, now: datetime) -> int | None:
+    """Сколько часов включён режим, если пора напомнить (джоб раз в час: 6, 12, 18 … ч), иначе None."""
+    if not (m["on"] and m["at"]):
+        return None
+    h = int((now - datetime.fromisoformat(m["at"])).total_seconds() // 3600)
+    return h if h >= MAINT_REMIND_H and h % MAINT_REMIND_H == 0 else None
+
+
+async def maintenance_reminder(bot) -> None:
+    if (h := remind_hours(await maintenance(), datetime.now(timezone.utc))) is not None:
+        for uid in settings.devs:
+            await send_safe(bot, uid, f"🚧 Режим технических работ включён уже {h} ч — не забыли выключить? "
+                                      "Сайт → Настройки.")
+
+
 async def refresh_job(bot) -> None:
     """Освежает сессии активных аккаунтов по очереди (00:05 и 12:05 МСК) и заодно визит: история баланса и код
     получения — его ждём, только если есть заказы в ПВЗ. Протухла → «нужен вход» владельцу."""
+    if await poll_paused():
+        return log.info("keeper: визиты пропущены — фоновый опрос WB на паузе (режим работ)")
     async with Session() as s:
         accounts = await repo.active_accounts(s)
     for acc in accounts:
@@ -181,6 +214,8 @@ def due(last: dict, cfg: dict, now: datetime) -> list[str]:
 async def state_job(bot) -> None:
     """Минутный тик: каждому активному аккаунту по очереди — только типы, которым пора (настройки — app_settings «poll»,
     читаем каждый тик: правка с сайта действует без рестарта)."""
+    if await poll_paused():
+        return
     async with Session() as s:
         accounts = await repo.active_accounts(s)
         cfg = await repo.poll_settings(s)
@@ -498,6 +533,8 @@ async def _purchases(acc: models.WbAccount) -> None:
 async def purchases_job(bot=None) -> None:
     """История заказов (полученные) всех активных аккаунтов — раз в сутки (новая покупка по событию — заказ пропал из
     активных, см. poll_account); копим по rid. Сбой одного — дальше."""
+    if await poll_paused():
+        return log.info("keeper: история покупок пропущена — фоновый опрос WB на паузе (режим работ)")
     async with Session() as s:
         accounts = await repo.active_accounts(s)
     for acc in accounts:
@@ -808,8 +845,11 @@ def _jobs() -> tuple:
 
 
 async def _next_job(proxy_id: int | None):
-    """Следующее дело очереди прокси (порядок — _jobs). → (сделать, при сбое, id, название) | None."""
+    """Следующее дело очереди прокси (порядок — _jobs). → (сделать, при сбое, id, название) | None.
+    Режим работ закрыл «деньги» → None: текущее дело доделано, новые ждут выключения."""
     async with Session() as s:
+        if repo.closed(await repo.maintenance(s), "money"):
+            return None
         for m, cond, run, fail in _jobs():
             jid = await s.scalar(select(m.id).join(models.WbAccount, models.WbAccount.id == m.account_id).where(
                 cond, models.WbAccount.proxy_id.is_(None) if proxy_id is None else models.WbAccount.proxy_id == proxy_id)

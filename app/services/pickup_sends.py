@@ -88,11 +88,16 @@ async def _account(bot, acc_id: int | None, rows: list, to: list[int]) -> None:
 
 
 async def process_pickup_sends(bot) -> bool:
-    """Все pending — по аккаунтам, по очереди. False — нечего слать."""
+    """Все pending — по аккаунтам, по очереди. False — нечего слать. Режим работ закрыл «забор» — не шлём (перед каждым
+    аккаунтом: отправку, что уже идёт, доделываем)."""
+    if repo.closed(await keeper.maintenance(), "pickup"):
+        return False
     async with Session() as s:
         rows = list(await s.scalars(select(P).where(P.status == "pending").order_by(P.id)))
         to = parse_to(await repo.get_setting(s, repo.PICKUP_TO))
     for acc_id in dict.fromkeys(r.account_id for r in rows):
+        if repo.closed(await keeper.maintenance(), "pickup"):
+            break
         try:
             await _account(bot, acc_id, [r for r in rows if r.account_id == acc_id], to)
         except Exception as e:  # иначе строки висят в pending, а цикл крутит их же

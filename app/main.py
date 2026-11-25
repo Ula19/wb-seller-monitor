@@ -86,6 +86,7 @@ async def main() -> None:
         keeper.state_job, "interval", minutes=1, args=[bot], max_instances=1,
         next_run_time=datetime.now(timezone.utc) + timedelta(minutes=1),
     )
+    scheduler.add_job(keeper.maintenance_reminder, "cron", minute=0, args=[bot], max_instances=1)  # режим работ забыт?
     scheduler.add_job(  # справочник ПВЗ (all-poo-fr → wb_pickup_points) 2 раза в сутки; при старте — только если старый
         pickups.sync_job, "cron", hour="3,15", minute=20, max_instances=1,
     )

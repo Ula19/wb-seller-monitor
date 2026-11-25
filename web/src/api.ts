@@ -20,7 +20,12 @@ export async function api<T>(path: string, init?: { method?: string; body?: unkn
   return data as T;
 }
 
-export type Me = { id: number; username: string | null; role: string };
+export type Me = { id: number; username: string | null; role: string; is_dev: boolean };
+/** Режим технических работ: blocked — закрытые группы (ключи groups); sending/pending — дела очереди. */
+export type Maintenance = {
+  on: boolean; text: string; until: string; blocked: string[]; poll_paused: boolean; by: number | null; at: string | null;
+  message: string; groups: Record<string, string>; sending: number; pending: number;
+};
 export type Config = { bot_username: string | null; password_enabled: boolean };
 export type Status = {
   worker_alive: boolean;
@@ -161,6 +166,6 @@ export type PickupSend = { id: number; account_id: number | null; account_title:
 
 // ---------- «Журнал действий» ----------
 export type JournalType = "ordered" | "cancelled" | "paid" | "cert" | "pickup";
-export type JournalEvent = { type: JournalType; at: string; account_id: number; account_title: string; text: string };
+export type JournalEvent = { type: JournalType | "maint"; at: string; account_id: number | null; account_title: string; text: string };
 export type JournalCheck = { state: "requested" | "running" | "done"; done?: number; total?: number; failed?: string[]; at: string } | null;
 export type Journal = { events: JournalEvent[]; counts: Record<JournalType | "all", number>; check: JournalCheck };

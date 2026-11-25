@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { NavLink, Navigate, Route, Routes } from "react-router-dom";
-import { api, time, type Me, type Status } from "./api";
+import { api, time, type Maintenance, type Me, type Status } from "./api";
 import Login from "./pages/Login";
 import Items from "./pages/Items";
 import Sellers from "./pages/Sellers";
@@ -40,6 +40,18 @@ function WorkerDot() {  // узкий экран: только точка-инд
   return data ? <span className="muted small"><span className={`dot ${data.worker_alive ? "ok" : "bad"}`} />{data.worker_alive ? "работает" : "не отвечает"}</span> : null;
 }
 
+/** Режим технических работ: всем — баннер с текстом сервера; разработчику — яркая плашка (у него всё работает). */
+function MaintBanner({ dev }: { dev: boolean }) {
+  const { data: m } = useQuery({ queryKey: ["maintenance"], queryFn: () => api<Maintenance>("/maintenance"), refetchInterval: 30_000 });
+  if (!m?.on) return null;
+  const low = (t = "") => t.charAt(0).toLowerCase() + t.slice(1);  // «Обновление из WB» → «обновление из WB»
+  const closed = m.blocked.map((g) => low(m.groups[g]?.split(":")[0])).join(", ") || "ничего";
+  return dev
+    ? <div className="maint dev" role="status">🚧 Режим работ ВКЛЮЧЁН · закрыто: {closed}{m.poll_paused ? " · опрос WB на паузе" : ""}
+        {" "}· выполняется {m.sending}, ждут {m.pending} · <NavLink to="/settings">выключить</NavLink></div>
+    : <div className="maint" role="status">🚧 {m.message}{m.blocked.length ? ` · сейчас недоступно: ${closed}` : ""}</div>;
+}
+
 export default function App() {
   const qc = useQueryClient();
   const me = useQuery({ queryKey: ["me"], queryFn: () => api<Me>("/me"), retry: false });
@@ -74,6 +86,7 @@ export default function App() {
           <WorkerDot />
           <button className="link" onClick={logout}>Выйти</button>
         </header>
+        <MaintBanner dev={me.data.is_dev} />
         <Routes>
           <Route path="/items" element={<Items />} />
           <Route path="/targets" element={<Targets />} />

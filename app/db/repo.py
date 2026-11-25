@@ -465,6 +465,12 @@ async def upsert_balance_ops(s, account_id: int, ops: list[dict]) -> None:
 PICKUP_TO = "pickup_to"  # app_settings: «Общий забор» — кому слать, JSON-список Telegram ID
 JOURNAL_CHECK = "journal_check"  # app_settings: «Обновить» журнала — {state, done, total, failed, at}
 NOTICES_CHECK = "notices_check"  # app_settings: «Проверить сейчас» — {state: requested|running|done, new, failed, at}
+MAINTENANCE = "maintenance"  # app_settings: режим техработ — {on, text, until, blocked, poll_paused, by, at}
+MAINTENANCE_LOG = "maintenance_log"  # app_settings: включения/выключения для журнала — последние MAINTENANCE_LOG_MAX
+MAINTENANCE_LOG_MAX = 50
+# группы, которые режим закрывает от всех, кроме разработчиков; при включении по умолчанию — все
+MAINTENANCE_GROUPS = {"money": "Деньги: оплата, сертификаты, заказы, отмены", "pickup": "Общий забор",
+                      "sync": "Обновление из WB", "accounts": "Аккаунты и прокси", "settings": "Настройки"}
 NOTICE_COLS = ("topic_id", "title", "text", "url", "dt", "wb_read_at")
 
 
@@ -543,6 +549,22 @@ async def set_setting(s, key: str, value: str) -> None:
         row.value = value
     else:
         s.add(models.AppSetting(key=key, value=value))
+
+
+async def maintenance(s) -> dict:
+    """Режим техработ (выключен, если не задан)."""
+    raw = await get_setting(s, MAINTENANCE)
+    return {"on": False, "text": "", "until": "", "blocked": [], "poll_paused": False, "by": None, "at": None,
+            **(json.loads(raw) if raw else {})}
+
+
+def closed(m: dict, group: str) -> bool:
+    """Группа закрыта режимом техработ (для всех, кроме разработчиков; worker её дела не берёт)."""
+    return bool(m["on"] and group in m["blocked"])
+
+
+def maintenance_text(m: dict) -> str:
+    return "Идут технические работы" + (f": {m['text']}" if m["text"] else "") + (f" · до {m['until']} МСК" if m["until"] else "")
 
 
 # ---------- статистика ----------

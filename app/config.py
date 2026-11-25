@@ -9,6 +9,8 @@ class Settings(BaseSettings):
     # данные принадлежат ПЕРВОМУ (owner_id), остальные из списка работают с ними же.
     # ponytail: одно пространство, команды — при продаже доступа
     superadmin_ids: str = ""
+    # разработчики: Telegram ID через запятую (из SUPERADMIN_IDS) — включают режим технических работ и работают при нём
+    dev_ids: str = ""
     database_url: str = "postgresql+asyncpg://wb:wb@db:5432/wb"
 
     # параметры запросов к WB
@@ -96,6 +98,10 @@ class Settings(BaseSettings):
         if not ids:
             raise RuntimeError("SUPERADMIN_IDS не задан в .env (Telegram ID через запятую, первый — владелец данных)")
         return ids
+
+    @property
+    def devs(self) -> set[int]:
+        return {int(x) for x in self.dev_ids.replace(" ", "").split(",") if x}
 
     @property
     def owner_id(self) -> int:
