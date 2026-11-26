@@ -337,6 +337,9 @@ async def poll_account(bot, acc: models.WbAccount, kinds=KINDS) -> None:
         return
     if "code" in errs:
         last["code_fail"] = now
+        e = errs["code"]
+        log.warning("keeper: аккаунт %s: код получения не получен: %s: %s — повтор опросом через %d мин", acc.title,
+                    type(e).__name__, str(e)[:200], CODE_RETRY_SEC // 60)
     elif "pickup_code" in st:
         last.pop("code_fail", None)
     if "vb_points" in st and ("vb_ops" in st or st["vb_points"] == last.get("vb_total")):

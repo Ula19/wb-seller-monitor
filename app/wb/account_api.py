@@ -342,8 +342,7 @@ async def fetch(state: dict, proxy: str | None = None, kinds=API_KINDS, vb_total
                         raise LookupError("кода на сегодня в ответе WB нет")
                     out.update(pickup_code=code, pickup_code_date=utc_today(), pickup_code_at=datetime.now(timezone.utc))
                 except Exception as e:
-                    errs["code"] = e
-                    log.warning("код получения не получен: %s: %s", type(e).__name__, str(e)[:200])
+                    errs["code"] = e  # в лог — keeper (с аккаунтом)
 
         async def balance():
             out.update(parse_balance(await call("GET", BALANCE_URL, headers=with_vkey)))
