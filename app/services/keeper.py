@@ -103,17 +103,67 @@ async def _attach_offices(rows: list[dict], key: str) -> None:
         r["office_address"], r["office_hours"] = offices.get(r[key], (None, None))
 
 
-async def _refresh(acc: models.WbAccount, *, visit: bool = False) -> dict | None:
-    """Браузерный рефреш сессии; живая → сохраняем. None — протухла. ProxyDown — прокси не отвечает.
-    visit — заодно ЛК и история баланса (код получения — HTTP-опросом, не здесь). Сессию берём из БД уже под замком
-    аккаунта: предыдущий рефреш мог её обновить."""
-    async with _acc_locks.setdefault(acc.id, asyncio.Lock()):
+async def _bearer_http(acc: models.WbAccount, state: dict, proxy: str | None) -> dict | None:
+    """🔑 Bearer по HTTP (без браузера); вышло — сразу в БД: refresh-кука ротируется, старая уже мертва."""
+    new = await account_api.refresh_bearer(state, proxy)
+    if new:
         async with Session() as s:
-            row = await s.get(models.WbAccount, acc.id)
-            if row is None:
-                raise AccountGone(acc.id)
-            state, proxy_id, phone = decrypt_json(row.state_enc), row.proxy_id, row.phone
-        new = await web_session.refresh(state, await proxy_url(proxy_id), visit=visit, phone=phone)
+            await s.execute(update(models.WbAccount).where(models.WbAccount.id == acc.id)
+                            .values(state_enc=encrypt_json(new)))
+            await s.commit()
+        log.info("keeper: 🔑 Bearer аккаунта %s продлён HTTP", acc.title)
+    return new
+
+
+async def _visit_http(acc: models.WbAccount, state: dict, proxy: str | None) -> dict | None:
+    """💳 визит по HTTP: история баланса и профиль. None — не вышло, нужен браузер (498 — он же выпустит аккаунту
+    свежую антибот-куку). ProxyDown — наверх: браузер через тот же прокси не пройдёт."""
+    for again in (False, True):
+        try:
+            ops, profile = await account_api.fetch_web(state, proxy)
+            break
+        except account_api.Unauthorized:
+            if again or not (state := await _bearer_http(acc, state, proxy)):
+                return None
+        except account_api.AntibotExpired:
+            log.info("keeper: 💳 кука антибота аккаунта %s протухла → браузер", acc.title)
+            return None
+        except ProxyDown:
+            raise
+        except Exception as e:
+            log.warning("keeper: визит %s по HTTP: %s: %s → браузер", acc.title, type(e).__name__, str(e)[:200])
+            return None
+    async with Session() as s:
+        row = await s.get(models.WbAccount, acc.id)
+        if row is not None:
+            repo.apply_profile(row, profile)
+            row.visit_error = None
+            if ops:
+                await repo.upsert_balance_ops(s, acc.id, ops)
+            await s.commit()
+    log.info("keeper: визит аккаунта %s по HTTP: операций баланса %d", acc.title, len(ops))
+    return state
+
+
+async def _refresh(acc: models.WbAccount, *, visit: bool = False) -> dict | None:
+    """Рефреш сессии; живая → сохраняем. None — протухла. ProxyDown — прокси не отвечает.
+    Сначала HTTP: без visit — 🔑 новый Bearer, с visit (ЛК: история баланса, профиль) — 💳 запросы webapi; не вышло —
+    браузер, как раньше. Код получения — HTTP-опросом, не здесь. Сессию берём из БД уже под замком аккаунта:
+    предыдущий рефреш мог её обновить."""
+    async with _acc_locks.setdefault(acc.id, asyncio.Lock()):
+        async def load():
+            async with Session() as s:
+                row = await s.get(models.WbAccount, acc.id)
+                if row is None:
+                    raise AccountGone(acc.id)
+                return decrypt_json(row.state_enc), row.proxy_id, row.phone
+        state, proxy_id, phone = await load()
+        proxy = await proxy_url(proxy_id)
+        if done := await (_visit_http if visit else _bearer_http)(acc, state, proxy):
+            return done
+        if visit:  # HTTP-визит мог продлить Bearer и ротировать refresh-куку — браузеру нужна свежая сессия
+            state, _, _ = await load()
+        new = await web_session.refresh(state, proxy, visit=visit, phone=phone)
         if new is None:
             return None
         profile = new.pop(account_api.PROFILE_KEY, None)
@@ -267,7 +317,14 @@ async def poll_account(bot, acc: models.WbAccount, kinds=KINDS) -> None:
     except account_api.Unauthorized:
         await _relogin(bot, acc)
         return
-    except account_api.NoBearer:  # сессия жива (рефреш прошёл), бизнес-цены по кукам идут — не relogin
+    except account_api.NoBearer:  # рефреш прошёл, Bearer не появился
+        async with Session() as s:
+            lost = await s.scalar(select(models.WbAccount.visit_error).where(models.WbAccount.id == acc.id))
+        if lost == web_session.VISIT_SESSION:  # WB ID просит вход: Bearer не появится, иначе браузер гонялся бы каждый опрос
+            log.warning("keeper: аккаунт %s: Bearer нет, WB просит вход — нужен вход", acc.id)
+            await _relogin(bot, acc)
+            return
+        # сессия жива, бизнес-цены по кукам идут — не relogin
         log.warning("keeper: аккаунт %s: Bearer нет и после рефреша — лимит/заказы недоступны", acc.id)
         return
     except Exception as e:

@@ -6,18 +6,21 @@ wbx-validation-key, остальным хватает Bearer. Суммы WB — 
 401 → Unauthorized: решение (рефреш / «войдите заново») — у вызывающего.
 """
 import asyncio
+import base64
 import html
 import json
 import logging
 import re
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+from http.cookies import SimpleCookie
 from urllib.parse import urlparse
 
 from curl_cffi.requests import AsyncSession
 from curl_cffi.requests.exceptions import RequestException
 
-from app.wb.web_session import ProxyDown, curl_proxy, web_proxy
+from app.wb.web_session import WWW_HOST, ProxyDown, cookie_header, curl_proxy, web_proxy
 
 log = logging.getLogger(__name__)
 
@@ -51,6 +54,10 @@ class CertUnknown(Exception):
 
 class Unauthorized(Exception):
     """WB ответил 401: access протух или сессию отозвали."""
+
+
+class AntibotExpired(Exception):
+    """www ответил 498: антибот-кука аккаунта x_wbaas_token протухла — продлить можно только браузером."""
 
 
 class NoBearer(Exception):
@@ -280,7 +287,7 @@ async def _client(state: dict, proxy: str | None):
                 raise ProxyDown("407 Proxy Authentication Required")
             return r
 
-        async def call(method, url, **kw):
+        async def call(method, url, raw=False, **kw):
             for n, pause in enumerate((0, *RETRY_SEC)):
                 if pause:
                     await asyncio.sleep(pause)
@@ -296,7 +303,11 @@ async def _client(state: dict, proxy: str | None):
                          if proxy else "напрямую", url.split("/")[2], n)
             if r.status_code == 401:
                 raise Unauthorized(url.split("/")[2])
+            if r.status_code == 498:  # www/webapi: антибот-кука аккаунта протухла или кончилась
+                raise AntibotExpired(url.split("/")[2])
             r.raise_for_status()
+            if raw:  # нужен ответ целиком (Set-Cookie рефреша)
+                return r
             return r.json() if r.content else None  # 2xx с пустым телом (у bonuses/history без истории)
         yield call, auth, with_vkey
 
@@ -566,6 +577,100 @@ async def fetch_balance(state: dict, proxy: str | None = None) -> dict:
     """Только full-balance (после активации — свежий funds)."""
     async with _client(state, proxy) as (call, _, with_vkey):
         return parse_balance(await call("GET", BALANCE_URL, headers=with_vkey))
+
+
+# ---------- 🔑 рефреш Bearer по HTTP (SCOUT 2026-11-25; wb-id-sdk 4.5.0 oauthApiClient.refresh) ----------
+# refresh-кредентил — HttpOnly-кука wbid-sdk-refresh (www, 90 дн., ротируется на каждом рефреше). Антибот не нужен.
+TOKEN_URL = f"{WWW}/oauth-bff/api/v1/token"
+TOKEN_HEADERS = {"Origin": WWW, "Referer": f"{WWW}/", "Accept": "application/json", "Content-Type": "application/json",
+                 "grantType": "refresh_token", "oauth-browser-sdk-version": "4.5.0"}
+TOKEN_BODY = json.dumps({"grantType": "refresh_token", "clientId": "marketplace_web"})
+
+
+def _expires(m) -> float:
+    if m["max-age"].lstrip("-").isdigit():
+        return datetime.now(timezone.utc).timestamp() + int(m["max-age"])
+    try:
+        return parsedate_to_datetime(m["expires"]).timestamp() if m["expires"] else -1
+    except (TypeError, ValueError):
+        return -1
+
+
+def apply_refresh(state: dict, d: dict, set_cookies: list[str]) -> dict:
+    """Ответ рефреша → state: куки из Set-Cookie обновить по (имя, домен) или ДОБАВИТЬ (wbid-sdk-access-token и
+    т. п. в сессии может не быть), wbx-validation-key = validationKey, новый JWT — во все ключи TOKEN_KEYS."""
+    cookies = state.setdefault("cookies", [])
+    vkey = d.get("validationKey")
+    for line in set_cookies:
+        jar = SimpleCookie()
+        try:
+            jar.load(line)
+        except Exception:
+            continue
+        for name, m in jar.items():
+            dom = m["domain"] or WWW_HOST
+            new = {"name": name, "value": m.value, "domain": dom, "path": m["path"] or "/", "expires": _expires(m),
+                   "httpOnly": bool(m["httponly"]), "secure": bool(m["secure"]),
+                   "sameSite": (m["samesite"] or "Lax").capitalize()}
+            old = next((c for c in cookies if c["name"] == name and c.get("domain", "").lstrip(".") == dom.lstrip(".")), None)
+            if old:
+                old.update(value=new["value"], expires=new["expires"])
+            else:
+                cookies.append(new)
+    for c in cookies:
+        if vkey and c["name"] == "wbx-validation-key":
+            c["value"] = vkey
+    for o in state.get("origins") or []:
+        if o.get("origin") == WWW:
+            for it in o.get("localStorage") or []:
+                if it.get("name") in TOKEN_KEYS:
+                    it["value"] = JWT.sub(d["accessToken"], it.get("value") or "")
+    return state
+
+
+async def refresh_bearer(state: dict, proxy: str | None = None) -> dict | None:
+    """Новый Bearer без браузера → обновлённый state; не вышло (любая причина, в т. ч. сеть) → None, и тогда
+    вызывающий идёт в браузер, как раньше."""
+    try:
+        async with _client(state, proxy) as (call, _, _v):
+            r = await call("POST", TOKEN_URL, raw=True, headers={**TOKEN_HEADERS, "Cookie": cookie_header(state)},
+                           data=TOKEN_BODY)
+            d = r.json() or {}
+    except Exception as e:
+        log.warning("🔑 Bearer по HTTP не продлён: %s: %s", type(e).__name__, str(e)[:200])
+        return None
+    if not JWT.fullmatch(d.get("accessToken") or ""):
+        log.warning("🔑 Bearer по HTTP не продлён: в ответе нет accessToken: %s", str(d)[:200])
+        return None
+    return apply_refresh(json.loads(json.dumps(state)), d, r.headers.get_list("set-cookie"))
+
+
+# ---------- 💳 история «Баланса» и профиль по HTTP (SCOUT 2026-11-25): те же POST, что WALLET_JS / PROFILE_JS ----------
+# пускает антибот-кука x_wbaas_token аккаунта (её выпускает браузер при визите, ~60 ч, привязана к IP прокси) — нет её
+# или протухла → 498 → AntibotExpired. UA — тот, что вшит в куку: с чужим WB гасит её через ~20–30 запросов.
+WALLET_URL = f"{WWW}/webapi/lk/mywallet/purchases/data"
+PROFILE_URL = f"{WWW}/webapi/personalinfo"
+
+
+def antibot_ua(state: dict) -> str | None:
+    """x_wbaas_token = 1.1000.<hex>.<base64(… | IP | UA | …)>.<sig> → UA."""
+    tok = next((c["value"] for c in state.get("cookies") or [] if c.get("name") == "x_wbaas_token"), "")
+    try:
+        p = tok.split(".")[3]
+        return base64.b64decode(p + "=" * (-len(p) % 4)).decode(errors="replace").split("|")[2] or None
+    except Exception:
+        return None
+
+
+async def fetch_web(state: dict, proxy: str | None = None) -> tuple[list[dict], dict | None]:
+    """→ (операции баланса, профиль). AntibotExpired (498), Unauthorized, NoBearer, ProxyDown — наверх."""
+    async with _client(state, proxy) as (call, auth, _):
+        h = {**auth, "Referer": f"{WWW}/lk", "Accept": "*/*", "x-requested-with": "XMLHttpRequest",
+             "Cookie": cookie_header(state), **({"User-Agent": ua} if (ua := antibot_ua(state)) else {})}
+        wallet = await call("POST", WALLET_URL, data="currency=RUB",
+                            headers={**h, "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"})
+        profile = await call("POST", PROFILE_URL, headers=h)
+    return parse_balance_history(wallet), parse_profile(profile)
 
 
 if __name__ == "__main__":  # self-check на формах ответов из HAR (суммы в копейках)
@@ -1067,4 +1172,76 @@ if __name__ == "__main__":  # self-check на формах ответов из H
             assert (await fetch_notices(st))[0] == 2 and [c[0] for c in calls] == ["GET", "POST"]
             assert calls[0][2] == "https://www.wildberries.ru/lk"
     asyncio.run(bell())
+
+    # 🔑 рефреш: refresh-кука ротируется (обновить), access/vkey-куки — добавить, JWT — в оба ключа, vkey — из тела
+    ua = "Mozilla/5.0 (X11; Linux x86_64) Chrome/156.0.0.0"
+    anti = "1.1000.ab." + base64.b64encode(f"0|51.146.12.152|{ua}|1795000000|reusable".encode()).decode().rstrip("=") + ".sig"
+    rs = {"cookies": [{"name": "wbid-sdk-refresh", "value": "old", "domain": "www.wildberries.ru", "path": "/oauth-bff/api/v1/token",
+                       "expires": 1, "httpOnly": True, "secure": True, "sameSite": "Lax"},
+                      {"name": "wbx-validation-key", "value": "vk-old", "domain": ".wildberries.ru", "path": "/"},
+                      {"name": "x_wbaas_token", "value": anti, "domain": ".wildberries.ru", "path": "/"}],
+          "origins": [{"origin": WWW, "localStorage": [{"name": "wbx__tokenData", "value": '{"token":"eyJa.eyJb.old"}'},
+                                                       {"name": "wbid-oauth-sdk-access-token", "value": "eyJa.eyJb.old2"},
+                                                       {"name": "other", "value": "eyJa.eyJb.keep"}]}]}
+    assert antibot_ua(rs) == ua and antibot_ua({"cookies": [{"name": "x_wbaas_token", "value": "bad"}]}) is None
+    sc = ["wbid-sdk-refresh=new; Path=/oauth-bff/api/v1/token; Max-Age=7776000; HttpOnly; Secure; SameSite=Lax",
+          "wbid-sdk-access-token=acc; Path=/; Expires=Wed, 23 Dec 2026 10:00:00 GMT; Secure",
+          "wbid-sdk-validation-key=vk2; Domain=.wildberries.ru; Path=/"]
+
+    class TR(R):
+        def __init__(self, code, body, cookies=()):
+            super().__init__(code, body)
+            self.headers = type("H", (), {"get_list": lambda _, k: list(cookies) if k == "set-cookie" else []})()
+    sent = []
+
+    def web(resp):
+        class S:
+            def __init__(self, **kw):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                pass
+
+            async def request(self, method, url, **kw):
+                sent.append((url, kw))
+                return resp(url)
+        return patch(f"{__name__}.AsyncSession", S)
+
+    async def tokens():
+        with web(lambda u: TR(200, {"accessToken": "eyJn.eyJn.new", "validationKey": "vk-new"}, sc)), \
+                patch(f"{__name__}.web_proxy", lambda: None):
+            new = await refresh_bearer(rs)
+        url, kw = sent[-1]
+        assert url == TOKEN_URL and kw["data"] == TOKEN_BODY and kw["headers"]["grantType"] == "refresh_token", kw
+        assert "Authorization" not in kw["headers"] and "wbid-sdk-refresh=old" in kw["headers"]["Cookie"]
+        ck = {c["name"]: c for c in new["cookies"]}
+        assert ck["wbid-sdk-refresh"]["value"] == "new" and ck["wbid-sdk-refresh"]["expires"] > 1.7e9
+        assert len([c for c in new["cookies"] if c["name"] == "wbid-sdk-refresh"]) == 1  # обновлена, не задвоена
+        assert (ck["wbid-sdk-access-token"]["domain"], ck["wbid-sdk-access-token"]["expires"]) == (WWW_HOST, 1798020000)
+        assert ck["wbid-sdk-validation-key"]["domain"] == ".wildberries.ru" and not ck["wbid-sdk-access-token"]["httpOnly"]
+        assert ck["wbid-sdk-refresh"]["httpOnly"] and ck["wbx-validation-key"]["value"] == "vk-new"
+        assert bearer(new) == "eyJn.eyJn.new" and www_storage(new)["wbid-oauth-sdk-access-token"] == "eyJn.eyJn.new"
+        assert www_storage(new)["other"] == "eyJa.eyJb.keep" and bearer(rs) == "eyJa.eyJb.old"  # исходный state не тронут
+        for bad in (lambda u: TR(400, {"error": "x"}), lambda u: TR(200, {"validationKey": "v"}), lambda u: TR(401, None)):
+            with web(bad), patch(f"{__name__}.web_proxy", lambda: None):
+                assert await refresh_bearer(rs) is None
+        # 💳 история и профиль: Cookie — все куки www, UA из куки; 498 → AntibotExpired
+        hist = {"value": {"balanceHistory": {"groups": [{"items": [{"txId": 7, "moneyIncome": 100, "dt": 1.7e12}]}]}}}
+        prof = {"value": {"isAuthenticated": True, "firstName": "Яна", "purchasePercent": 90}}
+        with web(lambda u: R(200, hist if "mywallet" in u else prof)), patch(f"{__name__}.web_proxy", lambda: None):
+            ops, p = await fetch_web(rs)
+        assert [o["tx_id"] for o in ops] == ["7"] and p["name"] == "Яна", (ops, p)
+        (u1, k1), (u2, k2) = sent[-2:]
+        assert (u1, u2, k1["data"]) == (WALLET_URL, PROFILE_URL, "currency=RUB")
+        assert k1["headers"]["User-Agent"] == ua and "x_wbaas_token=" in k1["headers"]["Cookie"] and k2["headers"]["Authorization"]
+        with web(lambda u: R(498, None)), patch(f"{__name__}.web_proxy", lambda: None):
+            try:
+                await fetch_web(rs)
+                raise AssertionError("498 без исключения")
+            except AntibotExpired:
+                pass
+    asyncio.run(tokens())
     print("ok")
