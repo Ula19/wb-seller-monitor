@@ -43,9 +43,12 @@ function Unpaid({ a }: { a: Account }) {
 }
 
 function Name({ a }: { a: Account }) {
+  const lost = a.status === "relogin";
   return (
     <span className="acc-name">
-      <StatusDot a={a} /><Link to={`/accounts/${a.id}`} onClick={(e) => e.stopPropagation()}><b>{a.title}</b></Link>
+      <StatusDot a={a} /><Link to={`/accounts/${a.id}`} className={lost ? "bad-t" : undefined}
+        onClick={(e) => e.stopPropagation()}><b>{a.title}</b></Link>
+      {lost && <> <span className="pill bad">нужен вход</span></>}
       <span className="muted small"> {a.phone ?? a.phone_mask}</span> <Blocked a={a} />
     </span>
   );

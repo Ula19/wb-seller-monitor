@@ -49,7 +49,7 @@ function MaintBanner({ dev }: { dev: boolean }) {
   const low = (t = "") => t.charAt(0).toLowerCase() + t.slice(1);  // «Обновление из WB» → «обновление из WB»
   const closed = m.blocked.map((g) => low(m.groups[g]?.split(":")[0])).join(", ") || "ничего";
   return dev
-    ? <div className="maint dev" role="status">🚧 Технические работы включены — закрыто: {closed}
+    ? <div className="maint dev" role="status">🚧 Технические работы включены{m.until ? ` до ${m.until} МСК` : ""} — закрыто: {closed}
         {m.poll_paused ? " · фоновый опрос WB на паузе" : ""} · бот: выполняется {m.sending}, ждут в очереди {m.pending}
         {" "}· <NavLink to="/dev">выключить</NavLink></div>
     : <div className="maint" role="status">🚧 {m.message}{m.blocked.length ? ` · сейчас недоступно: ${closed}` : ""}</div>;
