@@ -392,7 +392,8 @@ ACC_FIELDS = ("id", "label", "phone_mask", "name", "phone", "purchase_pct", "kin
               "max_rid", "funds", "vb_points", "wallet_blocked", "wallet_arrested", "state_at", "proxy_fails", "proxy_fail_at", "polling", "visit_error", "retail")
 POLL_FRESH_SEC = 30  # ↻ не чаще: только что обновлённый опрашивать незачем
 ORDER_FIELDS = ("rid", "nm_id", "name", "brand", "color", "price", "dst_office_id", "status_name", "group_id",
-                "status_at", "ordered_at", "expiry_at", "delivery_at", "paid", "office_address", "office_hours", "hidden")
+                "status_at", "ordered_at", "expiry_at", "delivery_at", "paid", "office_address", "office_hours", "hidden",
+                "company_id", "invoice_url", "pay_until")
 
 
 COMPANY_VIEW = ("id", "old_id", "name", "full_name", "inn", "kpp")
@@ -970,6 +971,8 @@ async def add_payment(body: PayIn, u=Depends(user), s=Depends(db)):
         models.AccountOrder.account_id == acc.id, models.AccountOrder.rid.in_(rids)))}
     if any(orders.get(r) is None or orders[r].paid is not False for r in rids):
         raise HTTPException(422, "товар уже оплачен или пропал из заказов — обновите аккаунт")
+    if any(orders[r].company_id is not None for r in rids):  # 🏢 счёт компании платит её бухгалтерия, не Кошелёк
+        raise HTTPException(422, "заказ компании оплачивается по счёту, не Кошельком")
     p = models.OrderPayment
     busy = await s.scalars(select(p.rids).where(p.account_id == acc.id, p.status.in_(("pending", "sending"))))
     if set(rids) & {r for x in busy for r in x}:

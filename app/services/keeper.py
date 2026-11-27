@@ -291,6 +291,12 @@ async def state_job(bot) -> None:
             await poll_account(bot, acc, kinds)
 
 
+async def company_keys(acc_id: int) -> list[tuple[int, int]]:
+    """🏢 [(id, old_id)] включённых компаний номера — их заказы опрос берёт вместе с розничными."""
+    async with Session() as s:
+        return [(c.id, c.old_id) for c in await repo.companies(s, [acc_id], enabled_only=True)]
+
+
 async def _save_state(acc_id: int, st: dict) -> tuple[int, int]:
     """Пришедшее из account_api.fetch в БД (адреса ПВЗ, заказы, поля аккаунта, state_at). → (сбоев прокси до этого,
     сколько заказов пропало из активных)."""
@@ -319,10 +325,11 @@ async def poll_account(bot, acc: models.WbAccount, kinds=KINDS) -> None:
     manual = set(kinds) == set(KINDS)
     # (берётся только вместе с заказами — в account_api.fetch, тип orders)
     want_code = manual or (acc.pickup_code_date != repo.code_today() and now - last.get("code_fail", 0) >= CODE_RETRY_SEC)
+    comps = await company_keys(acc.id) if "orders" in api_kinds else []
     try:
         try:
             if api_kinds:
-                st, errs = await account_api.fetch(state, proxy, api_kinds, last.get("vb_total"), want_code)
+                st, errs = await account_api.fetch(state, proxy, api_kinds, last.get("vb_total"), want_code, comps)
         except (account_api.Unauthorized, account_api.NoBearer) as e:
             log.info("keeper: аккаунт %s: %s, освежаю сессию и повторяю",
                      acc.id, f"401 ({e})" if isinstance(e, account_api.Unauthorized) else "нет Bearer")
@@ -330,7 +337,7 @@ async def poll_account(bot, acc: models.WbAccount, kinds=KINDS) -> None:
             if state is None:
                 await _relogin(bot, acc)
                 return
-            st, errs = await account_api.fetch(state, proxy, api_kinds, last.get("vb_total"), want_code)
+            st, errs = await account_api.fetch(state, proxy, api_kinds, last.get("vb_total"), want_code, comps)
     except ProxyDown as e:  # рефреш через браузер не прошёл
         await _proxy_alert(bot, acc, e)
         return

@@ -252,6 +252,28 @@ def parse_orders(d: dict) -> list[dict]:
     return out
 
 
+B2B_ORDERS_URL = ("https://wbxoofex.wildberries.ru/api/v2/orders?limit=100&exclude_delivery_types=777,778"
+                  "&legal_old_id={}&exclude_b2b=false&offset=0")  # 🏢 заказы компании — запрос на каждую
+B2B_PAY_STATE = {4: True, 2: False}  # rid компании: оплачен state 1/pay_state 4; не оплачен state 7/pay_state 2 (HAR 24.11)
+B2B_UNPAID = "Ждёт оплаты по счёту"
+
+
+def parse_company_orders(d: dict, company_id: int, now: datetime | None = None) -> list[dict]:
+    """🏢 v2/orders компании → строки как у розницы + company_id, счёт (link_3_ds) и до когда оплатить
+    (сейчас + time_until_payment_expiry, с). Статусы «в пути / в ПВЗ» для бизнес-rids — ❓ (не проверено), не просим."""
+    now = now or datetime.now(timezone.utc)
+    raw = {r.get("uid"): r for o in d.get("data") or [] for r in o.get("rids") or []}
+    rows = parse_orders(d)
+    for o in rows:
+        r = raw.get(o["rid"]) or {}
+        left = r.get("time_until_payment_expiry")
+        o.update(company_id=company_id, paid=B2B_PAY_STATE.get(r.get("pay_state")),
+                 invoice_url=(str(r["link_3_ds"])[:1024] if r.get("link_3_ds") else None),
+                 pay_until=now + timedelta(seconds=left) if isinstance(left, (int, float)) and left > 0 else None)
+        o["status_name"] = B2B_UNPAID if o["paid"] is False else None
+    return rows
+
+
 def apply_statuses(orders: list[dict], d) -> None:
     """status-tracker: на каждый rid история; текущий статус — запись с максимальной date (нс)."""
     last = {}
@@ -321,11 +343,13 @@ PVZ_STATUS = "Приходите за товаром"  # status 210, group 5
 
 
 async def fetch(state: dict, proxy: str | None = None, kinds=API_KINDS, vb_total: int | None = None,
-                want_code: bool = False) -> tuple[dict, dict]:
+                want_code: bool = False, companies=()) -> tuple[dict, dict]:
     """Только запрошенные типы: orders (заказы + статусы), balance (баланс, лимит), vb (ВБ-баллы; история — только если
     итог не равен vb_total), grade (% Кошелька). → (пришедшее, {тип: исключение}): каждый тип отдельно, сбой одного
     не отменяет остальные. 401 у orders/balance/grade — Unauthorized наверх (рефреш); у баллов — просто сбой, как было.
-    want_code и есть товар в ПВЗ — ещё код получения на сегодня (pickup_code…); не вышло — errs["code"]."""
+    want_code и есть товар в ПВЗ — ещё код получения на сегодня (pickup_code…); не вышло — errs["code"].
+    🏢 companies — [(id, old_id)] включённых компаний: с заказами — ещё по запросу на каждую; orders_companies — чьи
+    заказы пришли (остальные компании в БД не трогаем: сбой или компания скрыта)."""
     out, errs = {}, {}
     async with _client(state, proxy) as (call, auth, with_vkey):
         async def orders():
@@ -338,7 +362,16 @@ async def fetch(state: dict, proxy: str | None = None, kinds=API_KINDS, vb_total
                     o.update(status_name=PVZ_STATUS, group_id=5, status_at=None)
             if ask:
                 apply_statuses(ask, await call("POST", STATUSES_URL, headers=auth, json={"ids": [o["rid"] for o in ask]}))
-            out["orders"] = rows
+            got = []
+            for cid, old_id in companies:  # сбой одной компании не портит ни розницу, ни другие компании
+                try:
+                    rows += parse_company_orders(await call("GET", B2B_ORDERS_URL.format(old_id), headers=auth), cid)
+                    got.append(cid)
+                except Unauthorized:
+                    raise
+                except Exception as e:
+                    log.warning("заказы компании %s не получены: %s: %s", old_id, type(e).__name__, str(e)[:200])
+            out["orders"], out["orders_companies"] = rows, got
             if want_code and any(o["expiry_at"] for o in rows):
                 try:  # сбой кода заказы не портит
                     code = await pickup_code(call, auth)
@@ -754,6 +787,16 @@ if __name__ == "__main__":  # self-check на формах ответов из H
     assert [(x["rid"], x["price"]) for x in o] == [("rtx", 52065), ("katana", 89740), ("honor", 25951),
                                                    ("old", 1000), ("nodisc", 500)], o
     assert [x["paid"] for x in o] == [False, False, True, None, None], o  # pay_state 3 — не оплачен, нет кода — не знаем
+    # 🏢 заказы компании (HAR 24.11): не оплачен — state 7/pay_state 2, счёт link_3_ds, срок оплаты; оплачен — 4, ссылок нет
+    t0 = datetime(2026, 11, 24, 10, 0, tzinfo=timezone.utc)
+    co = parse_company_orders({"data": [{"order_dt": 1, "dst_office_id": 5, "rids": [
+        {"uid": "eAl.abc.0.0", "nm_id": 9, "total_price": 18200, "discount": 0, "state": 7, "pay_state": 2,
+         "time_until_payment_expiry": 604800, "link_3_ds": "https://s3.wb.ru/offer.pdf", "qr_link": "q", "sbp_link": "s"},
+        {"uid": "eAl.abc.0.1", "nm_id": 9, "total_price": 18200, "state": 1, "pay_state": 4}]}]}, 77, t0)
+    assert [(x["rid"], x["company_id"], x["paid"], x["price"], x["status_name"], x["invoice_url"], x["pay_until"]) for x in co] == [
+        ("eAl.abc.0.0", 77, False, 182, B2B_UNPAID, "https://s3.wb.ru/offer.pdf", t0 + timedelta(days=7)),
+        ("eAl.abc.0.1", 77, True, 182, None, None, None)], co
+    assert parse_company_orders({}, 1) == []
     assert parse_profile({"value": {"isAuthenticated": True, "firstName": " Анна ", "purchasePercent": 94,
                                     "formattedPhoneMobile": "+7 916 123-45-67"}}) == \
         {"name": "Анна", "phone": "+7 916 123-45-67", "purchase_pct": 94}
@@ -809,11 +852,11 @@ if __name__ == "__main__":  # self-check на формах ответов из H
         return S, seen
 
     async def demo():
-        async def run(kinds=API_KINDS, vb_total=None, want_code=False, **over):
+        async def run(kinds=API_KINDS, vb_total=None, want_code=False, companies=(), **over):
             S, seen = session(**over)
             with patch(f"{__name__}.AsyncSession", S), patch(f"{__name__}.web_proxy", lambda: None):
                 out, errs = await fetch({**st, "cookies": [{"name": "wbx-validation-key", "value": "vk"}]}, None, kinds, vb_total,
-                                        want_code)
+                                        want_code, companies)
             return out, errs, [u for u, *_ in seen], seen
         out, errs, urls, seen = await run()
         assert (out["funds"], out["vb_points"], out["orders"], out["vb_ops"], errs) == (197888, 9094, [], [], {}), out
@@ -831,9 +874,16 @@ if __name__ == "__main__":  # self-check на формах ответов из H
         assert out == {"vb_points": 9094} and not errs
         # только заказы: статусы — для позиций без срока хранения; в ПВЗ — «Приходите за товаром» без status-tracker
         out, errs, urls, seen = await run(("orders",), **{ORDERS_URL: R(200, ORD)})
-        assert urls == [ORDERS_URL, STATUSES_URL] and seen[1][2] == {"ids": ["go"]} and set(out) == {"orders"}, seen
+        assert urls == [ORDERS_URL, STATUSES_URL] and seen[1][2] == {"ids": ["go"]} and set(out) == {"orders", "orders_companies"}, seen
         assert [(o["rid"], o["group_id"], o["status_name"]) for o in out["orders"]] == [
             ("pvz", 5, PVZ_STATUS), ("go", 3, "Едет в пункт выдачи")], out
+        # 🏢 включённые компании: по запросу на каждую; упала одна — её нет в orders_companies, остальное пришло
+        CO = {"data": [{"rids": [{"uid": "eAl.x.0.0", "pay_state": 2, "link_3_ds": "pdf"}]}]}
+        out, errs, urls, _ = await run(("orders",), companies=[(7, 70), (8, 80)], **{ORDERS_URL: R(200, ORD),
+                                       B2B_ORDERS_URL.format(70): R(200, CO), B2B_ORDERS_URL.format(80): R(500, {})})
+        assert urls[-2:] == [B2B_ORDERS_URL.format(70), B2B_ORDERS_URL.format(80)] and out["orders_companies"] == [7], (urls, out)
+        assert [(o["rid"], o.get("company_id")) for o in out["orders"]] == [("pvz", None), ("go", None), ("eAl.x.0.0", 7)]
+        assert not errs  # сбой компании — не сбой заказов
         out, errs, urls, _ = await run(("orders",), **{ORDERS_URL: R(200, {"data": [ORD["data"][0] | {"rids": ORD["data"][0]["rids"][:1]}]})})
         assert urls == [ORDERS_URL] and out["orders"][0]["group_id"] == 5  # все в ПВЗ — статусы не нужны
         # код получения: только с want_code и товаром в ПВЗ; запись на сегодня (UTC); нет записи / сбой — errs["code"], заказы целы

@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, ApiError, rub, time, type AccountFull, type BalanceOp, type Order, type OrderCancel, type Purchase, type VbOp } from "../api";
+import { api, ApiError, MSK, rub, time, type AccountFull, type BalanceOp, type Order, type OrderCancel, type Purchase, type VbOp } from "../api";
 import {
   Blocked, byPvz, CancelState, CertCode, Modal, ddmm, GROUP, Limit, lines, Period, pickupText, points, STATUS, StatusDot, Thumb, Title, useImg,
   usePeriod, visible, when, type Pvz, Held, MaintNote, useHold } from "../accounts";
@@ -162,9 +162,10 @@ function OrdersTab({ a }: { a: AccountFull }) {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["accounts"] }),
   });
   if (!a.orders.length) return <div className="card empty">Активных заказов нет</div>;
+  const retail = a.orders.filter((o) => !o.company_id);  // 🏢 заказы компаний — своими блоками ниже
   return (
     <div className="pvz-list">
-      {byPvz(a.orders).map((g) => {
+      {byPvz(retail).map((g) => {
         const vis = visible(g.orders);
         const hidden = g.orders.length - vis.length;
         const ready = vis.filter((o) => o.group_id === 5).length;
@@ -209,11 +210,58 @@ function OrdersTab({ a }: { a: AccountFull }) {
           </div>
         );
       })}
-      {paying != null && byPvz(a.orders).some((g) => g.id === paying) &&
-        <PvzPay a={a} g={byPvz(a.orders).find((g) => g.id === paying)!} onClose={() => setPaying(null)} />}
+      <CompanyOrders a={a} />
+      {paying != null && byPvz(retail).some((g) => g.id === paying) &&
+        <PvzPay a={a} g={byPvz(retail).find((g) => g.id === paying)!} onClose={() => setPaying(null)} />}
       {cancelling && <PvzCancel a={a} g={cancelling} onClose={() => setCancelling(null)} />}
     </div>
   );
+}
+
+/** 🏢 Счёт = заказ компании (все его rids; order_uid — средняя часть rid «eAl.<uid>.0.0»). */
+type Invoice = { uid: string; orders: Order[]; first: Order };
+const invoices = (orders: Order[]): Invoice[] => {
+  const m = new Map<string, Order[]>();
+  for (const o of orders) { const uid = o.rid.split(".")[1] ?? o.rid; m.set(uid, [...(m.get(uid) ?? []), o]); }
+  return [...m].map(([uid, os]) => ({ uid, orders: os, first: os[0] }));
+};
+const until = (iso: string) => new Date(iso).toLocaleString("ru-RU", { timeZone: MSK, day: "2-digit", month: "2-digit",
+  hour: "2-digit", minute: "2-digit" });
+
+/** 🏢 Заказы компаний номера: по компании, внутри — по счетам. Не оплачен — «ждёт оплаты по счёту до …»;
+ *  оплачен — статус доставки (❓ WB для бизнес-rids его пока не проверяли — «—»). */
+function CompanyOrders({ a }: { a: AccountFull }) {
+  const img = useImg();
+  const mine = a.orders.filter((o) => o.company_id);
+  if (!mine.length) return null;
+  const ids = [...new Set(mine.map((o) => o.company_id!))];
+  return <>{ids.map((cid) => {
+    const c = a.companies.find((x) => x.id === cid);
+    const os = mine.filter((o) => o.company_id === cid);
+    return (
+      <div key={cid} className="card pvz-group co-orders">
+        <div className="pvz-head"><div><b>🏢 {c?.name ?? c?.full_name ?? "Компания (скрыта)"}</b>
+          {c?.inn && <span className="muted small"> · ИНН {c.inn}</span>}
+          <div className="muted small">{os.length} шт. · заказы по счёту</div></div></div>
+        {invoices(os).map(({ uid, orders, first: o }) => (
+          <div key={uid} className="ord">
+            <Thumb src={img(o.nm_id)} />
+            <div className="ord-main">
+              <div>{o.name ?? `арт. ${o.nm_id}`}{orders.length > 1 && <b> × {orders.length}</b>}</div>
+              <div className="ord-tags">
+                <span className={o.paid === false ? "badge out" : "badge in"}>{o.paid === false ? "Не оплачен" : o.paid ? "Оплачен" : "оплата ?"}</span>
+                {o.paid === false ? <span className="pill">{o.status_name ?? "Ждёт оплаты по счёту"}{o.pay_until && ` до ${until(o.pay_until)}`}</span>
+                  : <span className={`pill g${o.group_id ?? 0}`}>{o.status_name ?? GROUP[o.group_id ?? 0] ?? "—"}</span>}
+                {o.dst_office_id != null && <span className="muted small">{o.office_address ?? `ПВЗ №${o.dst_office_id}`}</span>}
+              </div>
+            </div>
+            <div className="ord-price num">{rub(orders.reduce((s, x) => s + (x.price ?? 0), 0))}
+              {orders.length > 1 && <div className="muted small">{rub(o.price)} за шт.</div>}</div>
+          </div>
+        ))}
+      </div>
+    );
+  })}</>;
 }
 
 // ---------- История заказов ----------

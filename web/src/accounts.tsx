@@ -45,7 +45,8 @@ export function accountRows(all: Account[]): Row[] {
 export const transit = (a: Account) => visible(a.orders).filter((o) => o.group_id !== 5).length;
 export const inPvz = (a: Account) => visible(a.orders).filter((o) => o.group_id === 5).length;
 /** «Не оплачено»: сумма неоплаченных активных заказов (paid === false; «не знаем» не считаем), без скрытых. */
-export const unpaid = (a: Account) => visible(a.orders).filter((o) => o.paid === false).reduce((s, o) => s + (o.price ?? 0), 0);
+export const unpaid = (a: Account) => visible(a.orders).filter((o) => o.paid === false && !o.company_id)  // 🏢 счёт — не Кошелёк
+  .reduce((s, o) => s + (o.price ?? 0), 0);
 export const ddmm = (iso: string) => new Date(iso).toLocaleDateString("ru-RU", { timeZone: MSK, day: "2-digit", month: "2-digit" });
 /** Дата и время по МСК: 11.11.26, 14:05. */
 export const when = (iso: string | null) => (iso ? new Date(iso).toLocaleString("ru-RU",

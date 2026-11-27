@@ -302,7 +302,7 @@ async def _refresh_account(acc_id: int, state: dict, proxy: str | None, title: s
     из активных (отменён) — архив сразу, как в опросе: иначе итог отмены ждал бы ночной догрузки."""
     try:
         keeper._last.setdefault(acc_id, {}).update(dict.fromkeys(("orders", "balance"), datetime.now(timezone.utc).timestamp()))
-        st, _ = await account_api.fetch(state, proxy, ("orders", "balance"))
+        st, _ = await account_api.fetch(state, proxy, ("orders", "balance"), companies=await keeper.company_keys(acc_id))
         if st and (await keeper._save_state(acc_id, st))[1]:
             async with Session() as s:
                 acc = await s.get(models.WbAccount, acc_id)

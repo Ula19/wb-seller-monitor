@@ -400,14 +400,16 @@ async def save_account_state(s, account_id: int, st: dict) -> tuple[int, int]:
         await upsert_vb_ops(s, account_id, st["vb_ops"])
     if "orders" not in st:
         return was or 0, 0
-    orders = st["orders"]
-    gone = (await s.execute(delete(models.AccountOrder).where(
-        models.AccountOrder.account_id == account_id,
-        models.AccountOrder.rid.not_in([o["rid"] for o in orders]) if orders else true())
-        .returning(models.AccountOrder.rid))).all()
+    orders, ao = st["orders"], models.AccountOrder
+    # 🏢 пропавшие — только среди розницы и компаний, чьи заказы пришли (сбой / скрытая компания — её строки целы)
+    scope = ao.company_id.is_(None) | ao.company_id.in_(st.get("orders_companies") or [])
+    gone = (await s.execute(delete(ao).where(
+        ao.account_id == account_id, scope,
+        ao.rid.not_in([o["rid"] for o in orders]) if orders else true())
+        .returning(ao.rid))).all()
     if orders:
         cols = ("nm_id", "name", "brand", "color", "price", "dst_office_id", "status_name", "group_id",
-                "ordered_at", "expiry_at", "delivery_at", "paid")
+                "ordered_at", "expiry_at", "delivery_at", "paid", "company_id", "invoice_url", "pay_until")
         keep = ("office_address", "office_hours",  # сбой справочника ПВЗ (None) не стирает сохранённый адрес
                 "status_at")  # у позиций в ПВЗ статус без status-tracker — время статуса прежнее
         t = models.AccountOrder.__table__

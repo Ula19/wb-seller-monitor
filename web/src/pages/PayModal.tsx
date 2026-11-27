@@ -11,7 +11,7 @@ const FINAL = ["ok", "error", "unknown"];
 const err = (e: unknown) => (e instanceof ApiError ? e.message : "ошибка");
 const total = (os: Order[]) => os.reduce((s, o) => s + (o.price ?? 0), 0);
 /** Что платим у аккаунта: неоплаченные видимые (как «Не оплачено»). */
-export const toPay = (a: Account, orders: Order[] = a.orders) => visible(orders).filter((o) => o.paid === false);
+export const toPay = (a: Account, orders: Order[] = a.orders) => visible(orders).filter((o) => o.paid === false && !o.company_id);
 const payable = (a: Account) => a.status === "active" && !a.wallet_blocked;
 
 /** Оплаты окна: account_id → последняя оплата; опрос, пока не закончатся; по итогу — свежие аккаунты. */

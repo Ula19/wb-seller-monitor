@@ -60,6 +60,7 @@ export type Order = {
   status_at: string | null; ordered_at: string | null; expiry_at: string | null; delivery_at: string | null;
   paid: boolean | null; office_address: string | null; office_hours: string | null; hidden: boolean;
   company_id?: number | null;  // 🏢 заказ компании номера (null — розничный)
+  invoice_url?: string | null; pay_until?: string | null;  // 🏢 счёт PDF (s3.wb.ru, 7 дней) и до когда оплатить
 };
 // 🏢 компания номера (юрлицо/ИП): своя строка в «Аккаунтах», покупатель «по счёту»
 export type Company = { id: number; old_id: number; name: string | null; full_name: string | null; inn: string | null; kpp: string | null };

@@ -320,6 +320,11 @@ class AccountOrder(Base):
     office_address: Mapped[str | None] = mapped_column(String(256), nullable=True)  # из справочника ПВЗ (pickups)
     office_hours: Mapped[str | None] = mapped_column(String(64), nullable=True)
     hidden: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")  # скрыт на сайте
+    # 🏢 заказ компании номера (v2/orders с legal_old_id): счёт PDF (link_3_ds, s3.wb.ru, 7 дн.) и до когда оплатить
+    company_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("wb_companies.id", ondelete="SET NULL"), nullable=True)
+    invoice_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    pay_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class AccountPrice(Base):
