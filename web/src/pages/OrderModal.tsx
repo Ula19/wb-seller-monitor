@@ -472,5 +472,6 @@ function Wizard({ all, onClose }: { all: Account[]; onClose: () => void }) {
 export default function OrderModal({ open, onClose, all }: { open: boolean; onClose: () => void; all: Account[] }) {
   if (!open) return null;
   // фон не закрывает: случайный клик мимо стёр бы набранный заказ
-  return <Modal label="Заказать товар" onClose={onClose} wide><Wizard all={all} onClose={onClose} /></Modal>;
+  // 🏢 номер с выключенной «Розницей» розничным покупателем не предлагаем
+  return <Modal label="Заказать товар" onClose={onClose} wide><Wizard all={all.filter((a) => a.retail !== false)} onClose={onClose} /></Modal>;
 }

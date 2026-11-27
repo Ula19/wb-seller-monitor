@@ -59,7 +59,11 @@ export type Order = {
   dst_office_id: number | null; status_name: string | null; group_id: number | null;
   status_at: string | null; ordered_at: string | null; expiry_at: string | null; delivery_at: string | null;
   paid: boolean | null; office_address: string | null; office_hours: string | null; hidden: boolean;
+  company_id?: number | null;  // 🏢 заказ компании номера (null — розничный)
 };
+// 🏢 компания номера (юрлицо/ИП): своя строка в «Аккаунтах», покупатель «по счёту»
+export type Company = { id: number; old_id: number; name: string | null; full_name: string | null; inn: string | null; kpp: string | null };
+export type Companies = { retail: boolean; browser_sync: boolean; companies: (Company & { enabled: boolean; seen_at: string | null })[] };
 export type Account = {
   id: number; label: string | null; phone_mask: string; name: string | null; phone: string | null;
   purchase_pct: number | null; kind: "business" | "retail";
@@ -70,6 +74,7 @@ export type Account = {
   proxy_fails: number; proxy_fail_at: string | null; proxy_down: boolean; polling: boolean;
   visit_error: string | null; site_lost: boolean;  // почему визит в браузере не удался; сессия сайта истекла
   title: string; proxy: { id: number; label: string; server: string; exit_ip: string | null } | null;
+  retail: boolean; companies: Company[];  // номер — розничный покупатель; включённые компании
 };
 // страница аккаунта: + код получения на сегодня и счётчики вкладок
 export type AccountFull = Account & {

@@ -457,6 +457,20 @@ async def upsert_vb_ops(s, account_id: int, ops: list[dict]) -> None:
     await _upsert(s, models.AccountVbOp, account_id, "tx_id", ops, ("title", "description", "dt", "operation", "amount"))
 
 
+async def upsert_companies(s, account_id: int, items: list[dict]) -> None:
+    """Компании номера по old_id: новые — выключены (enabled по умолчанию false), у известных — свежие поля и sign;
+    пропавшие у WB не трогаем (заказы и выбор владельца остаются)."""
+    now = datetime.now(timezone.utc)
+    await _upsert(s, models.WbCompany, account_id, "old_id", [{**c, "seen_at": now} for c in items],
+                  ("uuid", "name", "full_name", "inn", "kpp", "sign", "seen_at"))
+
+
+async def companies(s, account_ids, enabled_only: bool = False) -> list[models.WbCompany]:
+    c = models.WbCompany
+    q = select(c).where(c.account_id.in_(list(account_ids)))
+    return list(await s.scalars((q.where(c.enabled) if enabled_only else q).order_by(c.account_id, c.name, c.id)))
+
+
 async def upsert_balance_ops(s, account_id: int, ops: list[dict]) -> None:
     await _upsert(s, models.AccountBalanceOp, account_id, "tx_id", ops,  # source_type: пустое не стирает заполненное миграцией
                   ("name", "op_type", "amount", "balance", "dt", "source_type"), keep=("source_type",))

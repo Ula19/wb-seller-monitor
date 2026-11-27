@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError, type Account, type LoginRequest, type Proxy } from "../api";
 import { STATUS } from "../accounts";
+import CompaniesPick, { useCompanies } from "./Companies";
 
 const ACTIVE = ["new", "running", "wait_code"];
 type Connected = { id: number; title: string; status: string };
@@ -120,10 +121,24 @@ function Connect({ onDone, relogin }: { onDone: () => void; relogin: Relogin | n
       )}
       {r?.status === "error" && !start.isPending && <p className="err">Не вышло: {r.error}</p>}
       {r?.status === "done" && <p className="ok-t">Аккаунт подключён ✓</p>}
+      {r?.status === "done" && r.account_id != null && Date.now() - new Date(r.created_at).getTime() < AFTER_LOGIN_MS
+        && <AfterLogin accountId={r.account_id} />}
       {error && <p className="err">{error}</p>}
       <p className="muted small">Номер нужен только на время входа и стирается после него. Сессия хранится зашифрованной.</p>
     </div>
   );
+}
+
+const AFTER_LOGIN_MS = 30 * 60_000;  // «Кого добавить» — только сразу после входа, не при каждом открытии окна
+
+/** 🏢 После входа: у номера есть компании — «Кого добавить» (розница + компании галочками); нет — ничего. */
+function AfterLogin({ accountId }: { accountId: number }) {
+  const q = useCompanies(accountId);
+  const [saved, setSaved] = useState(false);
+  if (!q.data?.companies.length || saved) return null;
+  return <div className="card after-login"><h3>Кого добавить</h3>
+    <CompaniesPick accountId={accountId} onSaved={() => setSaved(true)}
+      intro="На этом номере есть компании. Отметьте, кто будет покупателем; изменить можно позже во вкладке «Компании» аккаунта." /></div>;
 }
 
 export default function LoginModal({ open, onClose, relogin }: { open: boolean; onClose: () => void; relogin: Relogin | null }) {

@@ -116,11 +116,11 @@ async def _bearer_http(acc: models.WbAccount, state: dict, proxy: str | None) ->
 
 
 async def _visit_http(acc: models.WbAccount, state: dict, proxy: str | None) -> dict | None:
-    """💳 визит по HTTP: история баланса и профиль. None — не вышло, нужен браузер (498 — он же выпустит аккаунту
+    """💳 визит по HTTP: история баланса, профиль и 🏢 компании. None — не вышло, нужен браузер (498 — он же выпустит аккаунту
     свежую антибот-куку). ProxyDown — наверх: браузер через тот же прокси не пройдёт."""
     for again in (False, True):
         try:
-            ops, profile = await account_api.fetch_web(state, proxy)
+            ops, profile, companies = await account_api.fetch_web(state, proxy)
             break
         except account_api.Unauthorized:
             if again or not (state := await _bearer_http(acc, state, proxy)):
@@ -140,9 +140,27 @@ async def _visit_http(acc: models.WbAccount, state: dict, proxy: str | None) -> 
             row.visit_error = None
             if ops:
                 await repo.upsert_balance_ops(s, acc.id, ops)
+            if companies is not None:
+                await repo.upsert_companies(s, acc.id, companies)
             await s.commit()
-    log.info("keeper: визит аккаунта %s по HTTP: операций баланса %d", acc.title, len(ops))
+    log.info("keeper: визит аккаунта %s по HTTP: операций баланса %d, компаний %s", acc.title, len(ops),
+             "—" if companies is None else len(companies))
     return state
+
+
+async def _companies(acc_id: int, title: str, state: dict, proxy: str | None) -> None:
+    """🏢 Компании номера одним запросом (после входа и после браузерного визита — антибот-кука свежая). Сбой — в лог:
+    список возьмёт следующий визит."""
+    try:
+        got = await account_api.fetch_companies(state, proxy)
+    except Exception as e:
+        log.warning("keeper: компании %s не получены: %s: %s", title, type(e).__name__, str(e)[:200])
+        return
+    async with Session() as s:
+        if await s.get(models.WbAccount, acc_id) is not None:
+            await repo.upsert_companies(s, acc_id, got)
+            await s.commit()
+    log.info("keeper: компании %s: %d", title, len(got))
 
 
 async def _refresh(acc: models.WbAccount, *, visit: bool = False) -> dict | None:
@@ -182,6 +200,8 @@ async def _refresh(acc: models.WbAccount, *, visit: bool = False) -> dict | None
         if visit or seen.get("error"):
             log.info("keeper: визит аккаунта %s: операций баланса %s%s", acc.title, len(ops) if ops is not None else "—",
                      f" — {seen['error']}" if seen.get("error") else "")
+        if visit:  # HTTP-визит упёрся в 498 — браузер выпустил свежую куку: компании одним повтором
+            await _companies(acc.id, acc.title, new, proxy)
         return new
 
 
@@ -429,6 +449,7 @@ async def process_login_request(bot=None) -> bool:
             raise web_session.LoginCancelled()
         if state:
             acc = await save_login(req.user_id, req.phone, req.kind, state, req.proxy_id)
+            await _companies(acc.id, acc.title, state, await proxy_url(req.proxy_id))  # до «done»: сайт сразу спросит, кого добавить
             status, error, acc_id = "done", None, acc.id
         else:
             status, acc_id = "error", None

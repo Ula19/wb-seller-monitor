@@ -665,15 +665,46 @@ def antibot_ua(state: dict) -> str | None:
         return None
 
 
-async def fetch_web(state: dict, proxy: str | None = None) -> tuple[list[dict], dict | None]:
-    """→ (операции баланса, профиль). AntibotExpired (498), Unauthorized, NoBearer, ProxyDown — наверх."""
+COMPANIES_URL = f"{WWW}/webapi/account/b2b/companies_v2"  # компании номера (🏢, проба 27.11: по HTTP, как personalinfo)
+
+
+def parse_companies(d) -> list[dict]:
+    """companies_v2 → [{old_id, uuid, name, full_name, inn, kpp, sign}]; без id — пропускаем."""
+    out = []
+    for c in (d or {}).get("value") or []:
+        if isinstance(c, dict) and isinstance(c.get("id"), int):
+            cut = lambda k, n: (str(c[k])[:n] if c.get(k) not in (None, "") else None)
+            out.append({"old_id": c["id"], "uuid": cut("uuid", 64), "name": cut("name", 256),
+                        "full_name": cut("full_name", 512), "inn": cut("inn", 16), "kpp": cut("kpp", 16),
+                        "sign": cut("sign", 256)})
+    return out
+
+
+def _web_headers(state: dict, auth: dict) -> dict:
+    return {**auth, "Referer": f"{WWW}/lk", "Accept": "*/*", "x-requested-with": "XMLHttpRequest",
+            "Cookie": cookie_header(state), **({"User-Agent": ua} if (ua := antibot_ua(state)) else {})}
+
+
+async def fetch_web(state: dict, proxy: str | None = None) -> tuple[list[dict], dict | None, list[dict] | None]:
+    """→ (операции баланса, профиль, компании | None — их запрос не прошёл: визит от этого не ломается).
+    AntibotExpired (498), Unauthorized, NoBearer, ProxyDown — наверх."""
     async with _client(state, proxy) as (call, auth, _):
-        h = {**auth, "Referer": f"{WWW}/lk", "Accept": "*/*", "x-requested-with": "XMLHttpRequest",
-             "Cookie": cookie_header(state), **({"User-Agent": ua} if (ua := antibot_ua(state)) else {})}
+        h = _web_headers(state, auth)
         wallet = await call("POST", WALLET_URL, data="currency=RUB",
                             headers={**h, "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"})
         profile = await call("POST", PROFILE_URL, headers=h)
-    return parse_balance_history(wallet), parse_profile(profile)
+        try:
+            companies = parse_companies(await call("POST", COMPANIES_URL, headers=h))
+        except Exception as e:
+            log.warning("компании не получены: %s: %s", type(e).__name__, str(e)[:200])
+            companies = None
+    return parse_balance_history(wallet), parse_profile(profile), companies
+
+
+async def fetch_companies(state: dict, proxy: str | None = None) -> list[dict]:
+    """Только компании (после входа и после браузерного визита — кука свежая). Ошибки — наверх."""
+    async with _client(state, proxy) as (call, auth, _):
+        return parse_companies(await call("POST", COMPANIES_URL, headers=_web_headers(state, auth)))
 
 
 if __name__ == "__main__":  # self-check на формах ответов из HAR (суммы в копейках)
@@ -1235,11 +1266,24 @@ if __name__ == "__main__":  # self-check на формах ответов из H
         # 💳 история и профиль: Cookie — все куки www, UA из куки; 498 → AntibotExpired
         hist = {"value": {"balanceHistory": {"groups": [{"items": [{"txId": 7, "moneyIncome": 100, "dt": 1.7e12}]}]}}}
         prof = {"value": {"isAuthenticated": True, "firstName": "Яна", "purchasePercent": 90}}
-        with web(lambda u: R(200, hist if "mywallet" in u else prof)), patch(f"{__name__}.web_proxy", lambda: None):
-            ops, p = await fetch_web(rs)
+        comp = {"resultState": 0, "value": [{"uuid": "3766", "full_name": "ИП Шевченко Дмитрий Юрьевич", "name": "ИП Шевченко Д. Ю.",
+                                             "id": 272487, "sign": "+F4Y=", "inn": "973303293544", "kpp": None},
+                                            {"name": "без id"}]}
+        body = lambda u: hist if "mywallet" in u else prof if "personalinfo" in u else comp
+        with web(lambda u: R(200, body(u))), patch(f"{__name__}.web_proxy", lambda: None):
+            ops, p, cs = await fetch_web(rs)
         assert [o["tx_id"] for o in ops] == ["7"] and p["name"] == "Яна", (ops, p)
-        (u1, k1), (u2, k2) = sent[-2:]
-        assert (u1, u2, k1["data"]) == (WALLET_URL, PROFILE_URL, "currency=RUB")
+        assert cs == [{"old_id": 272487, "uuid": "3766", "name": "ИП Шевченко Д. Ю.", "full_name": "ИП Шевченко Дмитрий Юрьевич",
+                       "inn": "973303293544", "kpp": None, "sign": "+F4Y="}], cs
+        (u1, k1), (u2, k2), (u3, k3) = sent[-3:]
+        assert (u1, u2, u3, k1["data"]) == (WALLET_URL, PROFILE_URL, COMPANIES_URL, "currency=RUB")
+        assert k3["headers"]["x-requested-with"] == "XMLHttpRequest" and k3["headers"]["User-Agent"] == ua
+        # компании упали (498 только у них) — визит цел, компаний нет (None, не «пусто»)
+        with web(lambda u: R(498, None) if "companies" in u else R(200, body(u))), patch(f"{__name__}.web_proxy", lambda: None):
+            ops, p, cs = await fetch_web(rs)
+        assert ops and p and cs is None
+        with web(lambda u: R(200, comp)), patch(f"{__name__}.web_proxy", lambda: None):
+            assert [c["old_id"] for c in await fetch_companies(rs)] == [272487] and sent[-1][0] == COMPANIES_URL
         assert k1["headers"]["User-Agent"] == ua and "x_wbaas_token=" in k1["headers"]["Cookie"] and k2["headers"]["Authorization"]
         with web(lambda u: R(498, None)), patch(f"{__name__}.web_proxy", lambda: None):
             try:

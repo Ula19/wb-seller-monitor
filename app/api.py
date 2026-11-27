@@ -389,10 +389,14 @@ async def delete_target(nm_id: int, u=Depends(user), s=Depends(db)):
 
 # ---------- аккаунты WB ----------
 ACC_FIELDS = ("id", "label", "phone_mask", "name", "phone", "purchase_pct", "kind", "status", "wallet_pct", "limit_left", "monthly_limit", "max_order",
-              "max_rid", "funds", "vb_points", "wallet_blocked", "wallet_arrested", "state_at", "proxy_fails", "proxy_fail_at", "polling", "visit_error")
+              "max_rid", "funds", "vb_points", "wallet_blocked", "wallet_arrested", "state_at", "proxy_fails", "proxy_fail_at", "polling", "visit_error", "retail")
 POLL_FRESH_SEC = 30  # ↻ не чаще: только что обновлённый опрашивать незачем
 ORDER_FIELDS = ("rid", "nm_id", "name", "brand", "color", "price", "dst_office_id", "status_name", "group_id",
                 "status_at", "ordered_at", "expiry_at", "delivery_at", "paid", "office_address", "office_hours", "hidden")
+
+
+COMPANY_VIEW = ("id", "old_id", "name", "full_name", "inn", "kpp")
+COMPANY_FIELDS = (*COMPANY_VIEW, "enabled", "seen_at")
 
 
 async def _my_account(s, u, account_id: int) -> models.WbAccount:
@@ -408,7 +412,11 @@ async def _account_views(s, accs: list[models.WbAccount]) -> list[dict]:
     for o in await repo.account_orders(s, [a.id for a in accs]):
         orders.setdefault(o.account_id, []).append({f: getattr(o, f) for f in ORDER_FIELDS})
     proxies = {p.id: p for p in await s.scalars(select(models.Proxy))}
+    comps: dict[int, list] = {}
+    for c in await repo.companies(s, [a.id for a in accs], enabled_only=True):  # 🏢 включённые — строки в «Аккаунтах»
+        comps.setdefault(c.account_id, []).append({f: getattr(c, f) for f in COMPANY_VIEW})
     return [{**{f: getattr(a, f) for f in ACC_FIELDS}, "title": a.title, "orders": orders.get(a.id, []),
+             "companies": comps.get(a.id, []),
              "proxy_down": a.proxy_fails >= repo.PROXY_ALERT_AFTER,  # порог тот же, что у пуша
              # куки есть, а ЛК WB не пускает: HTTP-опрос жив (не relogin), но бизнес-цены/код — нужен вход
              "site_lost": a.visit_error == VISIT_SESSION,
@@ -432,6 +440,33 @@ async def account(account_id: int, u=Depends(user), s=Depends(db)):
             "counts": {"purchases": await count(models.AccountPurchase, _got(models.AccountPurchase)),
                        "balance": await count(models.AccountBalanceOp),
                        "vb": await count(models.AccountVbOp)}}
+
+
+@app.get("/api/accounts/{account_id:int}/companies")
+async def account_companies(account_id: int, u=Depends(user), s=Depends(db)):
+    """🏢 Компании номера (все, что видели у WB) + показывать ли сам номер розничным покупателем."""
+    acc = await _my_account(s, u, account_id)
+    return {"retail": acc.retail, "browser_sync": acc.browser_sync,
+            "companies": [{f: getattr(c, f) for f in COMPANY_FIELDS} for c in await repo.companies(s, [acc.id])]}
+
+
+class CompaniesIn(BaseModel):
+    retail: bool
+    enabled: list[int] = Field(default_factory=list, max_length=200)  # id наших строк wb_companies
+
+
+@app.put("/api/accounts/{account_id:int}/companies", dependencies=ACCOUNTS)
+async def set_companies(account_id: int, body: CompaniesIn, u=Depends(user), s=Depends(db)):
+    """Кого показывать: номер розницей и выбранные компании. Снять галочку = скрыть (заказы и история остаются)."""
+    acc = await _my_account(s, u, account_id)
+    rows = await repo.companies(s, [acc.id])
+    if set(body.enabled) - {c.id for c in rows}:
+        raise HTTPException(404, "нет такой компании у аккаунта")
+    acc.retail = body.retail
+    for c in rows:
+        c.enabled = c.id in body.enabled
+    await s.commit()
+    return await account_companies(account_id, u, s)
 
 
 PURCHASE_FIELDS = ("rid", "nm_id", "name", "brand", "price", "dt", "office_id", "office_address", "office_hours")
@@ -962,6 +997,7 @@ PREVIEW_TTL = timedelta(minutes=10)  # заказ — только по свеж
 ORDER_QTY_MAX = 100
 AUTOBUY_FIELDS = ("id", "account_id", "nm", "name", "qty", "pvz_id", "pay_now", "price_ok", "total", "final", "status",
                 "error", "rids", "cancel_state", "cancel_error", "cancel_at", "created_at", "done_at")
+NOT_RETAIL = "номер не розничный покупатель — включите «Розницу» во вкладке «Компании»"
 CANCEL_CHECK = timedelta(minutes=20)  # бесплатную WB проводит за ~40–50 с, платную (в пути / в ПВЗ) — дольше 10 мин (24.11)
 
 
@@ -1007,9 +1043,11 @@ def _dupes(lines) -> bool:
 @app.post("/api/order/preview", status_code=201, dependencies=MONEY)
 async def order_preview(body: PreviewIn, u=Depends(user), s=Depends(db)):
     """Цены на ПВЗ, деньги и лимиты аккаунтов — запрос worker'у (одна строка = один заказ: артикул на аккаунт)."""
-    mine = {a.id for a in await repo.user_accounts(s, u.telegram_id)}
+    mine = {a.id: a for a in await repo.user_accounts(s, u.telegram_id)}
     if any(ln.account_id not in mine for ln in body.lines):
         raise HTTPException(404, "нет такого аккаунта")
+    if any(not mine[ln.account_id].retail for ln in body.lines):
+        raise HTTPException(422, NOT_RETAIL)
     if _dupes(body.lines):
         raise HTTPException(422, "товар повторяется у аккаунта — укажите количество в одной строке")
     return await _new_quote(s, u, "preview", {"lines": [ln.model_dump() for ln in body.lines]})
@@ -1089,6 +1127,7 @@ def _place_errors(items, preview: dict, accs: dict, open_pvz: set) -> list[dict]
         acc, pa = accs.get(it.account_id), by_acc.get(it.account_id) or {}
         line = next((ln for ln in pa.get("lines") or [] if (ln["nm"], ln["pvz_id"], ln["qty"]) == (it.nm, it.pvz_id, it.qty)), None)
         err = ("нет такого аккаунта" if acc is None else "аккаунт не активен — нужен вход" if acc.status != "active"
+               else NOT_RETAIL if not acc.retail
                else pa.get("error") or ("заказ отличается от предпросмотра — обновите" if line is None else line.get("error"))
                or ("ПВЗ закрыт — выберите другой" if it.pvz_id not in open_pvz else None)
                or ("только «Оплатить сейчас»: аккаунту доступна лишь предоплата" if not it.pay_now and pa.get("prepaid_only") else None)

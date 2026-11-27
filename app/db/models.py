@@ -200,11 +200,33 @@ class WbAccount(Base):
     # свой выход в WB: вход, рефреш, состояние, personalinfo. Меняется только перелогином
     proxy_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("proxies.id", ondelete="RESTRICT"), nullable=True, index=True)
+    # показывать сам номер розничным покупателем (строка в «Аккаунтах», покупатель в «Заказать товар»); kind — про цены
+    retail: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
 
     @property
     def title(self) -> str:
         """Как называть аккаунт: своё имя с сайта, иначе имя из WB, иначе маска номера."""
         return self.label or self.name or self.phone_mask
+
+
+class WbCompany(Base):
+    """Компания (юрлицо/ИП) на номере WB (www/webapi/account/b2b/companies_v2). Вход у номера один, компания — лишь
+    поля в теле заказа (b2b.sign/id/old_id). enabled — владелец выбрал её покупателем; пропавшие у WB не удаляем."""
+
+    __tablename__ = "wb_companies"
+    __table_args__ = (UniqueConstraint("account_id", "old_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    account_id: Mapped[int] = mapped_column(Integer, ForeignKey("wb_accounts.id", ondelete="CASCADE"), index=True)
+    old_id: Mapped[int] = mapped_column(BigInteger)  # id у WB (legal_old_id в заказах)
+    uuid: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    name: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    full_name: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    inn: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    kpp: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    sign: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)  # последний раз у WB
 
 
 class AccountPurchase(Base):

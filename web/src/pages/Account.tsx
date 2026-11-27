@@ -7,6 +7,7 @@ import { api, ApiError, rub, time, type AccountFull, type BalanceOp, type Order,
 import {
   Blocked, byPvz, CancelState, CertCode, Modal, ddmm, GROUP, Limit, lines, Period, pickupText, points, STATUS, StatusDot, Thumb, Title, useImg,
   usePeriod, visible, when, type Pvz, Held, MaintNote, useHold } from "../accounts";
+import CompaniesPick from "./Companies";
 import LoginModal, { type Relogin } from "./LoginModal";
 import { PvzPay, toPay } from "./PayModal";
 
@@ -344,7 +345,8 @@ function VbTab({ a }: { a: AccountFull }) {
   );
 }
 
-const TABS = [["orders", "Заказы"], ["history", "История заказов"], ["balance", "Баланс"], ["vb", "ВБ-баллы"]] as const;
+const TABS = [["orders", "Заказы"], ["history", "История заказов"], ["balance", "Баланс"], ["vb", "ВБ-баллы"],
+  ["companies", "Компании"]] as const;
 
 export default function Account() {
   const id = Number(useParams().id);
@@ -369,7 +371,8 @@ export default function Account() {
   const back = <Link to="/accounts" className="back">← Все аккаунты</Link>;
   if (q.isError) return <section>{back}<div className="card empty">Аккаунт не найден</div></section>;
   if (!a) return <section>{back}<p className="muted">Загрузка…</p></section>;
-  const counts = { orders: visible(a.orders).length, history: a.counts.purchases, balance: a.counts.balance, vb: a.counts.vb };
+  const counts = { orders: visible(a.orders).length, history: a.counts.purchases, balance: a.counts.balance, vb: a.counts.vb,
+    companies: a.companies?.length ?? 0 };  // 🏢 включённые
   return (
     <section>
       {back}
@@ -419,5 +422,6 @@ export default function Account() {
 function TabBody({ a, tab }: { a: AccountFull; tab: string }) {
   const sync = useSync(a);  // «Обновить» баланса — визит в браузере
   return tab === "history" ? <HistoryTab a={a} /> : tab === "balance" ? <BalanceTab a={a} sync={sync} />
-    : tab === "vb" ? <VbTab a={a} /> : <OrdersTab a={a} />;
+    : tab === "vb" ? <VbTab a={a} /> : tab === "companies" ? <div className="card"><CompaniesPick accountId={a.id} /></div>
+    : <OrdersTab a={a} />;
 }

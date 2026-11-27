@@ -1,7 +1,7 @@
 // Общее для «Аккаунтов» (список) и страницы аккаунта: подписи, лимит, имя, картинки товаров.
 import { useEffect, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, MSK, mskDay, rub, type Account, type CancelOutcome, type Maintenance, type Order } from "./api";
+import { api, MSK, mskDay, rub, type Account, type CancelOutcome, type Company, type Maintenance, type Order } from "./api";
 import { canTopUp, overConfirm } from "./certs";
 
 export const STATUS: Record<string, string> = { active: "активен", relogin: "нужен вход", off: "выключен" };
@@ -24,6 +24,23 @@ export function MaintNote({ group }: { group: string }) {
   const until = useHold(group);
   return until == null ? null : <p className="small up-t">⏸ Сейчас технические работы — бот выполнит это после их окончания{until}</p>;
 }
+/** 🏢 Строка «Аккаунтов»: номер (розница) или его включённая компания. У строки компании нет Кошелька, баллов и лимита,
+ *  заказы — только её; у номера — только розничные. Номер без розницы и без компаний всё равно виден — иначе до него
+ *  не добраться (вкладка «Компании»). */
+export type Row = Account & { key: string; company: Company | null };
+export function accountRows(all: Account[]): Row[] {
+  return all.flatMap((a) => {
+    const companies = a.companies ?? [];
+    const own = { ...a, key: String(a.id), company: null, orders: a.orders.filter((o) => !o.company_id) };
+    return [
+      ...(a.retail !== false || !companies.length ? [own] : []),
+      ...companies.map((c) => ({ ...a, key: `${a.id}-c${c.id}`, company: c, funds: null, vb_points: null, limit_left: null,
+        monthly_limit: null, max_order: null, max_rid: null, wallet_blocked: null, wallet_arrested: null,
+        orders: a.orders.filter((o) => o.company_id === c.id) })),
+    ];
+  });
+}
+
 // «в пути» — всё, что ещё не в ПВЗ: оформлен, сборка, в пути и без группы (статус от WB ещё не пришёл)
 export const transit = (a: Account) => visible(a.orders).filter((o) => o.group_id !== 5).length;
 export const inPvz = (a: Account) => visible(a.orders).filter((o) => o.group_id === 5).length;

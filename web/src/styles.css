@@ -494,3 +494,13 @@ button.tile[aria-expanded="true"] { border-color: var(--accent); }
 .journal { max-height: 55vh; overflow: auto; }
 .journal td { vertical-align: top; }
 @media (max-width: 768px) { .journal-upd { margin-left: 0; } }
+
+/* 🏢 компании номера: галочки (после входа и вкладка «Компании») */
+.companies { display: grid; gap: 8px; }
+.companies .chk { display: flex; gap: 8px; align-items: flex-start; cursor: pointer; }
+.companies .chk input { margin-top: 3px; flex: none; }
+.companies .row-btns { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 4px; }
+.after-login { margin-top: 12px; }
+.acc-name.co { white-space: normal; }  /* название юрлица бывает длинным */
+.after-login h3 { margin: 0 0 8px; }
+
