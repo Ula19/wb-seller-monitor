@@ -514,6 +514,9 @@ class OrderCancel(Base):
     account_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("wb_accounts.id", ondelete="SET NULL"), nullable=True, index=True)
     rids: Mapped[list] = mapped_column(JSONB)
+    # 🏢 отмена счёта компании (offer/cancel целиком, только неоплаченный); null — розничная отмена reject
+    company_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("wb_companies.id", ondelete="SET NULL"), nullable=True)
     items: Mapped[list] = mapped_column(JSONB)  # [{name, n, price, sum}] — снимок для окна, ₽
     status: Mapped[str] = mapped_column(String(16), default="pending", server_default="pending", index=True)
     started: Mapped[list] = mapped_column(JSONB, default=list, server_default="[]")

@@ -9,6 +9,7 @@ import {
   usePeriod, visible, when, type Pvz, Held, MaintNote, useHold } from "../accounts";
 import CompaniesPick from "./Companies";
 import LoginModal, { type Relogin } from "./LoginModal";
+import { runQuote } from "./OrderModal";
 import { PvzPay, toPay } from "./PayModal";
 
 const signed = (n: number | null, unit = " ₽") => (n == null ? "—"
@@ -228,6 +229,48 @@ const invoices = (orders: Order[]): Invoice[] => {
 const until = (iso: string) => new Date(iso).toLocaleString("ru-RU", { timeZone: MSK, day: "2-digit", month: "2-digit",
   hour: "2-digit", minute: "2-digit" });
 
+/** 🏢 «Скачать счёт» (прямая ссылка из заказов; нет её — worker берёт ZIP у WB) и «Отменить счёт» (только неоплаченный,
+ *  весь счёт; итог — счёт пропал из заказов). */
+function InvoiceActions({ a, inv }: { a: AccountFull; inv: Invoice }) {
+  const qc = useQueryClient();
+  const o = inv.first;
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [id, setId] = useState<number | null>(null);
+  const q = useQuery({ queryKey: ["order-cancel", id], enabled: id != null,
+    queryFn: () => api<OrderCancel[]>(`/order-cancels?ids=${id}`).then((x) => x[0]),
+    refetchInterval: (x) => { const c = x.state.data; return c && (c.status === "error" || (c.status === "asked" && !c.cancel?.asked)) ? false : 2000; } });
+  const c = q.data;
+  const hold = useHold("money");
+  useEffect(() => { if (c && c.status !== "pending") qc.invalidateQueries({ queryKey: ["accounts"] }); },
+    [c?.status, c?.cancel?.cancelled]);
+  const fail = (e: unknown) => setErr(e instanceof ApiError || e instanceof Error ? e.message : "ошибка");
+  const download = async () => {
+    setBusy(true); setErr("");
+    try { window.location.assign(`/api/order/invoice/${(await runQuote<unknown>("/order/invoice", { account_id: a.id, rid: o.rid })).id}`); }
+    catch (e) { fail(e); } finally { setBusy(false); }
+  };
+  const cancel = async () => {
+    const sum = inv.orders.reduce((s, x) => s + (x.price ?? 0), 0);
+    if (!confirm(`Отменить весь счёт: ${o.name ?? `арт. ${o.nm_id}`} × ${inv.orders.length} на ${rub(sum)}?\n\nWB отменит заказ целиком.`)) return;
+    setErr("");
+    try { setId((await api<{ id: number }>("/order-cancels", { method: "POST", body: { account_id: a.id, rids: inv.orders.map((x) => x.rid) } })).id); }
+    catch (e) { fail(e); }
+  };
+  return (
+    <div className="small inv-acts">
+      {o.invoice_url ? <a href={o.invoice_url} target="_blank" rel="noreferrer">Скачать счёт</a>
+        : <button className="link" disabled={busy} onClick={download}>{busy ? <><span className="spin" /> Готовлю счёт…</> : "Скачать счёт"}</button>}
+      {o.paid === false && id == null && <> · <button className="link danger" onClick={cancel}>Отменить счёт</button></>}
+      {c?.status === "pending" && hold != null ? <div><Held until={hold} /></div>
+        : c?.status === "pending" || (id != null && !c) ? <div><span className="spin" /> Отменяю счёт…</div>
+        : c?.status === "error" ? <div className="bad-t">❌ {c.error}</div>
+        : c?.status === "asked" && c.cancel && <CancelState c={c.cancel} />}
+      {err && <div className="err">{err}</div>}
+    </div>
+  );
+}
+
 /** 🏢 Заказы компаний номера: по компании, внутри — по счетам. Не оплачен — «ждёт оплаты по счёту до …»;
  *  оплачен — статус доставки (❓ WB для бизнес-rids его пока не проверяли — «—»). */
 function CompanyOrders({ a }: { a: AccountFull }) {
@@ -257,6 +300,7 @@ function CompanyOrders({ a }: { a: AccountFull }) {
             </div>
             <div className="ord-price num">{rub(orders.reduce((s, x) => s + (x.price ?? 0), 0))}
               {orders.length > 1 && <div className="muted small">{rub(o.price)} за шт.</div>}</div>
+            <InvoiceActions a={a} inv={{ uid, orders, first: o }} />
           </div>
         ))}
       </div>

@@ -7,6 +7,7 @@
 с белым списком users на каждом запросе (удалили — доступ закрыт сразу).
 """
 import asyncio
+import base64
 import hashlib
 import hmac
 import json
@@ -31,7 +32,7 @@ from app.db import models, repo
 from app.db.base import Session
 from app.pickup import pickup_items
 from app.wallet import best_offer, offer_text, wallet_price
-from app.wb import account_api, media, pickups
+from app.wb import account_api, checkout, media, pickups
 from app.wb.web_session import VISIT_SESSION
 from app.wb.proxy_check import is_parser_proxy, parse_proxy
 
@@ -1077,6 +1078,33 @@ async def order_quote(quote_id: int, u=Depends(user), s=Depends(db)):
     return {"id": q.id, "kind": q.kind, "status": q.status, "result": q.result, "error": q.error}
 
 
+class InvoiceIn(BaseModel):
+    account_id: int
+    rid: str = Field(min_length=1, max_length=64)
+
+
+@app.post("/api/order/invoice", status_code=201)
+async def order_invoice(body: InvoiceIn, u=Depends(user), s=Depends(db)):
+    """🏢 Счёт заказа компании, когда в заказах нет прямой ссылки: запрос worker'у (ZIP у WB → PDF); итог —
+    GET /api/order/quote/{id}, файл — GET /api/order/invoice/{id}."""
+    acc = await _my_account(s, u, body.account_id)
+    o = await s.get(models.AccountOrder, (acc.id, body.rid))
+    if o is None or o.company_id is None:
+        raise HTTPException(404, "заказ компании не найден — обновите аккаунт")
+    return await _new_quote(s, u, "invoice", {"account_id": acc.id, "uid": checkout.offer_uid(body.rid)})
+
+
+@app.get("/api/order/invoice/{quote_id:int}")
+async def order_invoice_file(quote_id: int, u=Depends(user), s=Depends(db)):
+    q = await s.scalar(select(models.OrderQuote).where(models.OrderQuote.id == quote_id, models.OrderQuote.kind == "invoice",
+                                                       models.OrderQuote.user_id == u.telegram_id))
+    if q is None or q.status != "done":
+        raise HTTPException(404, "счёт не готов")
+    name = re.sub(r"[^\w.\-]", "_", q.result.get("name") or "invoice.pdf")
+    return Response(base64.b64decode(q.result["pdf"]), media_type="application/pdf",
+                    headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
 def _pvz_out(p: models.PickupPoint) -> dict:
     return {"id": p.id, "address": p.address, "hours": pickups.hours(p.week), "lat": p.lat, "lon": p.lon}
 
@@ -1212,14 +1240,14 @@ async def order_place(body: PlaceIn, u=Depends(user), s=Depends(db)):
 def _can_cancel(o: models.AutobuyOrder) -> bool:
     """Заказ мог создаться (ok, unknown, error после status 3/4/7 — у них есть rids), отмену не просили или она не
     прошла (error). asked — повтор бесполезен: WB заявку принял, склад уже собирает.
-    🏢 заказ компании (счёт) — отмена своя (offer/cancel), не reject."""
-    return (bool(o.rids) and o.status in ("ok", "error", "unknown") and o.cancel_state in (None, "error")
-            and o.company_id is None)
+    🏢 заказ компании (счёт) — отменяет worker своим запросом (offer/cancel), не reject."""
+    return bool(o.rids) and o.status in ("ok", "error", "unknown") and o.cancel_state in (None, "error")
 
 
-async def _cancel_outcome(s, account_id: int | None, rids: list[str], at: datetime | None) -> dict:
+async def _cancel_outcome(s, account_id: int | None, rids: list[str], at: datetime | None, company: bool = False) -> dict:
     """Итог запрошенной отмены по факту, без WB (опрос заказов и архива и так идёт): в архиве отменой — cancelled; в
-    архиве иначе (получен) или всё ещё в заказах, перечитанных позже at + CANCEL_CHECK, — failed; иначе — asked."""
+    архиве иначе (получен) или всё ещё в заказах, перечитанных позже at + CANCEL_CHECK, — failed; иначе — asked.
+    🏢 company — счёт компании (offer/cancel): отменён = пропал из заказов, перечитанных после at (WB убирает за ~18 с)."""
     p, o = models.AccountPurchase, models.AccountOrder
     arch = dict((await s.execute(select(p.rid, p.status).where(p.account_id == account_id, p.rid.in_(rids)))).all())
     live = set(await s.scalars(select(o.rid).where(o.account_id == account_id, o.rid.in_(rids))))
@@ -1227,6 +1255,9 @@ async def _cancel_outcome(s, account_id: int | None, rids: list[str], at: dateti
     fresh = bool(seen and at and seen > at + CANCEL_CHECK)
     out = {"cancelled": 0, "failed": 0, "asked": 0}
     for r in rids:
+        if company:
+            out["cancelled" if r not in live and seen and at and seen > at else "failed" if r in live and fresh else "asked"] += 1
+            continue
         out["cancelled" if arch.get(r) in account_api.PURCHASE_CANCELLED else
             "failed" if r in arch or (r in live and fresh) else "asked"] += 1
     return out
@@ -1238,7 +1269,8 @@ async def order_status(ids: list[int] = Query(..., max_length=500), u=Depends(us
     a = models.AutobuyOrder
     rows = await s.scalars(select(a).where(a.id.in_(ids), a.user_id == u.telegram_id).order_by(a.id))
     return [{**{f: getattr(x, f) for f in AUTOBUY_FIELDS}, "can_cancel": _can_cancel(x),
-             "cancel": await _cancel_outcome(s, x.account_id, x.rids, x.cancel_at) if x.cancel_state == "asked" else None}
+             "cancel": await _cancel_outcome(s, x.account_id, x.rids, x.cancel_at, bool(x.company_id))
+             if x.cancel_state == "asked" else None}
             for x in rows]
 
 
@@ -1261,7 +1293,7 @@ async def order_cancel(body: CancelIn, u=Depends(user), s=Depends(db)):
 
 
 # ---------- отмена позиций из группы ПВЗ (в WB ходит worker: order_cancels) ----------
-CANCEL_FIELDS = ("id", "account_id", "rids", "items", "status", "started", "error", "created_at", "done_at")
+CANCEL_FIELDS = ("id", "account_id", "company_id", "rids", "items", "status", "started", "error", "created_at", "done_at")
 
 
 class OrderCancelIn(BaseModel):
@@ -1284,11 +1316,26 @@ async def add_order_cancel(body: OrderCancelIn, u=Depends(user), s=Depends(db)):
         models.AccountOrder.account_id == acc.id, models.AccountOrder.rid.in_(rids)))}
     if len(orders) != len(rids):
         raise HTTPException(409, "товар пропал из заказов — обновите аккаунт")
+    company = {orders[r].company_id for r in rids}
+    if len(company) > 1:
+        raise HTTPException(422, "заказы компании и розницы отменяются отдельно")
+    company = company.pop()
+    if company is not None:  # 🏢 счёт компании: только неоплаченный, целиком (offer/cancel — весь счёт)
+        if any(orders[r].paid is not False for r in rids):
+            raise HTTPException(422, "оплаченный заказ компании отсюда не отменить — отмену оплаченного счёта ещё не проверяли")
+        uids = {checkout.offer_uid(r) for r in rids}
+        rest = await s.scalars(select(models.AccountOrder).where(
+            models.AccountOrder.account_id == acc.id, models.AccountOrder.company_id == company,
+            models.AccountOrder.rid.not_in(rids)))
+        for x in rest:
+            if checkout.offer_uid(x.rid) in uids:
+                rids.append(x.rid); orders[x.rid] = x
     c = models.OrderCancel
     busy = await s.scalars(select(c.rids).where(c.account_id == acc.id, c.status == "pending"))
     if set(rids) & {r for x in busy for r in x}:
         raise HTTPException(409, "отмена уже идёт — дождитесь итога")
-    row = c(user_id=u.telegram_id, account_id=acc.id, rids=rids, items=pickup_items([orders[r] for r in rids]))
+    row = c(user_id=u.telegram_id, account_id=acc.id, company_id=company, rids=rids,
+            items=pickup_items([orders[r] for r in rids]))
     s.add(row)
     await s.commit()
     return {"id": row.id}
@@ -1300,7 +1347,8 @@ async def order_cancels(ids: list[int] = Query(..., max_length=100), u=Depends(u
     c = models.OrderCancel
     rows = await s.scalars(select(c).where(c.id.in_(ids), c.user_id == u.telegram_id).order_by(c.id))
     return [{**{f: getattr(x, f) for f in CANCEL_FIELDS},
-             "cancel": await _cancel_outcome(s, x.account_id, x.started, x.done_at) if x.status == "asked" else None}
+             "cancel": await _cancel_outcome(s, x.account_id, x.started, x.done_at, x.company_id is not None)
+             if x.status == "asked" else None}
             for x in rows]
 
 

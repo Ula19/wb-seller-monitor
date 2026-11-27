@@ -502,6 +502,8 @@ button.tile[aria-expanded="true"] { border-color: var(--accent); }
 .companies .row-btns { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 4px; }
 .after-login { margin-top: 12px; }
 .acc-name.co { white-space: normal; }  /* название юрлица бывает длинным */
-.co-orders .pill { white-space: normal; }  /* «Ждёт оплаты по счёту до …» — длинная, на телефоне переносится */
+.co-orders .pill { white-space: normal; }
+.co-orders .ord { flex-wrap: wrap; }
+.co-orders .inv-acts { flex-basis: 100%; padding-left: 56px; }  /* «Ждёт оплаты по счёту до …» — длинная, на телефоне переносится */
 .after-login h3 { margin: 0 0 8px; }
 

@@ -35,7 +35,7 @@ const isBuyer = (b: Buyer, accountId: number | null, companyId: number | null | 
   b.acc === accountId && (b.company?.id ?? null) === (companyId ?? null);
 
 /** Запрос worker'у: POST → id, опрос, пока не done | error. */
-async function runQuote<T>(path: string, body: unknown): Promise<{ id: number; result: T }> {
+export async function runQuote<T>(path: string, body: unknown): Promise<{ id: number; result: T }> {
   const { id } = await api<{ id: number }>(path, { method: "POST", body });
   for (const t0 = Date.now(); Date.now() - t0 < QUOTE_WAIT_MS;) {
     await new Promise((r) => setTimeout(r, QUOTE_POLL_MS));

@@ -9,6 +9,7 @@ api в WB не ходит, поэтому всё, что требует WB, сч
 Деньги — в копейках.
 """
 import asyncio
+import base64
 import logging
 from collections import Counter
 from datetime import datetime, timedelta, timezone
@@ -250,13 +251,33 @@ async def quote_preview(user_id: int, req: dict) -> dict:
     return {"accounts": list(accounts), "stock_over": over}
 
 
+async def quote_invoice(user_id: int, req: dict) -> dict:
+    """🏢 Счёт заказа компании (запасной путь — в заказах нет link_3_ds): ZIP у WB → PDF в результат (base64)."""
+    async with Session() as s:
+        acc = await s.scalar(select(models.WbAccount).where(models.WbAccount.id == req.get("account_id"),
+                                                            models.WbAccount.user_id == user_id))
+    if acc is None:
+        raise QuoteError("нет такого аккаунта")
+    try:
+        name, pdf = await checkout.fetch_invoice(decrypt_json(acc.state_enc), await keeper.proxy_url(acc.proxy_id), req["uid"])
+    except (Unauthorized, NoBearer):
+        raise QuoteError(LOGIN)
+    except ProxyDown:
+        raise QuoteError(PROXY)
+    except Exception as e:
+        log.warning("autobuy: счёт %s (%s): %s: %s", req.get("uid"), acc.title, type(e).__name__, str(e)[:200])
+        raise QuoteError("WB не отдал счёт — попробуйте ещё раз")
+    return {"name": name, "pdf": base64.b64encode(pdf).decode()}
+
+
 async def _run_quote(qid: int) -> None:
     async with Session() as s:
         q = await s.get(Q, qid)
         kind, req, user_id = q.kind, q.request, q.user_id
     values = {"status": "error"}
     try:
-        result = await (quote_product(req) if kind == "product" else quote_preview(user_id, req))
+        result = await (quote_product(req) if kind == "product" else quote_invoice(user_id, req) if kind == "invoice"
+                        else quote_preview(user_id, req))
         values = {"status": "done", "result": result}
     except QuoteError as e:
         values["error"] = str(e)[:256]
@@ -446,7 +467,7 @@ async def cancel(oid: int) -> None:
         acc = o and o.account_id and await s.get(models.WbAccount, o.account_id)
         if o is None or o.cancel_state != "pending":
             return
-        rids, title = list(o.rids or []), acc and acc.title
+        rids, title, uid, company = list(o.rids or []), acc and acc.title, o.uid, o.company_id
         state, proxy_id = (decrypt_json(acc.state_enc), acc.proxy_id) if acc else (None, None)
     fail = lambda text: _finish(oid, cancel_state="error", cancel_error=text[:256])
     if not acc:
@@ -455,8 +476,12 @@ async def cancel(oid: int) -> None:
         return await fail("нечего отменять — у заказа нет позиций")
     proxy = await keeper.proxy_url(proxy_id)
     try:
-        got, note = await checkout.cancel_order(state, proxy, rids)
-        started = set(got) & set(rids)
+        if company:  # 🏢 счёт компании: offer/cancel по order_uid заказа — весь счёт
+            started = set(rids) if await checkout.cancel_offer(state, proxy, [uid]) else set()
+            note = None if started else "WB не отменил счёт — возможно, он уже оплачен"
+        else:
+            got, note = await checkout.cancel_order(state, proxy, rids)
+            started = set(got) & set(rids)
     except (Unauthorized, NoBearer):
         return await fail(LOGIN)
     except ProxyDown:
@@ -480,7 +505,7 @@ async def cancel_rids(cid: int) -> None:
         acc = c and c.account_id and await s.get(models.WbAccount, c.account_id)
         if c is None or c.status != "pending":
             return
-        rids, title = list(c.rids), acc and acc.title
+        rids, title, company = list(c.rids), acc and acc.title, c.company_id
         state, proxy_id = (decrypt_json(acc.state_enc), acc.proxy_id) if acc else (None, None)
 
     async def done(status: str, error: str | None = None, started: list | None = None) -> None:
@@ -492,8 +517,12 @@ async def cancel_rids(cid: int) -> None:
         return await done("error", "аккаунт удалён")
     proxy = await keeper.proxy_url(proxy_id)
     try:
-        got, note = await checkout.cancel_order(state, proxy, rids)
-        started = [r for r in got if r in rids]
+        if company:  # 🏢 неоплаченный счёт компании — offer/cancel целиком (все rids счёта)
+            uids = await checkout.cancel_offer(state, proxy, [checkout.offer_uid(r) for r in rids])
+            started, note = [r for r in rids if checkout.offer_uid(r) in uids], None
+        else:
+            got, note = await checkout.cancel_order(state, proxy, rids)
+            started = [r for r in got if r in rids]
     except (Unauthorized, NoBearer):
         return await done("error", LOGIN)
     except ProxyDown:

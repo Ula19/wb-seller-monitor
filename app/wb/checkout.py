@@ -9,15 +9,17 @@ stick → POST wbxoofex api/v10/order?sticker= → опрос v3/status. Тол�
 """
 import asyncio
 import base64
+import io
 import json
 import logging
 import re
 import time
+import zipfile
 from datetime import datetime, timedelta, timezone
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from app.wb.account_api import (GRADE_URL, ORDERS_URL, PRE_SEND, STATUSES_URL, WWW, Unauthorized, _client,
+from app.wb.account_api import (GRADE_URL, ORDERS_URL, PRE_SEND, STATUSES_URL, WWW, NoBearer, Unauthorized, _client,
                                 apply_statuses, bearer, parse_grade, www_storage)
 from app.wb.web_session import ProxyDown
 
@@ -48,6 +50,10 @@ B2B_PAY_TYPE = 18
 B2B_FLAGS = 4194339  # у розницы 4268067: в бизнесе нет битов 8192 и 65536
 B2B_GRADE_URL = "https://user-grade.wildberries.ru/api/v1/b2b-suppliers"  # уходит в тело целиком (user_grade_b2b)
 OFFER_URL = "https://legal.wildberries.ru/obshchie-usloviya-realizatsii-tovarov-yuridicheskim-litsam-na-sayte-wildberries/country/ru/lang/ru/"
+B2B_GW = "https://b2b-gateway.wildberries.ru/business-bt/api/v1"  # только Bearer
+OFFER_CANCEL_URL = B2B_GW + "/offer/cancel"  # {"offer_id": order_uid} → 204: отменяет весь неоплаченный счёт
+# счёт архивом (сайт, разведчик 24.11: ответ — сам ZIP «PK…» с offer_<uid>_<номер>_v2.pdf); user_id — WB id из Bearer
+INVOICE_URL = B2B_GW + "/documents/url?id={}&format=archive&user_id={}"
 B2B_ORDERS_URL = (X + "/api/v2/orders?limit=100&exclude_delivery_types=777,778&legal_old_id={}"
                   "&exclude_b2b=false&offset=0")  # заказы компании — отдельным запросом на каждую
 
@@ -321,6 +327,47 @@ async def _confirm(call, auth, uid, sticker, rids, pay_now, sleep, legal_old_id:
     return {"status": "ok", "error": None, "rids": [r.get("uid") for r in wb] or rids}
 
 
+def offer_uid(rid: str) -> str:
+    """🏢 order_uid счёта — средняя часть rid «eAl.<order_uid>.0.0»."""
+    return rid.split(".")[1] if rid.count(".") >= 2 else rid
+
+
+async def cancel_offer(state: dict, proxy: str | None, order_uids: list[str]) -> list[str]:
+    """🏢 Отмена неоплаченных счетов компании: POST offer/cancel на каждый (весь счёт, все rids) → 204.
+    → uid, которые WB принял; итог по факту — заказ пропал из v2/orders компании (через ~18 с)."""
+    done = []
+    async with _client(state, proxy) as (call, auth, _):
+        for uid in dict.fromkeys(order_uids):
+            try:
+                await call("POST", OFFER_CANCEL_URL, headers={**auth, "Content-Type": "application/json"},
+                           json={"offer_id": uid})
+                done.append(uid)
+            except (ProxyDown, Unauthorized):
+                raise
+            except Exception as e:
+                log.warning("отмена счёта %s: %s: %s", uid, type(e).__name__, str(e)[:200])
+    return done
+
+
+def invoice_pdf(zip_bytes: bytes) -> tuple[str, bytes]:
+    """ZIP счёта → (имя, PDF). ValueError — внутри нет PDF."""
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as z:
+        name = next((n for n in z.namelist() if n.lower().endswith(".pdf")), None)
+        if not name:
+            raise ValueError("в архиве WB нет PDF")
+        return name.rsplit("/", 1)[-1], z.read(name)
+
+
+async def fetch_invoice(state: dict, proxy: str | None, order_uid: str) -> tuple[str, bytes]:
+    """🏢 Счёт заказа компании (запасной путь, когда в заказах нет link_3_ds): documents/url → ZIP → PDF."""
+    token = bearer(state)
+    if not token:
+        raise NoBearer()
+    async with _client(state, proxy) as (call, auth, _):
+        r = await call("GET", INVOICE_URL.format(order_uid, _jwt(token)["user"]), headers=auth, raw=True)
+    return invoice_pdf(r.content)
+
+
 async def _reasons(call, auth, rids: list[str]) -> dict[str, int]:
     """Причина отмены каждого rid, как у сайта: свежие v2/orders + status-tracker. «Оформлен» (group 1, записи
     статуса ещё нет) — 12/11; со сроком хранения (в ПВЗ) или дальше «оформлен» — 13. Нет в заказах — только что
@@ -542,13 +589,19 @@ if __name__ == "__main__":  # self-check: тело как у сайта (HAR Я�
                 key = next(k for k, u in (("stick", STICK_URL), ("order", X + "/api/v10/order"),
                                           ("status", X + "/api/v3/status"), ("orders", ORDERS_URL), ("reject", REJECT_URL),
                                           ("statuses", STATUSES_URL), ("paid", PAID_URL),
-                                          ("b2borders", B2B_ORDERS_URL.split("{")[0]))
+                                          ("b2borders", B2B_ORDERS_URL.split("{")[0]), ("offer", OFFER_CANCEL_URL),
+                                          ("invoice", B2B_GW + "/documents/url"))
                            if url.startswith(u))
                 sent.append((key, url, kw))
                 q = script.get(key) or []
                 x = q.pop(0) if len(q) > 1 else (q[0] if q else {})  # последний ответ повторяется
                 if isinstance(x, BaseException):
                     raise x
+                if isinstance(x, bytes):  # сырой ответ (ZIP счёта)
+                    r = R(200, None); r.content = x
+                    return r
+                if x == 204:
+                    return R(204, None)
                 return R(x, {"error": "bad"}) if isinstance(x, int) else R(200, x)
         return S, sent
 
@@ -579,8 +632,32 @@ if __name__ == "__main__":  # self-check: тело как у сайта (HAR Я�
                                     company=CO, b2b_grade=BG, sign=payment_signer(st))[0], sleep=nap, legal_old_id=CO["old_id"])
         return res, [k for k, *_ in sent], sent
 
+    async def b2b_calls(fn, **script):
+        S, sent = session(**script)
+        with patch.object(account_api, "AsyncSession", S), patch.object(account_api, "web_proxy", lambda: None), \
+                patch.object(account_api, "RETRY_SEC", (0, 0)):
+            return await fn(), sent
+
     async def main():
         rids = [f"ebA.{UID}.0.0", f"ebA.{UID}.0.1"]
+        # 🏢 отмена счёта: offer/cancel на каждый uid (без дублей), 204 — принят; отказ — не принят, остальные идут
+        assert offer_uid("eAl.d9e7fc2e.0.0") == "d9e7fc2e" and offer_uid("bad") == "bad"
+        got, sent = await b2b_calls(lambda: cancel_offer(st, None, ["u1", "u1", "u2"]), offer=[204, 400])
+        assert got == ["u1"] and [json.loads(json.dumps(k["json"])) for _, _, k in sent] == [{"offer_id": "u1"}, {"offer_id": "u2"}]
+        # счёт архивом: user_id — из Bearer, PDF — из ZIP
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr("offer_d9e7_1239751_v2.pdf", b"%PDF-1.4 test")
+        (name, pdf), sent = await b2b_calls(lambda: fetch_invoice(st, None, "d9e7"), invoice=[buf.getvalue()])
+        assert (name, pdf) == ("offer_d9e7_1239751_v2.pdf", b"%PDF-1.4 test") and sent[0][1] == INVOICE_URL.format("d9e7", 4755886), sent
+        buf2 = io.BytesIO()
+        with zipfile.ZipFile(buf2, "w") as z:
+            z.writestr("readme.txt", b"x")
+        try:
+            invoice_pdf(buf2.getvalue())
+            raise AssertionError("ZIP без PDF прошёл")
+        except ValueError:
+            pass
         res, keys, sent = await b2b_order(stick=[{"sticker": "eAl"}], order=[{"result": 0, "sticker": "eAl", "pricing_mismatch": False}],
                                           status=[{"result": 1}])
         assert res["status"] == "ok" and keys == ["stick", "order", "status"], (res, keys)
