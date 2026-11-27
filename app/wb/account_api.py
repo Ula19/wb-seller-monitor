@@ -12,7 +12,7 @@ import json
 import logging
 import re
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from http.cookies import SimpleCookie
 from urllib.parse import urlparse
@@ -196,6 +196,10 @@ def parse_vb_history(d) -> list[dict]:
     return out
 
 
+# mywallet отдаёт dt московским временем, записанным как epoch (автозаказ 11: лог 19:06:48 UTC, у WB 22:06:48) → −3 ч
+WB_MSK_SHIFT = timedelta(hours=3)
+
+
 def parse_balance_history(d) -> list[dict]:
     """mywallet/purchases/data → операции баланса. Сумма = moneyIncome + bonusIncome: у «Оплата»/«Сертификат» деньги
     приходят в bonusIncome (тоже рубли — та же часть, что bonus_balance в «Кошельке WB»). dt — мс."""
@@ -208,7 +212,7 @@ def parse_balance_history(d) -> list[dict]:
         out.append({"tx_id": str(it["txId"])[:128], "name": it.get("operationName"), "op_type": it.get("operationType"),
                     "source_type": str(it["sourceType"])[:32] if it.get("sourceType") else None,  # giftcards — сертификат
                     "amount": num("moneyIncome") + num("bonusIncome"), "balance": it.get("currentBalance"),
-                    "dt": _ts(it["dt"] / 1000) if isinstance(it.get("dt"), (int, float)) else None})
+                    "dt": _ts(it["dt"] / 1000) - WB_MSK_SHIFT if isinstance(it.get("dt"), (int, float)) else None})
     return out
 
 
@@ -863,7 +867,8 @@ if __name__ == "__main__":  # self-check на формах ответов из H
     assert (gift[0]["source_type"], gift[0]["amount"]) == ("giftcards", 500), gift
     assert [(x["tx_id"], x["amount"], x["op_type"]) for x in bal] == [
         ("ub_dd_47345296_15_1_-1_t_balance", 99, 0), ("01a1bfe0", -52065, 1)], bal
-    assert bal[0]["dt"] == datetime(2026, 11, 9, 13, 42, 14, 716000, tzinfo=timezone.utc) and bal[0]["balance"] == 2390
+    # 1794231734716 = «13:42 UTC», на деле 13:42 МСК (WB пишет МСК как epoch) = 10:42 UTC
+    assert bal[0]["dt"] == datetime(2026, 11, 9, 10, 42, 14, 716000, tzinfo=timezone.utc) and bal[0]["balance"] == 2390
     assert parse_balance_history(None) == []
     # код получения: строго 6 цифр, неразрывный пробел, без числа со следующей строки
     # код получения: otp/get — коды на 7 дней, «сегодня» по UTC (02:00 МСК 26.11 = 23:00 UTC 25.11 → ещё код 25-го)
