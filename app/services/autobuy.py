@@ -20,7 +20,7 @@ from app.crypto import decrypt_json
 from app.db import models
 from app.db.base import Session
 from app.services import keeper
-from app.wb import account_api, checkout
+from app.wb import account_api, checkout, web_session
 from app.wb.account_api import NoBearer, Unauthorized
 from app.wb.web_client import CATALOG_PARAMS, DETAIL_URL, web_client
 from app.wb.web_session import ProxyDown
@@ -62,6 +62,15 @@ async def fetch_product(nm: int, dest: int) -> dict | None:
     return next((x for x in items if x.get("id") == nm and x.get("sizes")), None)
 
 
+async def fetch_b2b_product(nm: int, dest: int, state: dict) -> dict | None:
+    """🏢 Бизнес-detail товара (b2b=true) под куками номера с dest ПВЗ — цена компании. None — товара нет; NoCard — WB не
+    ответил (или у номера нет кук сайта)."""
+    items = await web_client.fetch_b2b_items([nm], web_session.account_cookies(state), dest)
+    if items is None:
+        raise NoCard(nm)
+    return next((x for x in items if x.get("id") == nm and x.get("sizes")), None)
+
+
 def stock(p: dict) -> int:
     """Сколько можно заказать: остатки первого размера (его и заказываем — у техники размеров нет)."""
     return sum(s.get("qty") or 0 for s in p["sizes"][0].get("stocks") or [])
@@ -88,19 +97,20 @@ async def quote_product(req: dict) -> dict:
     return card(p)
 
 
-def _line(ln: dict, pvzs: dict, got: dict, wallet_pct: int) -> dict:
-    """Строка предпросмотра: цена за штуку на ЭТОТ ПВЗ (total и со скидкой Кошелька) или ошибка."""
+def _line(ln: dict, pvzs: dict, got: dict, wallet_pct: int, b2b: bool = False) -> dict:
+    """Строка предпросмотра: цена за штуку на ЭТОТ ПВЗ (total и со скидкой Кошелька) или ошибка.
+    🏢 b2b — строка компании: got по (номер, nm, dest), цена — бизнес (total = final, скидки Кошелька нет)."""
     out = {"nm": ln["nm"], "qty": ln["qty"], "pvz_id": ln["pvz_id"]}
     pvz = pvzs.get(ln["pvz_id"])
     if not pvz:
         return {**out, "error": "ПВЗ закрыт или не найден"}
-    p = got.get((ln["nm"], pvz.dest))
+    p = got.get((ln["account_id"], ln["nm"], pvz.dest) if b2b else (ln["nm"], pvz.dest))
     if isinstance(p, BaseException):
         return {**out, "error": NO_CARD}
     if not p:
         return {**out, "error": "товар не найден"}
     try:
-        total, final = checkout.prices(p, wallet_pct)
+        total, final = (checkout.b2b_price(p),) * 2 if b2b else checkout.prices(p, wallet_pct)
     except ValueError:
         return {**out, "name": p.get("name"), "error": "нет в наличии"}
     return {**out, "name": p.get("name"), "total": total, "final": final, "stock": stock(p),
@@ -184,34 +194,58 @@ async def _preview_account(aid: int, acc, lines: list, pvzs: dict, got: dict, re
 
 
 async def _recent_postpaid(s, account_ids) -> dict[int, int]:
-    """Σ total × qty наших заказов «при получении» за POSTPAID_WINDOW (grade их ещё не вычел)."""
+    """Σ total × qty наших заказов «при получении» за POSTPAID_WINDOW (grade их ещё не вычел). Заказы компаний — по
+    счёту, в постоплату номера не идут."""
     rows = await s.execute(select(A.account_id, func.sum(func.coalesce(A.total, A.price_ok) * A.qty)).where(
-        A.account_id.in_(account_ids), A.pay_now.is_(False), A.status.in_(("sending", "ok", "unknown")),
+        A.account_id.in_(account_ids), A.pay_now.is_(False), A.company_id.is_(None), A.status.in_(("sending", "ok", "unknown")),
         A.created_at >= datetime.now(timezone.utc) - POSTPAID_WINDOW).group_by(A.account_id))
     return {a: int(v) for a, v in rows.all()}
 
 
+def _preview_company(aid: int, comp, acc, lines: list, pvzs: dict, got: dict) -> dict:
+    """🏢 Покупатель-компания: только цены (бизнес) — Кошелька, лимитов и постоплаты у заказа «по счёту» нет."""
+    out = {"account_id": aid, "company_id": comp.id if comp else None, "company": True}
+    if acc is None or comp is None or not comp.enabled:
+        return {**out, "error": "компания скрыта или не найдена — проверьте вкладку «Компании»"}
+    rows = [_line(ln, pvzs, got, 0, b2b=True) for ln in lines]
+    return {**out, "title": comp.name or acc.title, "lines": rows,
+            "total": sum(r["total"] * r["qty"] for r in rows if "total" in r)}
+
+
 async def quote_preview(user_id: int, req: dict) -> dict:
-    """lines: [{account_id, nm, qty, pvz_id}] → по аккаунтам + где товара на складах меньше, чем Σ qty по всем."""
+    """lines: [{account_id, company_id?, nm, qty, pvz_id}] → по покупателям (номер или его компания) + где товара на
+    складах меньше, чем Σ qty по всем."""
     lines = req.get("lines") or []
-    aids = list(dict.fromkeys(ln["account_id"] for ln in lines))
+    buyers = list(dict.fromkeys((ln["account_id"], ln.get("company_id")) for ln in lines))
+    aids = list(dict.fromkeys(a for a, _ in buyers))
     async with Session() as s:
         accs = {a.id: a for a in await s.scalars(select(models.WbAccount).where(
             models.WbAccount.id.in_(aids), models.WbAccount.user_id == user_id))}
+        comps = {c.id: c for c in await s.scalars(select(models.WbCompany).where(
+            models.WbCompany.id.in_({c for _, c in buyers if c}), models.WbCompany.account_id.in_(list(accs))))}
         pvzs = {p.id: p for p in await s.scalars(select(PP).where(
             PP.id.in_({ln["pvz_id"] for ln in lines}), PP.closed_at.is_(None)))}
         recent = await _recent_postpaid(s, list(accs))
-    keys = list({(ln["nm"], pvzs[ln["pvz_id"]].dest) for ln in lines if ln["pvz_id"] in pvzs})
+    keys = list({(ln["nm"], pvzs[ln["pvz_id"]].dest) for ln in lines if ln["pvz_id"] in pvzs and not ln.get("company_id")})
     got = dict(zip(keys, await asyncio.gather(*(fetch_product(nm, dest) for nm, dest in keys), return_exceptions=True)))
-    accounts = await asyncio.gather(*(
-        _preview_account(aid, accs.get(aid), [ln for ln in lines if ln["account_id"] == aid], pvzs, got, recent.get(aid, 0))
-        for aid in aids))
+    # 🏢 бизнес-цена — под куками каждого номера, у которого заказывают компании
+    bkeys = list({(ln["account_id"], ln["nm"], pvzs[ln["pvz_id"]].dest) for ln in lines
+                  if ln["pvz_id"] in pvzs and ln.get("company_id") and ln["account_id"] in accs})
+    got.update(zip(bkeys, await asyncio.gather(*(fetch_b2b_product(nm, dest, decrypt_json(accs[aid].state_enc))
+                                                 for aid, nm, dest in bkeys), return_exceptions=True)))
+    mine = lambda aid, cid: [ln for ln in lines if (ln["account_id"], ln.get("company_id")) == (aid, cid)]
+
+    async def one(aid, cid):
+        if cid:
+            return _preview_company(aid, comps.get(cid), accs.get(aid), mine(aid, cid), pvzs, got)
+        return await _preview_account(aid, accs.get(aid), mine(aid, cid), pvzs, got, recent.get(aid, 0))
+    accounts = await asyncio.gather(*(one(aid, cid) for aid, cid in buyers))
     need, have = Counter(), {}
     for ln in lines:
         need[ln["nm"]] += ln["qty"]
-    for (nm, _), p in got.items():
+    for k, p in got.items():  # остаток у продавца один — берём любой ответ detail
         if isinstance(p, dict):
-            have[nm] = stock(p)
+            have[k[-2]] = stock(p)
     over = [{"nm": nm, "need": n, "stock": have[nm]} for nm, n in need.items() if nm in have and n > have[nm]]
     return {"accounts": list(accounts), "stock_over": over}
 
@@ -299,9 +333,26 @@ def precheck(o, p: dict | None, grade: dict, bal: dict | None) -> tuple[str | No
     return None, total, final
 
 
-async def _fresh(o, pvz, state: dict, proxy: str | None):
-    """Свежие detail (dest ПВЗ), grade и (Кошельком сразу) баланс. → (p, grade, bal) или текст ошибки."""
+def precheck_b2b(o, p: dict | None) -> tuple[str | None, int | None]:
+    """🏢 Компания: только товар и цена (бизнес) — денег и лимитов у заказа «по счёту» нет. → (причина | None, total)."""
+    if not p:
+        return "товар не найден" + NOT_SENT, None
     try:
+        total = checkout.b2b_price(p)
+    except ValueError:
+        return "нет в наличии" + NOT_SENT, None
+    if total > o.price_ok:
+        return f"цена выросла: было {rub(o.price_ok)}, стало {rub(total)}", total
+    return None, total
+
+
+async def _fresh(o, pvz, state: dict, proxy: str | None):
+    """Свежие detail (dest ПВЗ), grade и (Кошельком сразу) баланс. → (p, grade, bal) или текст ошибки.
+    🏢 компания: бизнес-detail под куками номера, вместо баланса — свежий b2b-suppliers (в тело целиком)."""
+    try:
+        if o.company_id:
+            p = await fetch_b2b_product(o.nm, pvz.dest, state)
+            return p, await checkout.fetch_grade(state, proxy), await checkout.fetch_b2b_grade(state, proxy)
         p = await fetch_product(o.nm, pvz.dest)
         grade = await checkout.fetch_grade(state, proxy)
         bal = await account_api.fetch_balance(state, proxy) if o.pay_now else None
@@ -317,15 +368,19 @@ async def _fresh(o, pvz, state: dict, proxy: str | None):
         return "WB не ответил при проверке цены" + NOT_SENT
 
 
-async def _send(o, p: dict, grade: dict, pvz, acc_snap: dict, state: dict, proxy: str | None) -> dict:
+async def _send(o, p: dict, grade: dict, pvz, acc_snap: dict, state: dict, proxy: str | None,
+                company: dict | None = None, b2b_grade: dict | None = None) -> dict:
     sign = checkout.payment_signer(state)
     point = {"id": pvz.id, "address": pvz.address, "dest": pvz.dest, "lat": pvz.lat, "lon": pvz.lon,
              "type_point": pvz.type_point, "sign": pvz.sign, "sign_v2": pvz.sign_v2}
 
     def make(sticker):
         return checkout.build_order(product=p, grade=grade, pvz=point, phone=acc_snap["phone"], name=acc_snap["name"],
-                                    qty=o.qty, pay_now=o.pay_now, uid=o.uid, sticker=sticker, sign=sign)[0]
+                                    qty=o.qty, pay_now=o.pay_now, uid=o.uid, sticker=sticker, sign=sign,
+                                    company=company, b2b_grade=b2b_grade)[0]
     try:
+        if company:  # 🏢 по счёту: успех — «счёт выставлен», искать — заказами компании
+            return await checkout.place_order(state, proxy, o.uid, make, legal_old_id=company["old_id"])
         return await checkout.place_order(state, proxy, o.uid, make)
     except (Unauthorized, NoBearer):
         return {"status": "error", "error": LOGIN, "rids": []}
@@ -350,23 +405,34 @@ async def place(oid: int) -> None:
         pvz = await s.get(PP, o.pvz_id)
         snap = {"phone": acc.phone, "name": acc.name, "title": acc.title, "id": acc.id}
         state, proxy_id = decrypt_json(acc.state_enc), acc.proxy_id
+        comp = o.company_id and await s.get(models.WbCompany, o.company_id)
+        company = comp and comp.account_id == acc.id and comp.enabled and {
+            "sign": comp.sign, "uuid": comp.uuid, "old_id": comp.old_id, "name": comp.name}
     done = lambda status, error, **kw: _finish(oid, status=status, error=error and error[:512],
                                                done_at=datetime.now(timezone.utc), **kw)
+    if o.company_id and not company:
+        return await done("error", "компания скрыта или удалена" + NOT_SENT)
     if not pvz or pvz.closed_at:
         return await done("error", "ПВЗ закрыт — выберите другой" + NOT_SENT)
     proxy = await keeper.proxy_url(proxy_id)
     fresh = await _fresh(o, pvz, state, proxy)
     if isinstance(fresh, str):
         return await done("error", fresh)
-    p, grade, bal = fresh
-    why, total, final = precheck(o, p, grade, bal)
+    p, grade, extra = fresh
+    if company:  # 🏢 extra — b2b-suppliers
+        why, total = precheck_b2b(o, p)
+        final = total
+    else:
+        why, total, final = precheck(o, p, grade, extra)
     if why:
         return await done("error", why, total=total, final=final)
     await _finish(oid, status="sending", total=total, final=final)
-    res = await _send(o, p, grade, pvz, snap, state, proxy)
+    res = await _send(o, p, grade, pvz, snap, state, proxy, company or None, extra if company else None)
     await done(res["status"], res["error"], rids=res["rids"])
-    log.info("autobuy: заказ %s (%s, nm %s × %d, %s, %s за шт): %s %s", oid, snap["title"], o.nm, o.qty,
-             "Кошельком сразу" if o.pay_now else "при получении", rub(total), res["status"], res["error"] or "")
+    log.info("autobuy: заказ %s (%s, nm %s × %d, %s, %s за шт): %s %s", oid,
+             f"{company['name']} · {snap['title']}" if company else snap["title"], o.nm, o.qty,
+             "по счёту" if company else "Кошельком сразу" if o.pay_now else "при получении", rub(total),
+             res["status"], res["error"] or "")
     if res["status"] != "error" or res["rids"]:
         await _refresh_account(snap["id"], state, proxy, snap["title"])
 

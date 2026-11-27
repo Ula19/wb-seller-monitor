@@ -141,12 +141,12 @@ export type PickupPoint = { id: number; address: string | null; hours: string | 
   accounts?: number[] };
 export type PreviewLine = { nm: number; qty: number; pvz_id: number; name?: string | null; total?: number; final?: number;
   now?: number; stock?: number; no_discount?: string | null; error?: string };
-export type PreviewAccount = { account_id: number; title?: string; error?: string; wallet_pct?: number; funds?: number | null;
+export type PreviewAccount = { account_id: number; company_id?: number | null; company?: boolean; title?: string; error?: string; wallet_pct?: number; funds?: number | null;
   limit_left?: number | null; wallet_blocked?: boolean | null; postpaid_limit?: number | null; postpaid_left?: number;
   prepaid_only?: boolean; lines?: PreviewLine[]; note?: string | null };
 export type Preview = { accounts: PreviewAccount[]; stock_over: { nm: number; need: number; stock: number }[] };
 export type BuyOrder = {
-  id: number; account_id: number | null; nm: number; name: string | null; qty: number; pvz_id: number; pay_now: boolean;
+  id: number; account_id: number | null; company_id?: number | null; nm: number; name: string | null; qty: number; pvz_id: number; pay_now: boolean;
   price_ok: number; total: number | null; final: number | null; error: string | null; rids: string[];
   status: "pending" | "sending" | "ok" | "error" | "unknown" | "cancelled";
   cancel_state: "pending" | "asked" | "error" | null; cancel_error: string | null; cancel_at: string | null;

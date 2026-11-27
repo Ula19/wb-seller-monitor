@@ -4,9 +4,9 @@
 // строки, цены берёт сервер из предпросмотра; перед отправкой worker сверит цену и деньги ещё раз.
 import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, ApiError, rubk, type Account, type BuyOrder, type PickupPoint, type Preview, type PreviewAccount,
+import { api, ApiError, rubk, type Account, type BuyOrder, type Company, type PickupPoint, type Preview, type PreviewAccount,
   type PreviewLine, type ProductCard, type Quote } from "../api";
-import { CancelState, Held, MaintNote, Modal, useHold } from "../accounts";
+import { accountRows, CancelState, Held, MaintNote, Modal, useHold } from "../accounts";
 import { StepAccounts } from "./CertModal";
 import { CertAdd } from "./PayModal";
 
@@ -22,7 +22,17 @@ const key = (acc: number, nm: number) => `${acc}:${nm}`;
 const pvzLabel = (p: PickupPoint) => [p.id, p.address, p.hours].filter(Boolean).join(" · ");
 const merge = (a: PickupPoint[], b: PickupPoint[]) => [...a, ...b.filter((p) => !a.some((x) => x.id === p.id))];
 
-type Qty = Record<number, Record<number, number>>;  // nm → аккаунт → шт.
+type Qty = Record<number, Record<number, number>>;  // nm → покупатель → шт.
+/** 🏢 Покупатель: номер (розница) или его компания («по счёту»). id — ключ мастера (у компании −id компании, чтобы не
+ *  совпасть с номером), acc — настоящий аккаунт, company — компания или null. */
+type Buyer = Account & { acc: number; company: Company | null };
+export function buyersOf(all: Account[]): Buyer[] {
+  return accountRows(all).filter((r) => r.company || r.retail !== false)  // номер без розницы — только компаниями
+    .map((r) => ({ ...r, id: r.company ? -r.company.id : r.id, acc: r.id,
+      title: r.company ? `${r.company.name ?? r.company.full_name ?? "компания"} · ${r.title}` : r.title }));
+}
+const isBuyer = (b: Buyer, accountId: number | null, companyId: number | null | undefined) =>
+  b.acc === accountId && (b.company?.id ?? null) === (companyId ?? null);
 
 /** Запрос worker'у: POST → id, опрос, пока не done | error. */
 async function runQuote<T>(path: string, body: unknown): Promise<{ id: number; result: T }> {
@@ -168,14 +178,15 @@ function PvzSearch({ opts, onAdd }: { opts: PickupPoint[]; onAdd: (p: PickupPoin
 }
 
 function StepPickups({ all, accs, prods, qty, opts, setOpts, pvzOf, setPvzOf }: {
-  all: Account[]; accs: Account[]; prods: ProductCard[]; qty: Qty; opts: PickupPoint[];
+  all: Buyer[]; accs: Buyer[]; prods: ProductCard[]; qty: Qty; opts: PickupPoint[];
   setOpts: (f: (o: PickupPoint[]) => PickupPoint[]) => void; pvzOf: Record<number, number>; setPvzOf: (p: Record<number, number>) => void;
 }) {
-  const own = useQuery({ queryKey: ["order-pickups", accs.map((a) => a.id).join()],
-    queryFn: () => api<PickupPoint[]>(`/order/pickups?${accs.map((a) => `accounts=${a.id}`).join("&")}`) });
+  const real = [...new Set(accs.map((a) => a.acc))];  // ПВЗ из заказов — по номерам
+  const own = useQuery({ queryKey: ["order-pickups", real.join()],
+    queryFn: () => api<PickupPoint[]>(`/order/pickups?${real.map((id) => `accounts=${id}`).join("&")}`) });
   useEffect(() => { if (own.data) setOpts((o) => merge(own.data, o)); }, [own.data]);
-  const option = (p: PickupPoint, a?: Account) => (
-    <option key={p.id} value={p.id}>{pvzLabel(p)}{a && p.accounts?.includes(a.id) ? " · здесь заказы аккаунта" : ""}</option>);
+  const option = (p: PickupPoint, a?: Buyer) => (
+    <option key={p.id} value={p.id}>{pvzLabel(p)}{a && p.accounts?.includes(a.acc) ? " · здесь заказы аккаунта" : ""}</option>);
   return (
     <>
       <p className="muted">Выберите пункт выдачи для каждого аккаунта: можно один для всех или разные. Нет нужного в списке —
@@ -211,22 +222,29 @@ function StepPickups({ all, accs, prods, qty, opts, setOpts, pvzOf, setPvzOf }: 
 
 // ---------- шаг 4: оплата ----------
 type Row = { ln: PreviewLine; payNow: boolean; why: string | null };
-type AccPlan = { a: Account; pa: PreviewAccount; rows: Row[]; lack: boolean };
+type AccPlan = { a: Buyer; pa: PreviewAccount; rows: Row[]; lack: boolean };
 
-type Req = { account_id: number; nm: number; qty: number; pvz_id: number };
+type Req = { bid: number; account_id: number; company_id?: number; nm: number; qty: number; pvz_id: number };
 
 /** Что готово к заказу и почему нет. Строки — из запроса (у аккаунта с ошибкой worker строк не присылает, а в «N из M»
  *  они нужны). Деньги и лимит постоплаты — на весь аккаунт: не хватает — не готовы все его строки этого способа оплаты
  *  (сервер и worker проверят так же). */
-function plan(accs: Account[], reqs: Req[], prev: Preview, pay: Record<string, boolean>, server: Record<string, string>,
+function plan(accs: Buyer[], reqs: Req[], prev: Preview, pay: Record<string, boolean>, server: Record<string, string>,
   names: Record<number, string | null>): AccPlan[] {
   return accs.map((a) => {
-    const pa = prev.accounts.find((x) => x.account_id === a.id) ?? { account_id: a.id, error: "нет в предпросмотре — обновите" };
+    const pa = prev.accounts.find((x) => isBuyer(a, x.account_id, x.company_id))
+      ?? { account_id: a.acc, error: "нет в предпросмотре — обновите" };
     const over = (nm: number) => prev.stock_over.find((x) => x.nm === nm);
-    const mine = reqs.filter((q) => q.account_id === a.id).map((q): PreviewLine => {
+    const mine = reqs.filter((q) => q.bid === a.id).map((q): PreviewLine => {
       const pl = pa.lines?.find((x) => x.nm === q.nm);
-      return { ...q, ...pl, name: pl?.name ?? names[q.nm] };  // пустое название из detail не затирает карточку
+      return { nm: q.nm, qty: q.qty, pvz_id: q.pvz_id, ...pl, name: pl?.name ?? names[q.nm] };  // пустое название из detail не затирает карточку
     });
+    if (a.company) return { a, pa, lack: false, rows: mine.map((ln) => {  // 🏢 «по счёту»: ни Кошелька, ни постоплаты
+      const o = over(ln.nm);
+      const why = pa.error ?? ln.error ?? (ln.total == null ? "нет цены — обновите" : null)
+        ?? (o ? `товара не хватает: на все аккаунты нужно ${o.need}, есть ${o.stock}` : null) ?? server[key(a.id, ln.nm)] ?? null;
+      return { ln, payNow: false, why };
+    }) };
     let rows: Row[] = mine.map((ln) => {
       const payNow = pay[key(a.id, ln.nm)] ?? !!pa.prepaid_only;
       const o = over(ln.nm);
@@ -249,6 +267,13 @@ function plan(accs: Account[], reqs: Req[], prev: Preview, pay: Record<string, b
 function BuyLine({ r, pa, setPay }: { r: Row; pa: PreviewAccount; setPay: (now: boolean) => void }) {
   const { ln, payNow, why } = r;
   const full = (ln.total ?? 0) * ln.qty;
+  if (pa.company) return (  // 🏢 счёт на оплату: компания платит с р/с по реквизитам
+    <div className={`buy-line${why ? " off" : ""}`}>
+      <span className="buy-name">{ln.name ?? `Товар ${ln.nm}`} <span className="muted">{pcs(ln.qty)}</span></span>
+      {ln.total != null && <span className="buy-price"><b>{rubk(full)}</b> <span className="muted">· по счёту, {rubk(ln.total)} за шт.</span></span>}
+      <div className={`small buy-why ${why ? "muted" : "ok-t"}`}>{why ? `${why} · не заказываем` : "Готово к заказу · WB выставит счёт"}</div>
+    </div>
+  );
   return (
     <div className={`buy-line${why ? " off" : ""}`}>
       <span className="buy-name">{ln.name ?? `Товар ${ln.nm}`} <span className="muted">{pcs(ln.qty)}</span></span>
@@ -270,6 +295,18 @@ function BuyAccount({ p, no, pvz, setPay, refresh }: {
   p: AccPlan; no: number; pvz?: PickupPoint; setPay: (k: string, v: boolean) => void; refresh: () => void;
 }) {
   const { a, pa, rows, lack } = p;
+  if (a.company) return (  // 🏢 компания: только счёт, без Кошелька и лимитов
+    <div className="buy-acc">
+      <div className="buy-head">
+        <div><span className="muted">{no}</span> <b>{a.title}</b>
+          <div className="small muted">ПВЗ: {pvz ? [pvz.id, pvz.address].join(" · ") : "—"}</div></div>
+        <div className="buy-kv"><span>По счёту<b>{rubk(sum(rows.map((r) => (r.ln.total ?? 0) * r.ln.qty)))}</b></span></div>
+      </div>
+      <div className="small muted">Компания: WB выставит счёт на оплату по реквизитам (действует 7 дней), Кошелёк и лимиты номера не тратятся</div>
+      {pa.error && <div className="bad-t">{pa.error}</div>}
+      {rows.map((r) => <BuyLine key={r.ln.nm} r={r} pa={pa} setPay={() => {}} />)}
+    </div>
+  );
   const nowSum = sum(rows.filter((r) => r.payNow).map((r) => r.ln.now ?? 0));
   const postSum = sum(rows.filter((r) => !r.payNow).map((r) => (r.ln.total ?? 0) * r.ln.qty));
   const used = pa.postpaid_limit != null && pa.postpaid_left != null ? pa.postpaid_limit - pa.postpaid_left : null;
@@ -302,7 +339,8 @@ function BuyResult({ o, cancel, hold }: { o: BuyOrder; cancel: (o: BuyOrder) => 
       {o.name ?? `Товар ${o.nm}`} — {pcs(o.qty)}
       {st === "pending" && hold != null ? <> · <Held until={hold} /></>
         : (st === "pending" || st === "sending") && <span className="muted"> · <span className="spin" /> заказываю…</span>}
-      {st === "ok" && <span className="ok-t"> · заказано, {o.pay_now ? "оплачено Кошельком" : "оплата при получении"}</span>}
+      {st === "ok" && <span className="ok-t"> · заказано, {o.company_id ? "WB выставил счёт — оплата по реквизитам"
+        : o.pay_now ? "оплачено Кошельком" : "оплата при получении"}</span>}
       {(st === "error" || st === "unknown") && o.error && <div className="small">{o.error}</div>}
       {o.cancel_state === "pending" && (hold != null ? <div className="small"><Held until={hold} /></div>
         : <div className="small muted"><span className="spin" /> Отменяю…</div>)}
@@ -313,7 +351,7 @@ function BuyResult({ o, cancel, hold }: { o: BuyOrder; cancel: (o: BuyOrder) => 
   );
 }
 
-function Results({ ids, all, opts, onClose }: { ids: number[]; all: Account[]; opts: PickupPoint[]; onClose: () => void }) {
+function Results({ ids, all, opts, onClose }: { ids: number[]; all: Buyer[]; opts: PickupPoint[]; onClose: () => void }) {
   const qc = useQueryClient();
   const done = (o: BuyOrder) => FINAL.includes(o.status) && o.cancel_state !== "pending";
   const q = useQuery({ queryKey: ["buy", ids.join()], queryFn: () => api<BuyOrder[]>(`/order/status?${ids.map((i) => `ids=${i}`).join("&")}`),
@@ -324,13 +362,14 @@ function Results({ ids, all, opts, onClose }: { ids: number[]; all: Account[]; o
   const okN = list.filter((o) => o.status === "ok").length;
   const [msg, setMsg] = useState("");
   useEffect(() => { if (finished) qc.invalidateQueries({ queryKey: ["accounts"] }); }, [finished, okN]);
+  const who = (o: BuyOrder) => all.find((x) => isBuyer(x, o.account_id, o.company_id));
   const cancel = async (o: BuyOrder) => {
-    const a = all.find((x) => x.id === o.account_id);
+    const a = who(o);
     if (!window.confirm(`Отменить заказ «${o.name ?? o.nm}» (${pcs(o.qty)}) на аккаунте ${a?.title ?? ""}?`)) return;
     setMsg("");
     try { await api("/order/cancel", { method: "POST", body: { id: o.id } }); await q.refetch(); } catch (e) { setMsg(err(e)); }
   };
-  const accIds = [...new Set(list.map((o) => o.account_id))];
+  const accIds = [...new Set(list.map((o) => (o.company_id ? -o.company_id : o.account_id)))];
   const hold = useHold("money");
   const waiting = hold != null && list.some((o) => o.status === "pending" || o.cancel_state === "pending");
   return (
@@ -340,8 +379,8 @@ function Results({ ids, all, opts, onClose }: { ids: number[]; all: Account[]; o
         : <>Заказано {okN} из {ids.length}{okN === ids.length && <span className="ok-t"> ✓</span>}</>}</h2>
       <div className="cert-sum">
         {accIds.map((id) => {
-          const a = all.find((x) => x.id === id);
-          const mine = list.filter((o) => o.account_id === id);
+          const mine = list.filter((o) => (o.company_id ? -o.company_id : o.account_id) === id);
+          const a = mine[0] && who(mine[0]);
           const pvz = opts.find((p) => p.id === mine[0]?.pvz_id);
           return (
             <div key={String(id)} className="card sm">
@@ -366,7 +405,7 @@ const badItems = (e: unknown): Bad | null => {
   return d?.code === "bad_items" && d.items ? d.items : null;
 };
 
-function Wizard({ all, onClose }: { all: Account[]; onClose: () => void }) {
+function Wizard({ all, onClose }: { all: Buyer[]; onClose: () => void }) {
   const [step, setStep] = useState(1);
   const [picked, setPicked] = useState<number[]>([]);
   const [prods, setProds] = useState<ProductCard[]>([]);
@@ -381,36 +420,41 @@ function Wizard({ all, onClose }: { all: Account[]; onClose: () => void }) {
   const [busy, setBusy] = useState(false);
   const [ids, setIds] = useState<number[] | null>(null);
   const accs = all.filter((a) => picked.includes(a.id));
-  const has = (a: Account) => prods.some((p) => (qty[p.nm]?.[a.id] ?? 0) > 0);
+  const has = (a: Buyer) => prods.some((p) => (qty[p.nm]?.[a.id] ?? 0) > 0);
   const buyers = accs.filter(has);
   const skipped = accs.filter((a) => !has(a));
-  const lines = buyers.flatMap((a) => prods.filter((p) => (qty[p.nm]?.[a.id] ?? 0) > 0)
-    .map((p) => ({ account_id: a.id, nm: p.nm, qty: qty[p.nm][a.id], pvz_id: pvzOf[a.id] })));
+  const lines: Req[] = buyers.flatMap((a) => prods.filter((p) => (qty[p.nm]?.[a.id] ?? 0) > 0)
+    .map((p) => ({ bid: a.id, account_id: a.acc, ...(a.company ? { company_id: a.company.id } : {}), nm: p.nm,
+      qty: qty[p.nm][a.id], pvz_id: pvzOf[a.id] })));
+  const api_ = ({ bid: _, ...ln }: Req) => ln;  // ключ мастера серверу не нужен
   const pvzSet = buyers.filter((a) => pvzOf[a.id]).length;
 
   const preview = async () => {
     setPrev(null); setPrevErr(""); setServer({}); setPlaceErr(null);
     try {
-      const { id, result } = await runQuote<Preview>("/order/preview", { lines });
+      const { id, result } = await runQuote<Preview>("/order/preview", { lines: lines.map(api_) });
       setPrev({ id, data: result });
     } catch (e) { setPrevErr(err(e)); }
   };
   const plans = prev ? plan(buyers, lines, prev.data, pay, server, Object.fromEntries(prods.map((p) => [p.nm, p.name]))) : [];
   const rows = plans.flatMap((p) => p.rows.map((r) => ({ a: p.a, r })));
   const ready = rows.filter(({ r }) => !r.why);
-  const nowSum = sum(ready.filter(({ r }) => r.payNow).map(({ r }) => r.ln.now ?? 0));
-  const postSum = sum(ready.filter(({ r }) => !r.payNow).map(({ r }) => (r.ln.total ?? 0) * r.ln.qty));
+  const nowSum = sum(ready.filter(({ a, r }) => !a.company && r.payNow).map(({ r }) => r.ln.now ?? 0));
+  const postSum = sum(ready.filter(({ a, r }) => !a.company && !r.payNow).map(({ r }) => (r.ln.total ?? 0) * r.ln.qty));
+  const billSum = sum(ready.filter(({ a }) => a.company).map(({ r }) => (r.ln.total ?? 0) * r.ln.qty));  // 🏢 по счёту
 
   const place = async () => {
     setBusy(true); setPlaceErr(null);
-    const items = ready.map(({ a, r }) => ({ account_id: a.id, nm: r.ln.nm, qty: r.ln.qty, pvz_id: r.ln.pvz_id, pay_now: r.payNow }));
+    const bids = ready.map(({ a }) => a.id);
+    const items = ready.map(({ a, r }) => ({ account_id: a.acc, ...(a.company ? { company_id: a.company.id } : {}), nm: r.ln.nm,
+      qty: r.ln.qty, pvz_id: r.ln.pvz_id, pay_now: !a.company && r.payNow }));
     try {
       const res = await api<{ ids: number[] }>("/order/place", { method: "POST",
-        body: { quote_id: prev!.id, items, confirm_total: nowSum + postSum } });
+        body: { quote_id: prev!.id, items, confirm_total: nowSum + postSum + billSum } });
       setIds(res.ids);
     } catch (e) {
       const bad = badItems(e);
-      if (bad) setServer(Object.fromEntries(bad.map((b) => [key(items[b.row].account_id, items[b.row].nm), b.error])));
+      if (bad) setServer(Object.fromEntries(bad.map((b) => [key(bids[b.row], items[b.row].nm), b.error])));
       else setPlaceErr({ text: err(e), refresh: e instanceof ApiError && e.status === 409 });
     } finally { setBusy(false); }
   };
@@ -452,7 +496,7 @@ function Wizard({ all, onClose }: { all: Account[]; onClose: () => void }) {
         <span className="small muted">
           {step < 4 ? hint : prev && <>
             {ready.length < rows.length && <b className="up-t">Будет заказано {ready.length} из {rows.length} товаров · </b>}
-            К оплате сейчас: {rubk(nowSum)} · при получении: {rubk(postSum)}</>}
+            К оплате сейчас: {rubk(nowSum)} · при получении: {rubk(postSum)}{billSum > 0 && <> · по счёту: {rubk(billSum)}</>}</>}
         </span>
         <span className="wiz-btns">
           {step === 1 ? <button className="link" onClick={onClose}>Отмена</button>
@@ -462,7 +506,7 @@ function Wizard({ all, onClose }: { all: Account[]; onClose: () => void }) {
           {step === 3 && <button className="btn" disabled={pvzSet < buyers.length}
             onClick={() => { setStep(4); preview(); }}>Далее</button>}
           {step === 4 && <button className="btn" disabled={!prev || !ready.length || busy} onClick={place}>
-            Заказать · {rubk(nowSum + postSum)}</button>}
+            Заказать · {rubk(nowSum + postSum + billSum)}</button>}
         </span>
       </div>
     </>
@@ -472,6 +516,6 @@ function Wizard({ all, onClose }: { all: Account[]; onClose: () => void }) {
 export default function OrderModal({ open, onClose, all }: { open: boolean; onClose: () => void; all: Account[] }) {
   if (!open) return null;
   // фон не закрывает: случайный клик мимо стёр бы набранный заказ
-  // 🏢 номер с выключенной «Розницей» розничным покупателем не предлагаем
-  return <Modal label="Заказать товар" onClose={onClose} wide><Wizard all={all.filter((a) => a.retail !== false)} onClose={onClose} /></Modal>;
+  // 🏢 покупатели — номера с «Розницей» и включённые компании (номер без розницы — только своими компаниями)
+  return <Modal label="Заказать товар" onClose={onClose} wide><Wizard all={buyersOf(all)} onClose={onClose} /></Modal>;
 }

@@ -995,7 +995,7 @@ async def payments(ids: list[int] = Query(..., max_length=500), u=Depends(user),
 QUOTE_TTL = timedelta(hours=1)  # старые запросы к worker'у чистим при создании нового
 PREVIEW_TTL = timedelta(minutes=10)  # заказ — только по свежему предпросмотру
 ORDER_QTY_MAX = 100
-AUTOBUY_FIELDS = ("id", "account_id", "nm", "name", "qty", "pvz_id", "pay_now", "price_ok", "total", "final", "status",
+AUTOBUY_FIELDS = ("id", "account_id", "company_id", "nm", "name", "qty", "pvz_id", "pay_now", "price_ok", "total", "final", "status",
                 "error", "rids", "cancel_state", "cancel_error", "cancel_at", "created_at", "done_at")
 NOT_RETAIL = "номер не розничный покупатель — включите «Розницу» во вкладке «Компании»"
 CANCEL_CHECK = timedelta(minutes=20)  # бесплатную WB проводит за ~40–50 с, платную (в пути / в ПВЗ) — дольше 10 мин (24.11)
@@ -1026,6 +1026,7 @@ async def order_product(body: ProductIn, u=Depends(user), s=Depends(db)):
 
 class OrderLine(BaseModel):
     account_id: int
+    company_id: int | None = None  # 🏢 покупатель — компания номера (заказ «по счёту»)
     nm: int = Field(gt=0)
     qty: int = Field(ge=1, le=ORDER_QTY_MAX)
     pvz_id: int = Field(gt=0)
@@ -1036,21 +1037,31 @@ class PreviewIn(BaseModel):
 
 
 def _dupes(lines) -> bool:
-    keys = [(ln.account_id, ln.nm) for ln in lines]
+    keys = [(ln.account_id, ln.company_id, ln.nm) for ln in lines]
     return len(keys) != len(set(keys))
+
+
+async def _buyer_errors(s, lines, mine: dict, accounts: bool = True) -> None:
+    """Покупатель строки: номер — только с «Розницей»; компания — его же и включённая. Иначе 404 / 422.
+    accounts=False (заказ) — номера проверяет _place_errors построчно, здесь только компании."""
+    if accounts and any(ln.account_id not in mine for ln in lines):
+        raise HTTPException(404, "нет такого аккаунта")
+    if accounts and any(not mine[ln.account_id].retail for ln in lines if ln.company_id is None):
+        raise HTTPException(422, NOT_RETAIL)
+    want = {ln.company_id for ln in lines if ln.company_id is not None}
+    have = {c.id: c for c in await repo.companies(s, {ln.account_id for ln in lines}, enabled_only=True)}
+    if any(ln.company_id is not None and (ln.company_id not in have or have[ln.company_id].account_id != ln.account_id)
+           for ln in lines) or not want <= set(have):
+        raise HTTPException(422, "компания скрыта или не найдена — проверьте вкладку «Компании»")
 
 
 @app.post("/api/order/preview", status_code=201, dependencies=MONEY)
 async def order_preview(body: PreviewIn, u=Depends(user), s=Depends(db)):
     """Цены на ПВЗ, деньги и лимиты аккаунтов — запрос worker'у (одна строка = один заказ: артикул на аккаунт)."""
-    mine = {a.id: a for a in await repo.user_accounts(s, u.telegram_id)}
-    if any(ln.account_id not in mine for ln in body.lines):
-        raise HTTPException(404, "нет такого аккаунта")
-    if any(not mine[ln.account_id].retail for ln in body.lines):
-        raise HTTPException(422, NOT_RETAIL)
+    await _buyer_errors(s, body.lines, {a.id: a for a in await repo.user_accounts(s, u.telegram_id)})
     if _dupes(body.lines):
         raise HTTPException(422, "товар повторяется у аккаунта — укажите количество в одной строке")
-    return await _new_quote(s, u, "preview", {"lines": [ln.model_dump() for ln in body.lines]})
+    return await _new_quote(s, u, "preview", {"lines": [ln.model_dump(exclude_none=True) for ln in body.lines]})
 
 
 @app.get("/api/order/quote/{quote_id:int}")
@@ -1120,16 +1131,22 @@ async def _preview_for_place(s, u: Viewer, quote_id: int) -> dict:
 
 
 def _place_errors(items, preview: dict, accs: dict, open_pvz: set) -> list[dict]:
-    """Строки заказа против предпросмотра (цены — с сервера, клиенту не верим). → [{row, error}]."""
-    by_acc = {a["account_id"]: a for a in preview.get("accounts") or []}
+    """Строки заказа против предпросмотра (цены — с сервера, клиенту не верим). → [{row, error}].
+    🏢 строка компании: только цена и ПВЗ — денег, постоплаты и Кошелька у заказа «по счёту» нет."""
+    by_acc = {(a["account_id"], a.get("company_id")): a for a in preview.get("accounts") or []}
     bad, need = [], {}
     for i, it in enumerate(items):
-        acc, pa = accs.get(it.account_id), by_acc.get(it.account_id) or {}
+        acc, pa = accs.get(it.account_id), by_acc.get((it.account_id, it.company_id)) or {}
         line = next((ln for ln in pa.get("lines") or [] if (ln["nm"], ln["pvz_id"], ln["qty"]) == (it.nm, it.pvz_id, it.qty)), None)
         err = ("нет такого аккаунта" if acc is None else "аккаунт не активен — нужен вход" if acc.status != "active"
-               else NOT_RETAIL if not acc.retail
+               else NOT_RETAIL if not acc.retail and it.company_id is None
                else pa.get("error") or ("заказ отличается от предпросмотра — обновите" if line is None else line.get("error"))
-               or ("ПВЗ закрыт — выберите другой" if it.pvz_id not in open_pvz else None)
+               or ("ПВЗ закрыт — выберите другой" if it.pvz_id not in open_pvz else None))
+        if err or it.company_id is not None:
+            if err:
+                bad.append({"row": i, "error": err})
+            continue
+        err = (None
                or ("только «Оплатить сейчас»: аккаунту доступна лишь предоплата" if not it.pay_now and pa.get("prepaid_only") else None)
                or ("Кошелёк заблокирован — оплата им недоступна" if it.pay_now and pa.get("wallet_blocked") else None))
         if err:
@@ -1138,8 +1155,8 @@ def _place_errors(items, preview: dict, accs: dict, open_pvz: set) -> list[dict]
         sums = need.setdefault(it.account_id, {"now": 0, "post": 0, "rows": []})
         sums["now" if it.pay_now else "post"] += line["now"] if it.pay_now else line["total"] * it.qty
         sums["rows"].append(i)
-    for aid, sums in need.items():  # деньги и постоплата — на весь аккаунт
-        pa = by_acc[aid]
+    for aid, sums in need.items():  # деньги и постоплата — на весь аккаунт (только розничные строки)
+        pa = by_acc[(aid, None)]
         if sums["post"] > (pa.get("postpaid_left") or 0):
             bad += [{"row": i, "error": f"лимит постоплаты: доступно {_rub(pa.get('postpaid_left'))}, нужно {_rub(sums['post'])}"}
                     for i in sums["rows"] if not items[i].pay_now]
@@ -1166,21 +1183,24 @@ async def order_place(body: PlaceIn, u=Depends(user), s=Depends(db)):
         w.id.in_({it.account_id for it in body.items}), w.user_id == u.telegram_id).order_by(w.id).with_for_update())}
     open_pvz = set(await s.scalars(select(models.PickupPoint.id).where(
         models.PickupPoint.id.in_({it.pvz_id for it in body.items}), models.PickupPoint.closed_at.is_(None))))
+    await _buyer_errors(s, body.items, accs, accounts=False)
     if bad := _place_errors(body.items, preview, accs, open_pvz):
         raise HTTPException(422, {"code": "bad_items", "items": bad})
     a = models.AutobuyOrder
-    busy = set((await s.execute(select(a.account_id, a.nm).where(
+    busy = set((await s.execute(select(a.account_id, a.company_id, a.nm).where(
         a.account_id.in_(accs), a.status.in_(("pending", "sending"))))).all())
-    if any((it.account_id, it.nm) in busy for it in body.items):
+    if any((it.account_id, it.company_id, it.nm) in busy for it in body.items):
         raise HTTPException(409, "этот товар уже заказывается на аккаунт — дождитесь итога")
-    lines = {(ln["nm"], ln["pvz_id"], ln["qty"], x["account_id"]): ln
+    lines = {(ln["nm"], ln["pvz_id"], ln["qty"], x["account_id"], x.get("company_id")): ln
              for x in preview["accounts"] for ln in x.get("lines") or []}
-    picked = [(it, lines[(it.nm, it.pvz_id, it.qty, it.account_id)]) for it in body.items]
-    total = sum(ln["now"] if it.pay_now else ln["total"] * it.qty for it, ln in picked)
+    picked = [(it, lines[(it.nm, it.pvz_id, it.qty, it.account_id, it.company_id)]) for it in body.items]
+    # 🏢 строка компании — счёт на total × qty (оплачивает бухгалтерия компании), «сейчас» у неё не бывает
+    total = sum(ln["now"] if it.pay_now and it.company_id is None else ln["total"] * it.qty for it, ln in picked)
     if total != body.confirm_total:
         raise HTTPException(409, f"сумма изменилась: {_rub(total)} — обновите и подтвердите заново")
-    rows = [a(user_id=u.telegram_id, account_id=it.account_id, uid="d" + uuid.uuid4().hex, nm=it.nm, name=ln.get("name"),
-              qty=it.qty, pvz_id=it.pvz_id, pay_now=it.pay_now, price_ok=ln["total"]) for it, ln in picked]
+    rows = [a(user_id=u.telegram_id, account_id=it.account_id, company_id=it.company_id, uid="d" + uuid.uuid4().hex,
+              nm=it.nm, name=ln.get("name"), qty=it.qty, pvz_id=it.pvz_id, pay_now=it.pay_now and it.company_id is None,
+              price_ok=ln["total"]) for it, ln in picked]
     s.add_all(rows)
     await s.commit()
     return {"ids": [r.id for r in rows], "total": total}
@@ -1188,8 +1208,10 @@ async def order_place(body: PlaceIn, u=Depends(user), s=Depends(db)):
 
 def _can_cancel(o: models.AutobuyOrder) -> bool:
     """Заказ мог создаться (ok, unknown, error после status 3/4/7 — у них есть rids), отмену не просили или она не
-    прошла (error). asked — повтор бесполезен: WB заявку принял, склад уже собирает."""
-    return bool(o.rids) and o.status in ("ok", "error", "unknown") and o.cancel_state in (None, "error")
+    прошла (error). asked — повтор бесполезен: WB заявку принял, склад уже собирает.
+    🏢 заказ компании (счёт) — отмена своя (offer/cancel), не reject."""
+    return (bool(o.rids) and o.status in ("ok", "error", "unknown") and o.cancel_state in (None, "error")
+            and o.company_id is None)
 
 
 async def _cancel_outcome(s, account_id: int | None, rids: list[str], at: datetime | None) -> dict:

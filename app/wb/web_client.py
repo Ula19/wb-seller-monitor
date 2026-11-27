@@ -226,8 +226,9 @@ class WebClient:
                 break
         return list(products.values())
 
-    async def fetch_b2b_items(self, nm_ids: list[int], account: str) -> list | None:
+    async def fetch_b2b_items(self, nm_ids: list[int], account: str, dest: int | None = None) -> list | None:
         """Бизнес-цены: сырые товары detail под куками аккаунта `account` (пачками по 100).
+        dest — регион ПВЗ (🏢 заказ на компанию: цена и склады зависят от него), иначе мониторинговый.
 
         None — куки пусты или любой запрос упал.
         """
@@ -236,7 +237,7 @@ class WebClient:
         items: list = []
         for i in range(0, len(nm_ids), DETAIL_CHUNK):
             chunk = nm_ids[i:i + DETAIL_CHUNK]
-            params = {**B2B_PARAMS, "nm": ";".join(map(str, chunk))}
+            params = {**B2B_PARAMS, **({"dest": dest} if dest is not None else {}), "nm": ";".join(map(str, chunk))}
             got = await self._get_items(f"веб-бизнес-detail ({len(chunk)} шт.)",
                                         DETAIL_URL, params, account=account)
             if got is None:

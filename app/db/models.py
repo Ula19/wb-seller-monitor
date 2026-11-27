@@ -475,6 +475,9 @@ class AutobuyOrder(Base):
     user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.telegram_id", ondelete="CASCADE"))
     account_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("wb_accounts.id", ondelete="SET NULL"), nullable=True, index=True)
+    # 🏢 заказ на компанию номера «по счёту» (pay_type 18); null — розничный заказ самого номера
+    company_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("wb_companies.id", ondelete="SET NULL"), nullable=True)
     uid: Mapped[str] = mapped_column(String(40), unique=True)  # order_uid для WB — до отправки, повтор только с ним
     nm: Mapped[int] = mapped_column(BigInteger)
     name: Mapped[str | None] = mapped_column(String(512), nullable=True)

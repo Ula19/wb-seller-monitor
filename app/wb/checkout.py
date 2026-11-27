@@ -43,6 +43,13 @@ MSK = timezone(timedelta(hours=3))
 STATUS_FAIL = {3: "оплата не прошла", 4: "WB просит подтвердить оплату картой (3DS)", 7: "WB просит верификацию"}
 NO_ANSWER = "WB не ответил — проверьте заказы аккаунта"
 NOT_PAID = "заказ создан, но оплату WB не подтвердил — проверьте заказы аккаунта"
+# 🏢 заказ на компанию номера «по счёту» (SCOUT 2026-11-24, HAR business_companys 24.11): pay_type 18, без постоплаты
+B2B_PAY_TYPE = 18
+B2B_FLAGS = 4194339  # у розницы 4268067: в бизнесе нет битов 8192 и 65536
+B2B_GRADE_URL = "https://user-grade.wildberries.ru/api/v1/b2b-suppliers"  # уходит в тело целиком (user_grade_b2b)
+OFFER_URL = "https://legal.wildberries.ru/obshchie-usloviya-realizatsii-tovarov-yuridicheskim-litsam-na-sayte-wildberries/country/ru/lang/ru/"
+B2B_ORDERS_URL = (X + "/api/v2/orders?limit=100&exclude_delivery_types=777,778&legal_old_id={}"
+                  "&exclude_b2b=false&offset=0")  # заказы компании — отдельным запросом на каждую
 
 
 def parse_nm(text) -> int | None:
@@ -127,7 +134,15 @@ def prices(product: dict, wallet_pct: int) -> tuple[int, int]:
     return total, total * (100 - wallet_pct) // 100 // 100 * 100
 
 
-def _item(p: dict, size: dict, positions: list, total: int, final: int, now: datetime) -> dict:
+def b2b_price(product: dict) -> int:
+    """🏢 Цена за штуку для компании, коп.: бизнес-цена detail (b2b=true) — sizes[].price.product (HAR: 18 200)."""
+    pr = (product["sizes"][0].get("price") or {})
+    if not pr.get("product"):
+        raise ValueError("у товара нет цены")
+    return pr["product"]
+
+
+def _item(p: dict, size: dict, positions: list, total: int, final: int, now: datetime, b2b: bool = False) -> dict:
     """Товар заказа — поля как у сайта, без аналитики (targetUrl, analytics, actualStimulusList, cashback_amount)."""
     pr = size.get("price") or {}
     stocks = _stocks(size)
@@ -135,8 +150,8 @@ def _item(p: dict, size: dict, positions: list, total: int, final: int, now: dat
         "chrt_id": size.get("optionId"), "nm_id": p["id"], "subject_id": p.get("subjectId"), "kind_id": p.get("kindId") or 0,
         "price": pr.get("basic"), "total_price": total, "brand": p.get("brand"), "name": p.get("name"),
         "size": size.get("origName") or "0", "positions": positions, "logistic_cost": pr.get("logistics") or 0,
-        "basic_price": pr.get("basic"), "product_cost": total - (pr.get("logistics") or 0), "final_price": final,
-        "flags": 0, "color": ((p.get("colors") or [{}])[0]).get("name") or "", "quantity": len(positions),
+        "basic_price": pr.get("basic"), "product_cost": total if b2b else total - (pr.get("logistics") or 0),
+        "final_price": final, "flags": 1 if b2b else 0, "color": ((p.get("colors") or [{}])[0]).get("name") or "", "quantity": len(positions),
         "subjectParentId": p.get("subjectParentId"), "storeId": positions[0]["wh"], "timestamp": int(now.timestamp()),
         "dtype": size.get("dtype"), "payload": {"payload": size.get("payload")}, "reviewRating": p.get("reviewRating"),
         "feedbacks": p.get("feedbacks"), "isC2C": False, "viewFlags": p.get("viewFlags"), "isWeightProduct": False,
@@ -160,27 +175,45 @@ def _delivery(pvz: dict, phone: str | None, name: str | None, uid: str) -> dict:
 
 
 def build_order(*, product: dict, grade: dict, pvz: dict, phone: str | None, name: str | None, qty: int,
-                pay_now: bool, uid: str, sticker: str, sign=None, now: datetime | None = None) -> tuple[dict, int, int]:
+                pay_now: bool, uid: str, sticker: str, sign=None, now: datetime | None = None,
+                company: dict | None = None, b2b_grade: dict | None = None) -> tuple[dict, int, int]:
     """Тело api/v10/order: один товар (detail с dest этого ПВЗ, первый размер), qty штук. → (тело, total, final) за
-    штуку в копейках. ValueError — тело не собрать (нет цены / остатка / подписи ПВЗ)."""
+    штуку в копейках. ValueError — тело не собрать (нет цены / остатка / подписи ПВЗ).
+    🏢 company ({sign, uuid, old_id}) — заказ на компанию «по счёту»: product — бизнес-detail, b2b_grade — свежий
+    b2b-suppliers целиком; отличия от розницы — строго по HAR 24.11, остальное как в рознице."""
     if qty < 1:
         raise ValueError("количество должно быть больше нуля")
     now = now or datetime.now(MSK)
     size = (product.get("sizes") or [{}])[0]
-    total, final = prices(product, parse_grade(grade) or 0)
+    if company:
+        if not company.get("sign") or not company.get("uuid"):
+            raise ValueError("у компании нет подписи WB — обновите список компаний")
+        if not b2b_grade:
+            raise ValueError("нет b2b-suppliers")
+        total = final = b2b_price(product)
+    else:
+        total, final = prices(product, parse_grade(grade) or 0)
     positions = _positions(size, qty, uid, sticker, total, sign, now)
+    pay_type = B2B_PAY_TYPE if company else PAY_TYPE
+    payment = ({"pay_type": B2B_PAY_TYPE, "pay_mode": PAY_NOW, "currency": "RUB"} if company else
+               {"pay_type": PAY_TYPE, "pay_mode": PAY_NOW if pay_now else PAY_LATER, "currency": "RUB", "priority_order": None})
     order = {"order_uid": uid, "lang": "ru", "locale": "ru", "app_type": 1,
-             "items": [_item(product, size, positions, total, final, now)],
-             "payment": {"pay_type": PAY_TYPE, "pay_mode": PAY_NOW if pay_now else PAY_LATER, "currency": "RUB",
-                         "priority_order": None},
-             "delivery": _delivery(pvz, phone, name, uid), "logistic_with": True, "return_fee_new": True,
-             "pay_type": PAY_TYPE, "loyalty_card": None, "substitution_article_discounts": None, "promo_discounts": [],
+             "items": [_item(product, size, positions, total, final, now, b2b=bool(company))],
+             "payment": payment,
+             "delivery": _delivery(pvz, phone, name, uid), "logistic_with": not company, "return_fee_new": True,
+             "pay_type": pay_type, "loyalty_card": None, "substitution_article_discounts": None, "promo_discounts": [],
              "promocode": None, "bypass_balance": True}
+    if company:
+        order["b2b"] = {"sign": company["sign"], "id": company["uuid"], "old_id": company["old_id"]}
+        order["offer_document_url"] = OFFER_URL
     wbpay = {"return_url": f"{WWW}/lk/orders/thankyou?orderId={uid}&ext=1&wbx=1",
              "token": {"card_id": "", "source_id": ""}, "additional": {"schedule_hash": "", "source": "", "product_type": 0}}
     # ponytail: сайт дописывает ещё wbClub, isPremium и т.п. — WB принял и без них (живые заказы 19.11)
     user_grade = {**grade["payload"], "sign": grade.get("sign"), "sign_version": grade.get("sign_version"),
                   "expire": int(now.timestamp() * 1000) + GRADE_TTL_MS}
+    if company:  # порядок верха как у сайта: order, wbpay, user_grade_b2b, user_grade, flags
+        return {"order": order, "wbpay": wbpay, "user_grade_b2b": b2b_grade, "user_grade": user_grade,
+                "flags": B2B_FLAGS}, total, final
     return {"order": order, "wbpay": wbpay, "user_grade": user_grade, "flags": ORDER_FLAGS}, total, final
 
 
@@ -194,6 +227,12 @@ async def fetch_grade(state: dict, proxy: str | None) -> dict:
     """Ответ grade целиком — он идёт в тело заказа (подписан WB) и даёт % Кошелька и остаток постоплаты."""
     async with _client(state, proxy) as (call, auth, _):
         return await call("GET", GRADE_URL, headers=auth)
+
+
+async def fetch_b2b_grade(state: dict, proxy: str | None) -> dict:
+    """🏢 b2b-suppliers номера (только Bearer) — в тело заказа компании целиком, свежий перед каждой отправкой."""
+    async with _client(state, proxy) as (call, auth, _):
+        return await call("GET", B2B_GRADE_URL, headers=auth)
 
 
 def _rids(body: dict) -> list[str]:
@@ -219,7 +258,7 @@ async def _send(call, headers, sticker, body):
         return None
 
 
-async def place_order(state: dict, proxy: str | None, uid: str, make_body, sleep=None) -> dict:
+async def place_order(state: dict, proxy: str | None, uid: str, make_body, sleep=None, legal_old_id: int | None = None) -> dict:
     """Заказ: make_body(стикер) → тело (uid в нём тот же). → {"status": ok | error | unknown, "error": текст, "rids"}.
     error — точный текст WB (поле error) или наш; unknown — заказ мог создаться, не повторять, проверить заказы.
     ProxyDown — до WB не дошли (заказа нет); Unauthorized/NoBearer — нужен вход; ValueError из make_body — тело не
@@ -245,12 +284,16 @@ async def place_order(state: dict, proxy: str | None, uid: str, make_body, sleep
                     "error": r.get("error") or f"WB не принял заказ: {json.dumps(r, ensure_ascii=False)[:300]}"}
         else:
             return {"status": "error", "rids": _rids(body), "error": "WB слишком много раз попросил пересохранить заказ"}
+        if legal_old_id is not None:  # 🏢 по счёту: денег не списываем — «оплачен» тут не ждём
+            return await _confirm(call, auth, uid, sticker, _rids(body), False, sleep, legal_old_id)
         pay_now = body["order"]["payment"]["pay_mode"] == PAY_NOW
         return await _confirm(call, auth, uid, sticker, _rids(body), pay_now, sleep)
 
 
-async def _confirm(call, auth, uid, sticker, rids, pay_now, sleep) -> dict:
-    """Опрос v3/status до ~30 с; нет ясного ответа — ищем uid в списке заказов. Ничего не шлём повторно."""
+async def _confirm(call, auth, uid, sticker, rids, pay_now, sleep, legal_old_id: int | None = None) -> dict:
+    """Опрос v3/status до ~30 с; нет ясного ответа — ищем uid в списке заказов. Ничего не шлём повторно.
+    🏢 legal_old_id — заказ компании: v3/status result 1 = «счёт выставлен» (HAR 24.11) — это и есть успех;
+    в списке ищем заказами компании (legal_old_id)."""
     for i in range(STATUS_TRIES):
         if i:
             await sleep(STATUS_SEC)
@@ -258,14 +301,15 @@ async def _confirm(call, auth, uid, sticker, rids, pay_now, sleep) -> dict:
             d = await call("GET", STATUS_URL.format(uid, sticker), headers=auth) or {}
         except Exception:  # не ответил — спросим ещё
             continue
-        if d.get("result") == 0:
+        if d.get("result") == 0 or (legal_old_id is not None and d.get("result") == 1):
             return {"status": "ok", "error": None, "rids": rids}
         if d.get("result") in STATUS_FAIL:
             text = STATUS_FAIL[d["result"]] + (f": {d['error']}" if d.get("error") else "")
             return {"status": "error", "error": text, "rids": rids}
         # 1 — ждать; 2 «order not found» — заказа пока не видно (мог ещё не дойти) — спрашиваем дальше
     try:
-        orders = (await call("GET", ORDERS_URL, headers=auth) or {}).get("data") or []
+        url = ORDERS_URL if legal_old_id is None else B2B_ORDERS_URL.format(legal_old_id)
+        orders = (await call("GET", url, headers=auth) or {}).get("data") or []
     except Exception:
         orders = []
     mine = next((o for o in orders if o.get("id") == uid), None)
@@ -380,6 +424,30 @@ if __name__ == "__main__":  # self-check: тело как у сайта (HAR Я�
         "dest_id": -531264, "sign": "9yoinOGROqo=", "sign_v2": "79nDjen0sJQ=", "locale": "ru", "phone_add": None,
         "items": {UID: {"delivery_type": 6, "cost": 0}}}
     kw = dict(product=P, grade=G, pvz=PVZ, phone="+7 999 000-11-22", name="Тест", uid=UID, sticker="ebA", now=NOW)
+    # 🏢 компания «по счёту» (HAR business_companys 24.11): отличия от розницы — и только они
+    CO = {"sign": "+F4Y=", "uuid": "37664a45", "old_id": 272487}
+    BG = {"user_id": 1, "timestamp": 1, "version": 1, "default_company_spp": {"spp": 0, "sign": "x"}, "sign": "BG"}
+    PB = {**P, "sizes": [{**P["sizes"][0], "price": {"basic": 22500, "product": 18200, "logistics": 0, "return": 0}}]}
+    bb, bt, bf = build_order(**{**kw, "product": PB}, qty=1, pay_now=True, company=CO, b2b_grade=BG)
+    rb, _, _ = build_order(**{**kw, "product": PB}, qty=1, pay_now=True)
+    assert (bt, bf) == (18200, 18200) and list(bb) == ["order", "wbpay", "user_grade_b2b", "user_grade", "flags"]
+    assert bb["user_grade_b2b"] == BG and bb["flags"] == 4194339 and bb["user_grade"] == rb["user_grade"]
+    ob, orr = bb["order"], rb["order"]
+    assert ob["payment"] == {"pay_type": 18, "pay_mode": 10, "currency": "RUB"} and ob["pay_type"] == 18
+    assert ob["b2b"] == {"sign": "+F4Y=", "id": "37664a45", "old_id": 272487} and ob["offer_document_url"] == OFFER_URL
+    assert (ob["bypass_balance"], ob["logistic_with"], ob["delivery"]["tin"], bb["wbpay"]["token"]["card_id"]) == (True, False, "0", "")
+    ib, ir = ob["items"][0], orr["items"][0]
+    assert (ib["flags"], ib["price"], ib["basic_price"], ib["total_price"], ib["product_cost"], ib["final_price"]) == \
+        (1, 22500, 22500, 18200, 18200, 18200), ib
+    assert {k: v for k, v in ib.items() if k not in ("flags", "final_price")} == \
+        {k: v for k, v in ir.items() if k not in ("flags", "final_price")}  # остальное — как в рознице
+    assert {k for k in ob if ob[k] != orr.get(k)} == {"items", "payment", "pay_type", "logistic_with", "b2b", "offer_document_url"}
+    for bad in ({**CO, "sign": None}, {**CO, "uuid": ""}):
+        try:
+            build_order(**kw, qty=1, pay_now=False, company=bad, b2b_grade=BG)
+            raise AssertionError("без подписи компании тело собралось")
+        except ValueError:
+            pass
     body, total, final = build_order(**kw, qty=1, pay_now=True)
     o = body["order"]
     assert (total, final) == (16700, 15600) and o["items"] == [SITE_ITEM], o["items"]
@@ -473,7 +541,8 @@ if __name__ == "__main__":  # self-check: тело как у сайта (HAR Я�
             async def request(self, method, url, **kw):
                 key = next(k for k, u in (("stick", STICK_URL), ("order", X + "/api/v10/order"),
                                           ("status", X + "/api/v3/status"), ("orders", ORDERS_URL), ("reject", REJECT_URL),
-                                          ("statuses", STATUSES_URL), ("paid", PAID_URL))
+                                          ("statuses", STATUSES_URL), ("paid", PAID_URL),
+                                          ("b2borders", B2B_ORDERS_URL.split("{")[0]))
                            if url.startswith(u))
                 sent.append((key, url, kw))
                 q = script.get(key) or []
@@ -502,8 +571,25 @@ if __name__ == "__main__":  # self-check: тело как у сайта (HAR Я�
             res = await place_order(st, None, UID, make, sleep=nap)
         return res, [k for k, *_ in sent], sent, stickers
 
+    async def b2b_order(**script):  # 🏢 заказ компании: v3/status result 1 = счёт выставлен
+        S, sent = session(**script)
+        with patch.object(account_api, "AsyncSession", S), patch.object(account_api, "web_proxy", lambda: None), \
+                patch.object(account_api, "RETRY_SEC", (0, 0)):
+            res = await place_order(st, None, UID, lambda stk: build_order(**{**kw, "sticker": stk}, qty=1, pay_now=False,
+                                    company=CO, b2b_grade=BG, sign=payment_signer(st))[0], sleep=nap, legal_old_id=CO["old_id"])
+        return res, [k for k, *_ in sent], sent
+
     async def main():
         rids = [f"ebA.{UID}.0.0", f"ebA.{UID}.0.1"]
+        res, keys, sent = await b2b_order(stick=[{"sticker": "eAl"}], order=[{"result": 0, "sticker": "eAl", "pricing_mismatch": False}],
+                                          status=[{"result": 1}])
+        assert res["status"] == "ok" and keys == ["stick", "order", "status"], (res, keys)
+        assert json.loads(sent[1][2]["data"])["order"]["b2b"]["old_id"] == 272487
+        # ответа статуса нет — ищем заказами КОМПАНИИ (legal_old_id), без проверки «оплачен»
+        res, keys, sent = await b2b_order(stick=[{"sticker": "eAl"}], order=[{"result": 0}], status=[RuntimeError("x")],
+                                          b2borders=[{"data": [{"id": UID, "rids": [{"uid": "eAl.x.0.0", "pay_state": 2}]}]}])
+        assert res == {"status": "ok", "error": None, "rids": ["eAl.x.0.0"]} and keys[-1] == "b2borders", (res, keys)
+        assert sent[-1][1] == B2B_ORDERS_URL.format(272487)
         # принят → статус «ждать» ×2 → готово
         res, keys, sent, _ = await order(stick=[{"sticker": "ebA"}], order=[{"result": 0, "sticker": "ebA"}],
                                          status=[{"result": 1}, {"result": 1}, {"result": 0}])
